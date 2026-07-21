@@ -44,15 +44,23 @@ export class AuthService {
   }
 
   /**
-   * Narrow, NODE_ENV-independent allowlist (see TEST_BYPASS_OTP_PHONES in
+   * Narrow, NODE_ENV-independent bypass (see TEST_BYPASS_OTP_PHONES in
    * env.js) — deliberately separate from _isDemoOtpEnabled so it is not
-   * affected by the hard `NODE_ENV === 'production'` block there. Only
-   * the exact phone numbers listed bypass real SMS; everything else about
-   * production behavior (Razorpay/Maps guards, error verbosity, etc.) is
-   * untouched.
+   * affected by the hard `NODE_ENV === 'production'` block there.
+   * Everything else about production behavior (Razorpay/Maps guards,
+   * error verbosity, etc.) is untouched.
+   *
+   * TEST_BYPASS_OTP_PHONES accepts either:
+   *   - a comma-separated allowlist of specific numbers, or
+   *   - the literal value '*' to bypass for ANY phone number.
+   * The '*' form only exists to unblock pre-launch development/testing
+   * before a real SMS provider is wired up (TWO_FACTOR_API_KEY) — it
+   * must be cleared once one is, since it lets anyone log in as any
+   * phone number registered on the platform without owning that phone.
    */
   _isTestBypassPhone(phone) {
     if (!env.TEST_BYPASS_OTP_PHONES) return false
+    if (env.TEST_BYPASS_OTP_PHONES.trim() === '*') return true
     const allowed = env.TEST_BYPASS_OTP_PHONES.split(',').map((p) => normalizePhoneForOtp(p.trim()));
     return allowed.includes(normalizePhoneForOtp(phone))
   }

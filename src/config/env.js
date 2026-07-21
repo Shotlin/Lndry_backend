@@ -65,12 +65,14 @@ const envSchema = z.object({
   ALLOW_DEMO_OTP: booleanFromEnv.default(false),
   DEMO_OTP_PHONE: z.string().optional(),
   DEMO_OTP_CODE: z.string().regex(/^\d{4,8}$/).default('123456'),
-  // Narrow, NODE_ENV-independent allowlist for testing real phone numbers on
-  // a production deployment that has no SMS provider configured yet.
+  // Narrow, NODE_ENV-independent bypass for testing phone numbers on a
+  // production deployment that has no SMS provider configured yet.
   // Unlike ALLOW_DEMO_OTP (hard-blocked whenever NODE_ENV=production), this
   // only affects the exact phone numbers listed here — every other
   // production safety guard stays intact. Comma-separated, e.g.
-  // "9876543210,9123456789". Empty/unset = no effect anywhere.
+  // "9876543210,9123456789" — or the literal "*" to bypass for any phone
+  // (pre-launch dev/testing only; clear this once a real SMS provider,
+  // TWO_FACTOR_API_KEY, is configured). Empty/unset = no effect anywhere.
   TEST_BYPASS_OTP_PHONES: z.string().optional(),
   ALLOW_ALL_PINCODES: booleanFromEnv.default(false),
 
