@@ -13,7 +13,10 @@ export const CLOUDINARY_DELIVERY_PROFILES = {
   icon: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 96, height: 96, crop: 'fill' }],
   thumb: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 240, height: 240, crop: 'fill' }],
   card: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 640, height: 640, crop: 'fill' }],
-  banner: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 1440, height: 720, crop: 'fill' }],
+  // gravity: 'auto' uses Cloudinary's content-aware cropping so a source
+  // image that isn't already exactly 2:1 doesn't get its headline text
+  // sliced off by a blind center-crop.
+  banner: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 1440, height: 720, crop: 'fill', gravity: 'auto' }],
   detail: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 1280, height: 1280, crop: 'limit' }],
   avatar: [{ ...DEFAULT_DELIVERY_TRANSFORM, width: 320, height: 320, crop: 'fill', gravity: 'face' }],
 }
