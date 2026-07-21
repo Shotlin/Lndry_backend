@@ -114,28 +114,18 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    ports:
+      - "80:80"
+      - "443:443"
     volumes:
       - ./deploy/production/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
-    expose:
-      - "8080"
+      - /srv/lndry/certbot-webroot:/var/www/certbot:ro
+      - /etc/letsencrypt:/etc/letsencrypt:ro
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health/ready >/dev/null 2>&1 || exit 1"]
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:80/health/ready >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
-    networks:
-      - backend
-
-  cloudflared:
-    image: cloudflare/cloudflared:2024.8.3
-    restart: unless-stopped
-    depends_on:
-      nginx:
-        condition: service_healthy
-    command: tunnel --config /etc/cloudflared/config.yml --no-autoupdate run
-    volumes:
-      - ./deploy/production/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
-      - ./deploy/production/cloudflared/credentials.json:/etc/cloudflared/credentials.json:ro
     networks:
       - backend
 

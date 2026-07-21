@@ -30,3 +30,8 @@ coverage/
 
 # PM2
 .pm2/
+
+# Production secrets (server-local only, never commit)
+deploy/production/app.env
+deploy/production/infra.env
+deploy/production/CREDENTIALS_DO_NOT_COMMIT.txt

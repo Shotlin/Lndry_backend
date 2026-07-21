@@ -41,13 +41,7 @@ BEGIN
   END IF;
 END $$;
 
--- 3. RENAME vendor_employees TO vendor_employees AND MODIFY ROLES
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'vendor_employees') THEN
-    ALTER TABLE vendor_employees RENAME TO vendor_employees;
-  END IF;
-END $$;
+-- 3. vendor_employees already has its final name as of migration 030 — no rename needed.
 
 ALTER TABLE vendor_employees DROP CONSTRAINT IF EXISTS chk_shop_staff_role;
 ALTER TABLE vendor_employees ADD CONSTRAINT chk_vendor_employees_role CHECK (role IN ('VENDOR_OWNER', 'VENDOR_STAFF'));

@@ -16,7 +16,7 @@ if [ "${RUN_MIGRATIONS}" = "true" ]; then
   docker compose --env-file "${INFRA_ENV_FILE}" -f "${COMPOSE_FILE}" run --rm migrate
 fi
 
-docker compose --env-file "${INFRA_ENV_FILE}" -f "${COMPOSE_FILE}" up -d api worker nginx cloudflared
+docker compose --env-file "${INFRA_ENV_FILE}" -f "${COMPOSE_FILE}" up -d api worker nginx
 
 if [ "${ENABLE_BACKUPS}" = "true" ]; then
   docker compose --profile ops --env-file "${INFRA_ENV_FILE}" -f "${COMPOSE_FILE}" build postgres-backup
