@@ -1,0 +1,82 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: lndry_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lndry_db
+      POSTGRES_USER: lndry_user
+      POSTGRES_PASSWORD: lndry_password_dev
+    ports:
+      # Host port 5434, not Postgres's default 5432 — this machine runs
+      # multiple local projects that default to 5432/5433, and whichever
+      # container starts first silently wins the port (no error), so LNDRY
+      # gets its own dedicated port instead of racing other projects for it.
+      - '5434:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U lndry_user -d lndry_db']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: lndry_redis
+    restart: unless-stopped
+    ports:
+      # Host port 6380, not the default 6379 — avoids silently colliding
+      # with another local project's Redis on this machine (Docker will
+      # happily let two unrelated containers' host-port claims race, and
+      # whichever wins "steals" the other's traffic instead of erroring).
+      - '6380:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lndry_app
+    restart: unless-stopped
+    ports:
+      - '3000:3000'
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      DB_HOST: postgres
+      REDIS_HOST: redis
+      BULL_REDIS_HOST: redis
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'wget', '-qO-', 'http://localhost:3000/health']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  nginx:
+    image: nginx:alpine
+    container_name: lndry_nginx
+    restart: unless-stopped
+    ports:
+      - '80:80'
+      - '443:443'
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - app
+
+volumes:
+  postgres_data:
+  redis_data:

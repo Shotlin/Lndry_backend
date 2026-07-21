@@ -1,0 +1,82 @@
+-- Migration 058: Add LNDRY order statuses to the order_status enum
+-- Wait, let's use DO blocks to avoid duplicate errors in case they are already present or run multiple times.
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'PAYMENT_PENDING';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'WAITING_VENDOR_CONFIRMATION';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'VENDOR_ACCEPTED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'PICKUP_ASSIGNED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'GOING_FOR_PICKUP';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'PICKUP_OTP_VERIFIED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'PICKED_UP';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'RECEIVED_AT_VENDOR';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'PROCESSING';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'DELIVERY_ASSIGNED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'DELIVERY_OTP_VERIFIED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'PAYMENT_FAILED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'VENDOR_REJECTED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'AUTO_REJECTED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'CUSTOMER_CANCELLED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+DO $$
+BEGIN
+  ALTER TYPE order_status ADD VALUE IF NOT EXISTS 'ADMIN_CANCELLED';
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
