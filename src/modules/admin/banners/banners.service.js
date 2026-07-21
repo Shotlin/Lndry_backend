@@ -33,6 +33,7 @@ export class AdminBannersService {
   async update(id, data, adminId, ip) {
     const mapped = {
       ...(data.title !== undefined && { title: data.title }),
+      ...(data.subtitle !== undefined && { subtitle: data.subtitle }),
       ...(data.imageUrl !== undefined && { imageUrl: data.imageUrl }),
       ...(data.linkType !== undefined && { ctaText: data.linkType !== 'none' ? data.linkType : null }),
       ...(data.linkValue !== undefined && { ctaLink: data.linkValue }),
@@ -71,7 +72,7 @@ export class AdminBannersService {
 
     return {
       ...banner,
-      image_url: normalizeCloudinaryDeliveryUrl(banner.image_url, 'default'),
+      image_url: normalizeCloudinaryDeliveryUrl(banner.image_url, 'banner'),
     }
   }
 }

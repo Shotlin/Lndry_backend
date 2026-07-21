@@ -14,6 +14,7 @@ export const createBannerSchema = {
     required: ['title', 'imageUrl'],
     properties: {
       title: { type: 'string', minLength: 1, maxLength: 200 },
+      subtitle: { type: 'string', maxLength: 300 },
       imageUrl: { type: 'string', format: 'uri' },
       bannerType: { type: 'string', enum: ['carousel', 'popup', 'announcement'], default: 'carousel' },
       linkType: { type: 'string', enum: ['category', 'product', 'url', 'none'], default: 'none' },
@@ -35,6 +36,7 @@ export const updateBannerSchema = {
     type: 'object',
     properties: {
       title: { type: 'string', minLength: 1, maxLength: 200 },
+      subtitle: { type: ['string', 'null'], maxLength: 300 },
       imageUrl: { type: 'string', format: 'uri' },
       bannerType: { type: 'string', enum: ['carousel', 'popup', 'announcement'] },
       linkType: { type: 'string', enum: ['category', 'product', 'url', 'none'] },
