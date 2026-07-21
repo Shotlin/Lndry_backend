@@ -44,6 +44,20 @@ export class AuthService {
   }
 
   /**
+   * Narrow, NODE_ENV-independent allowlist (see TEST_BYPASS_OTP_PHONES in
+   * env.js) — deliberately separate from _isDemoOtpEnabled so it is not
+   * affected by the hard `NODE_ENV === 'production'` block there. Only
+   * the exact phone numbers listed bypass real SMS; everything else about
+   * production behavior (Razorpay/Maps guards, error verbosity, etc.) is
+   * untouched.
+   */
+  _isTestBypassPhone(phone) {
+    if (!env.TEST_BYPASS_OTP_PHONES) return false
+    const allowed = env.TEST_BYPASS_OTP_PHONES.split(',').map((p) => normalizePhoneForOtp(p.trim()));
+    return allowed.includes(normalizePhoneForOtp(phone))
+  }
+
+  /**
    * Send OTP to a phone number
    * Production: sends via 2Factor.in SMS
    * Development: returns OTP in response for testing
@@ -62,12 +76,16 @@ export class AuthService {
     let otpCode = '123456'
     let isDemo = false
     let isSmsSent = false
+    const isTestBypass = this._isTestBypassPhone(phone)
 
     if (this._isDemoOtpPhone(phone)) {
       otpCode = env.DEMO_OTP_CODE || '123456'
       isDemo = true
       await redis.del(`${SMS_SESSION_PREFIX}${phone}`)
       logger.info({ phone: phone.slice(-4) }, 'Demo OTP bypass used')
+    } else if (isTestBypass) {
+      await redis.del(`${SMS_SESSION_PREFIX}${phone}`)
+      logger.info({ phone: phone.slice(-4) }, 'Test-bypass OTP phone used')
     } else if (env.NODE_ENV === 'production' && env.SMS_PROVIDER === '2factor') {
       const smsResult = await sendSmsOtp(phone)
       if (!smsResult.success) {
@@ -120,7 +138,7 @@ export class AuthService {
       expires_in: 300,
     }
 
-    if (env.NODE_ENV === 'development' || isDemo) {
+    if (env.NODE_ENV === 'development' || isDemo || isTestBypass) {
       data.otp = otpCode
     }
 
