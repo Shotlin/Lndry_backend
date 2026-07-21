@@ -176,7 +176,7 @@ export class ProductsRepository {
         `WITH ranked AS (
           SELECT
             p.id, p.name, p.slug, NULL::numeric AS price, NULL::numeric AS sale_price, p.cost_price,
-            p.stock_quantity, p.unit, p.thumbnail_url,
+            p.stock_quantity, p.unit, (p.images->>0) AS thumbnail_url,
             p.is_active, p.is_featured, p.total_sold,
             p.sku, p.barcode, p.low_stock_threshold, p.category_id,
             p.product_family_id, p.option_label, p.option_sort_order,
@@ -240,7 +240,7 @@ export class ProductsRepository {
     const { rows } = await query(
       `SELECT
         p.id, p.name, p.slug, NULL::numeric AS price, NULL::numeric AS sale_price, p.cost_price,
-        p.stock_quantity, p.unit, p.thumbnail_url,
+        p.stock_quantity, p.unit, (p.images->>0) AS thumbnail_url,
         p.is_active, p.is_featured, p.total_sold,
         p.sku, p.barcode, p.low_stock_threshold, p.category_id,
         p.product_family_id, p.option_label, p.option_sort_order,
@@ -608,7 +608,7 @@ export class ProductsRepository {
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, NULL::text AS description, NULL::numeric AS price, NULL::numeric AS sale_price,
               p.cost_price, p.category_id, p.stock_quantity, p.unit,
-              NULL::text AS thumbnail_url, p.images, p.tags, p.is_active,
+              (p.images->>0) AS thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.low_stock_threshold, p.max_order_qty,
               p.ingredients, p.allergen_info, p.shelf_life, p.storage_instructions,
@@ -656,7 +656,7 @@ export class ProductsRepository {
     const { rows } = await query(
       `SELECT p.id, p.name, p.slug, NULL::text AS description, NULL::numeric AS price, NULL::numeric AS sale_price,
               p.cost_price, p.category_id, p.stock_quantity, p.unit,
-              NULL::text AS thumbnail_url, p.images, p.tags, p.is_active,
+              (p.images->>0) AS thumbnail_url, p.images, p.tags, p.is_active,
               p.is_featured, p.total_sold,
               p.sku, p.barcode, p.low_stock_threshold, p.max_order_qty,
               p.ingredients, p.allergen_info, p.shelf_life, p.storage_instructions,
@@ -889,6 +889,14 @@ export class ProductsRepository {
    * Create a new product
    */
   async create(data) {
+    // garment_types has no thumbnail_url column (dropped by migration 062) —
+    // a single thumbnailUrl from the admin form is stored as the first
+    // element of the images array, and read back out the same way.
+    const images = Array.isArray(data.images) ? [...data.images] : []
+    if (data.thumbnailUrl && !images.includes(data.thumbnailUrl)) {
+      images.unshift(data.thumbnailUrl)
+    }
+
     const { rows } = await query(
       `INSERT INTO garment_types
         (name, slug, cost_price,
@@ -900,14 +908,14 @@ export class ProductsRepository {
          vendor_name, vendor_address, vendor_fssai, return_policy,
          avg_rating, rating_count, is_authentic,
          product_family_id, option_label, option_sort_order, is_default_option,
-         food_type, origin_tag, custom_badges, display_delivery_minutes, thumbnail_url)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
+         food_type, origin_tag, custom_badges, display_delivery_minutes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
        RETURNING id, name, slug, NULL::numeric AS price, NULL::numeric AS sale_price, stock_quantity, unit,
-                 thumbnail_url, category_id, is_featured, is_active, sku, created_at`,
+                 (images->>0) AS thumbnail_url, category_id, is_featured, is_active, sku, created_at`,
       [
         data.name, data.slug, data.costPrice || null,
         data.categoryId, data.stock || 0, data.unit || 'piece',
-        JSON.stringify(data.images || []), data.tags || [],
+        JSON.stringify(images), data.tags || [],
         data.isFeatured || false, data.isActive !== false,
         data.sku || null, data.barcode || null,
         data.lowStockThreshold || 10, data.maxOrderQty || null,
@@ -928,7 +936,6 @@ export class ProductsRepository {
         data.foodType || 'NONE', data.originTag || 'NONE',
         JSON.stringify(data.customBadges || []),
         data.displayDeliveryMinutes || null,
-        data.thumbnailUrl || null,
       ]
     )
 
@@ -965,7 +972,6 @@ export class ProductsRepository {
       foodType: 'food_type',
       originTag: 'origin_tag',
       displayDeliveryMinutes: 'display_delivery_minutes',
-      thumbnailUrl: 'thumbnail_url',
     }
 
     const fields = []
@@ -983,6 +989,12 @@ export class ProductsRepository {
     if (data.images !== undefined) {
       fields.push(`images = $${idx++}`)
       params.push(JSON.stringify(data.images))
+    } else if (data.thumbnailUrl !== undefined) {
+      // garment_types has no thumbnail_url column (dropped by migration
+      // 062) — a single thumbnailUrl from the admin form replaces the
+      // images array wholesale (this table only ever shows one image).
+      fields.push(`images = $${idx++}`)
+      params.push(JSON.stringify(data.thumbnailUrl ? [data.thumbnailUrl] : []))
     }
     if (data.tags !== undefined) {
       fields.push(`tags = $${idx++}`)
@@ -1016,7 +1028,7 @@ export class ProductsRepository {
     const { rows } = await query(
       `UPDATE garment_types SET ${fields.join(', ')} WHERE id = $${idx}
        RETURNING id, name, slug, NULL::numeric AS price, NULL::numeric AS sale_price, stock_quantity, unit,
-                 thumbnail_url, category_id, is_featured, is_active, updated_at`,
+                 (images->>0) AS thumbnail_url, category_id, is_featured, is_active, updated_at`,
       params
     )
     return rows[0]
