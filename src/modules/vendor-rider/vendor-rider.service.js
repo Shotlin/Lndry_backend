@@ -49,7 +49,7 @@ export class VendorRiderService {
       order_number: row.order_number,
       assignment_type: row.assignment_type,
       order_status: row.order_status,
-      customer_name: row.customer_name,
+      customer_name: row.customer_name?.trim() ? row.customer_name : 'Customer',
       customer_phone: row.customer_phone,
       address_line: addressLine,
       lat: lat != null ? Number(lat) : null,
