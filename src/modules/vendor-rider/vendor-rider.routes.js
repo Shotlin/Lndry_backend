@@ -15,6 +15,7 @@ import { VendorRiderService } from './vendor-rider.service.js'
  *   POST /jobs/:orderId/start-pickup        — mark "on my way" (GOING_FOR_PICKUP)
  *   POST /jobs/:orderId/pickup-photos       — save garment condition photos
  *   POST /jobs/:orderId/pickup-otp/verify   — confirm pickup
+ *   POST /jobs/:orderId/start-delivery      — mark "on my way" (OUT_FOR_DELIVERY)
  *   POST /jobs/:orderId/delivery-otp/verify — confirm delivery
  */
 export default async function vendorRiderRoutes(fastify) {
@@ -110,6 +111,15 @@ export default async function vendorRiderRoutes(fastify) {
       },
     },
   }, controller.verifyPickupOtp.bind(controller))
+
+  fastify.post('/jobs/:orderId/start-delivery', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Mark rider as on the way to deliver (OUT_FOR_DELIVERY)',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+    },
+  }, controller.startDelivery.bind(controller))
 
   fastify.post('/jobs/:orderId/delivery-otp/verify', {
     schema: {

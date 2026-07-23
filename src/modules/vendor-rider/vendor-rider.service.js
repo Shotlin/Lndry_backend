@@ -138,17 +138,16 @@ export class VendorRiderService {
   }
 
   /**
-   * Rider explicitly marks "on my way to pickup" — a single-step
-   * PICKUP_ASSIGNED → GOING_FOR_PICKUP transition, distinct from
-   * `_advanceOrder`'s two-step OTP-verified flow. Surfaces as the
-   * customer's "Pickup Partner Coming" timeline milestone.
+   * Shared "rider is on the way" transition for either leg — a single-step
+   * status change distinct from `_advanceOrder`'s two-step OTP-verified
+   * flow, driving the matching order_assignments row to IN_TRANSIT too.
    */
-  async startPickup(userId, orderId) {
+  async _startLeg(userId, orderId, assignmentType, targetStatus) {
     const rider = await this._resolveRider(userId)
     if (!rider) {
       throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
     }
-    await this._assertOwnsAssignment(userId, orderId, 'PICKUP')
+    await this._assertOwnsAssignment(userId, orderId, assignmentType)
 
     const client = await getClient()
     try {
@@ -164,27 +163,27 @@ export class VendorRiderService {
       }
 
       const current = order.status
-      const t = validateTransition(current, 'GOING_FOR_PICKUP', 'VENDOR_RIDER')
+      const t = validateTransition(current, targetStatus, 'VENDOR_RIDER')
       if (!t.valid) {
         throw { statusCode: 400, message: t.message, code: 'INVALID_TRANSITION' }
       }
 
       await client.query(
-        `UPDATE orders SET status = 'GOING_FOR_PICKUP', updated_at = NOW() WHERE id = $1`,
-        [orderId]
+        `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [targetStatus, orderId]
       )
       await recordOrderEvent(client, {
         orderId,
         oldStatus: current,
-        newStatus: 'GOING_FOR_PICKUP',
+        newStatus: targetStatus,
         actorId: userId,
         actorRole: 'VENDOR_RIDER',
       })
 
       await client.query(
         `UPDATE order_assignments SET status = 'IN_TRANSIT', updated_at = NOW()
-         WHERE order_id = $1 AND assignment_type = 'PICKUP'`,
-        [orderId]
+         WHERE order_id = $1 AND assignment_type = $2`,
+        [orderId, assignmentType]
       )
 
       await client.query('COMMIT')
@@ -195,7 +194,28 @@ export class VendorRiderService {
       client.release()
     }
 
-    return { orderId, status: 'GOING_FOR_PICKUP' }
+    return { orderId, status: targetStatus }
+  }
+
+  /**
+   * Rider explicitly marks "on my way to pickup" — PICKUP_ASSIGNED ->
+   * GOING_FOR_PICKUP. Surfaces as the customer's "Pickup Partner Coming"
+   * timeline milestone.
+   */
+  async startPickup(userId, orderId) {
+    return this._startLeg(userId, orderId, 'PICKUP', 'GOING_FOR_PICKUP')
+  }
+
+  /**
+   * Rider explicitly marks "on my way to deliver" — DELIVERY_ASSIGNED/PACKED
+   * -> OUT_FOR_DELIVERY. Surfaces as the customer's "Out for Delivery"
+   * timeline milestone. Not strictly required before delivery-OTP verify
+   * (that transition is also valid directly from DELIVERY_ASSIGNED), but
+   * kept symmetric with the pickup leg for a consistent rider UX and an
+   * accurate customer timeline.
+   */
+  async startDelivery(userId, orderId) {
+    return this._startLeg(userId, orderId, 'DELIVERY', 'OUT_FOR_DELIVERY')
   }
 
   async submitPickupPhotos(userId, orderId, photos) {

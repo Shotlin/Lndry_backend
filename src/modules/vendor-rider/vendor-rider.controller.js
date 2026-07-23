@@ -35,6 +35,15 @@ export class VendorRiderController {
     }
   }
 
+  async startDelivery(request, reply) {
+    try {
+      const result = await this.service.startDelivery(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Delivery started'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async submitPickupPhotos(request, reply) {
     try {
       const result = await this.service.submitPickupPhotos(
