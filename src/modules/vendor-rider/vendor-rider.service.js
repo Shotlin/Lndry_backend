@@ -137,6 +137,67 @@ export class VendorRiderService {
     }
   }
 
+  /**
+   * Rider explicitly marks "on my way to pickup" — a single-step
+   * PICKUP_ASSIGNED → GOING_FOR_PICKUP transition, distinct from
+   * `_advanceOrder`'s two-step OTP-verified flow. Surfaces as the
+   * customer's "Pickup Partner Coming" timeline milestone.
+   */
+  async startPickup(userId, orderId) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+    await this._assertOwnsAssignment(userId, orderId, 'PICKUP')
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows } = await client.query(
+        `SELECT status FROM orders WHERE id = $1 FOR UPDATE`,
+        [orderId]
+      )
+      const order = rows[0]
+      if (!order) {
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      const current = order.status
+      const t = validateTransition(current, 'GOING_FOR_PICKUP', 'VENDOR_RIDER')
+      if (!t.valid) {
+        throw { statusCode: 400, message: t.message, code: 'INVALID_TRANSITION' }
+      }
+
+      await client.query(
+        `UPDATE orders SET status = 'GOING_FOR_PICKUP', updated_at = NOW() WHERE id = $1`,
+        [orderId]
+      )
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: current,
+        newStatus: 'GOING_FOR_PICKUP',
+        actorId: userId,
+        actorRole: 'VENDOR_RIDER',
+      })
+
+      await client.query(
+        `UPDATE order_assignments SET status = 'IN_TRANSIT', updated_at = NOW()
+         WHERE order_id = $1 AND assignment_type = 'PICKUP'`,
+        [orderId]
+      )
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+
+    return { orderId, status: 'GOING_FOR_PICKUP' }
+  }
+
   async submitPickupPhotos(userId, orderId, photos) {
     const rider = await this._resolveRider(userId)
     if (!rider) {

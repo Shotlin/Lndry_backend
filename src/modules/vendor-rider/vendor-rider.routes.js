@@ -12,6 +12,7 @@ import { VendorRiderService } from './vendor-rider.service.js'
  * Endpoints:
  *   GET  /jobs                              — list this rider's assigned jobs
  *   GET  /jobs/:orderId                     — job detail (address, lines)
+ *   POST /jobs/:orderId/start-pickup        — mark "on my way" (GOING_FOR_PICKUP)
  *   POST /jobs/:orderId/pickup-photos       — save garment condition photos
  *   POST /jobs/:orderId/pickup-otp/verify   — confirm pickup
  *   POST /jobs/:orderId/delivery-otp/verify — confirm delivery
@@ -58,6 +59,15 @@ export default async function vendorRiderRoutes(fastify) {
       params: orderIdParams,
     },
   }, controller.getJobDetail.bind(controller))
+
+  fastify.post('/jobs/:orderId/start-pickup', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Mark rider as on the way to pickup (GOING_FOR_PICKUP)',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+    },
+  }, controller.startPickup.bind(controller))
 
   fastify.post('/jobs/:orderId/pickup-photos', {
     schema: {

@@ -26,6 +26,15 @@ export class VendorRiderController {
     }
   }
 
+  async startPickup(request, reply) {
+    try {
+      const result = await this.service.startPickup(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Pickup started'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async submitPickupPhotos(request, reply) {
     try {
       const result = await this.service.submitPickupPhotos(
