@@ -497,8 +497,28 @@ export class VendorsService {
       throw { statusCode: 404, message: 'Vendor profile not found' }
     }
     const documents = await this.repo.getDocuments(vendor.id)
+
+    // vendors has no rating/review_count columns — the customer-facing
+    // discovery queries already compute this live from `reviews`, but the
+    // vendor's own profile (what the dashboard's Avg Rating/Total Reviews
+    // banner reads) never did, so it always showed "N/A" / 0 no matter how
+    // many reviews came in.
+    const { rows: ratingRows } = await query(
+      `SELECT
+         AVG(vendor_rating)::numeric(2,1) AS rating,
+         COUNT(*)::int AS review_count
+       FROM reviews
+       WHERE vendor_id = $1 AND deleted_at IS NULL`,
+      [vendor.id]
+    )
+    const { rating, review_count: reviewCount } = ratingRows[0]
+
     return {
       ...vendor,
+      // null (not 0) with zero reviews, so the vendor app's "N/A" fallback
+      // still shows for a genuinely unrated vendor instead of a misleading 0.
+      rating: rating !== null ? Number(rating) : null,
+      review_count: reviewCount,
       documents
     }
   }
