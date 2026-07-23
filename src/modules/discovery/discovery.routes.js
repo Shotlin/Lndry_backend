@@ -361,7 +361,7 @@ export default async function discoveryRoutes(fastify) {
               COALESCE(vs.image_asset_id, c.image_url) AS service_image_url,
               vsr.rate_paise,
               gt.id AS garment_type_id, gt.name AS garment_name, gt.unit,
-              gt.thumbnail_url AS garment_image_url,
+              (gt.images->>0) AS garment_image_url,
               c.name AS category_name, c.id AS category_id
          FROM vendor_services vs
          JOIN vendor_service_rates vsr ON vs.id = vsr.vendor_service_id
@@ -432,7 +432,7 @@ export default async function discoveryRoutes(fastify) {
               COALESCE(vs.image_asset_id, c.image_url) AS service_image_url,
               vsr.rate_paise,
               gt.id AS garment_type_id, gt.name AS garment_name, gt.unit,
-              gt.thumbnail_url AS garment_image_url,
+              (gt.images->>0) AS garment_image_url,
               c.name AS category_name, c.id AS category_id
          FROM vendor_services vs
          JOIN vendor_service_rates vsr ON vs.id = vsr.vendor_service_id
