@@ -96,9 +96,11 @@ export class VendorOrdersService {
 
     const res = await query(
       `SELECT o.*,
-              u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email
+              u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email,
+              r.vendor_rating, r.rider_rating AS delivery_rating, r.comment AS review_comment
        FROM orders o
        LEFT JOIN users u ON o.user_id = u.id
+       LEFT JOIN reviews r ON r.order_id = o.id AND r.deleted_at IS NULL
        WHERE o.id = $1 AND o.vendor_id = $2`,
       [orderId, vendor.vendorId]
     )
