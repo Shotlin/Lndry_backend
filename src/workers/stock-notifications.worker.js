@@ -231,7 +231,7 @@ async function handleWishlistRestock(job, ctx) {
  */
 async function defaultFindProductMeta(productId) {
   const { rows } = await query(
-    'SELECT name FROM garment_rates WHERE id = $1 LIMIT 1',
+    'SELECT name FROM garment_types WHERE id = $1 LIMIT 1',
     [productId]
   )
   return rows[0] ? { name: rows[0].name } : null

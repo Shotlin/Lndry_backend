@@ -215,7 +215,7 @@ export class ReviewsRepository {
                 p.name as product_name, p.images as product_images,
                 v.name as vendor_name
          FROM reviews r
-         LEFT JOIN garment_rates p ON r.garment_rate_id = p.id
+         LEFT JOIN garment_types p ON r.garment_rate_id = p.id
          LEFT JOIN vendors v ON r.vendor_id = v.id
          WHERE r.user_id = $1 AND r.deleted_at IS NULL
          ORDER BY r.created_at DESC

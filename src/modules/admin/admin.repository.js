@@ -11,7 +11,7 @@ export class AdminRepository {
       query('SELECT COUNT(*) as total FROM users'),
       query('SELECT COUNT(*) as total FROM orders'),
       query("SELECT COALESCE(SUM(total_amount), 0) as total FROM orders WHERE payment_status = 'PAID'"),
-      query('SELECT COUNT(*) as total FROM garment_rates WHERE is_available = true'),
+      query('SELECT COUNT(*) as total FROM garment_types WHERE is_active = true'),
       query('SELECT COUNT(*) as total FROM rider_profiles'),
       query("SELECT COUNT(*) as total FROM orders WHERE created_at::date = CURRENT_DATE"),
     ])

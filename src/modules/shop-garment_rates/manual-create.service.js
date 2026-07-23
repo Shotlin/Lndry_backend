@@ -128,7 +128,7 @@ export class ManualCreateService {
       // IS NOT DISTINCT FROM for the comparison.
       const duplicateCheck = await client.query(
         `SELECT id, name, brand, unit
-           FROM garment_rates
+           FROM garment_types
           WHERE LOWER(TRIM(name)) = LOWER(TRIM($1))
             AND LOWER(COALESCE(TRIM(brand), '')) IS NOT DISTINCT FROM LOWER(COALESCE(TRIM($2), ''))
             AND LOWER(TRIM(unit)) = LOWER(TRIM($3))

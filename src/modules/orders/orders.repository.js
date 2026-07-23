@@ -528,8 +528,8 @@ export class OrdersRepository {
     }
 
     const { rows } = await query(
-      `SELECT id, thumbnail_url
-         FROM garment_rates
+      `SELECT id, (images->>0) AS thumbnail_url
+         FROM garment_types
         WHERE id = ANY($1::uuid[])`,
       [ids]
     )
