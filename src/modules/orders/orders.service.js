@@ -680,21 +680,33 @@ export class OrdersService {
         // garment_type_id/name/unit/rate_paise are always set from the
         // proposed_* values — a no-op for non-reclassified lines (proposed
         // equals previous there), but the mechanism that actually moves a
-        // line to a different service for reclassified ones. Every line
-        // (kg or piece) stores its real confirmed count now — no sentinel
-        // value, since weight is always a whole number just like a piece
-        // count. Each paise value is passed twice (once plain, once for the
-        // ::numeric cast) rather than reused by placeholder number — reusing
-        // one $N in both a plain-integer context and an explicit ::numeric
-        // cast leaves Postgres unable to settle on a single type for it,
-        // throwing 42P08 "indeterminate_datatype".
-        await client.query(
-          `UPDATE order_lines
-           SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100),
-               garment_type_id = $4, name = $5, unit = $6, rate_paise = $7
-           WHERE id = $8`,
-          [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
-        )
+        // line to a different service for reclassified ones. A continuous-
+        // unit line (kg/sqft) stores the sentinel confirmed_quantity=1 since
+        // the INTEGER column can't hold its real decimal weight/area — the
+        // exact money value in total_paise (and order_reconciliations.
+        // proposed_weight_kg) is what both apps derive the true decimal
+        // display from. Each paise value is passed twice (once plain, once
+        // for the ::numeric cast) rather than reused by placeholder number —
+        // reusing one $N in both a plain-integer context and an explicit
+        // ::numeric cast leaves Postgres unable to settle on a single type
+        // for it, throwing 42P08 "indeterminate_datatype".
+        if (change.is_weight_adjustment) {
+          await client.query(
+            `UPDATE order_lines
+             SET confirmed_quantity = 1, total_paise = $1, total = ($2::numeric / 100),
+                 garment_type_id = $3, name = $4, unit = $5, rate_paise = $6
+             WHERE id = $7`,
+            [change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
+          )
+        } else {
+          await client.query(
+            `UPDATE order_lines
+             SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100),
+                 garment_type_id = $4, name = $5, unit = $6, rate_paise = $7
+             WHERE id = $8`,
+            [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
+          )
+        }
       }
 
       const feeBreakdown = typeof order.fee_breakdown === 'string'
@@ -706,9 +718,18 @@ export class OrdersService {
         original_subtotal_paise: reconciliation.previous_subtotal_paise,
       }
 
+      // processing_stage must move to 'Washing' here, not stay at the
+      // 'Received' value set when the order first arrived at the vendor —
+      // vendor-orders.service.js's updateProcessingStage treats
+      // status=PROCESSING + processing_stage='Received' as an invalid
+      // combination (its own WASHING/DRYING/IRONING/PACKED sub-sequence
+      // expects a real stage name once status is PROCESSING), which broke
+      // "Mark Packed & Ready" with "Cannot go from RECEIVED to PACKED".
+      // Accepting the reconciliation is exactly the moment washing begins.
       await client.query(
         `UPDATE orders
-         SET status = $1, estimated_amount_paise = $2, payable_amount_paise = $3,
+         SET status = $1, processing_stage = 'Washing',
+             estimated_amount_paise = $2, payable_amount_paise = $3,
              subtotal = ($4::numeric / 100), total_amount = ($5::numeric / 100),
              fee_breakdown = $6, updated_at = NOW()
          WHERE id = $7`,

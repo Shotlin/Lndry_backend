@@ -264,7 +264,7 @@ export class VendorRiderService {
    * before pickup-OTP verification; enforced only by allowed order statuses
    * (UI-sequenced, same trust posture as submitPickupPhotos vs. the OTP step).
    */
-  async submitMeasurements(userId, orderId, { lines: confirmedLines } = {}) {
+  async submitMeasurements(userId, orderId, { confirmedWeightKg, lines: confirmedLines } = {}) {
     const rider = await this._resolveRider(userId)
     if (!rider) {
       throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
@@ -300,6 +300,7 @@ export class VendorRiderService {
         orderRow: order,
         lines: linesRes.rows,
         confirmedLines,
+        confirmedWeightKg,
       })
 
       await applyRecalculatedTotals(client, orderId, computed)
@@ -309,12 +310,13 @@ export class VendorRiderService {
            order_id, stage, status, proposed_by, proposed_by_role,
            previous_subtotal_paise, proposed_subtotal_paise,
            previous_payable_amount_paise, proposed_payable_amount_paise,
-           line_changes
-         ) VALUES ($1, 'RIDER_PICKUP', 'APPLIED', $2, $3, $4, $5, $6, $7, $8)`,
+           previous_weight_kg, proposed_weight_kg, line_changes
+         ) VALUES ($1, 'RIDER_PICKUP', 'APPLIED', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
         [
           orderId, userId, rider.role,
           computed.previousSubtotalPaise, computed.proposedSubtotalPaise,
           computed.previousPayableAmountPaise, computed.proposedPayableAmountPaise,
+          computed.previousWeightKg, computed.proposedWeightKg,
           JSON.stringify(computed.lineChanges),
         ]
       )
@@ -325,7 +327,7 @@ export class VendorRiderService {
         [
           userId, rider.role, rider.vendorId, orderId,
           JSON.stringify({ subtotal_paise: computed.previousSubtotalPaise }),
-          JSON.stringify({ subtotal_paise: computed.proposedSubtotalPaise }),
+          JSON.stringify({ subtotal_paise: computed.proposedSubtotalPaise, confirmed_weight_kg: confirmedWeightKg }),
         ]
       )
 

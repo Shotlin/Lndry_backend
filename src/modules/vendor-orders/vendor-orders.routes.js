@@ -173,6 +173,10 @@ export default async function vendorOrdersRoutes(fastify) {
               }
             }
           },
+          // Exact decimal weight (kg) or area (sq ft) for this order's
+          // continuous-unit line, e.g. 1.2 — piece-priced lines never use
+          // this, they go through `lines[].confirmed_quantity` above.
+          confirmed_weight_kg: { type: 'number', minimum: 0.1 },
           adjustment_reason: { type: 'string', maxLength: 500 },
           photo_urls: {
             type: 'array',

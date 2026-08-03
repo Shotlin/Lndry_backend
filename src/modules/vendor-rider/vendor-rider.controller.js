@@ -47,6 +47,7 @@ export class VendorRiderController {
   async submitMeasurements(request, reply) {
     try {
       const result = await this.service.submitMeasurements(request.user.id, request.params.orderId, {
+        confirmedWeightKg: request.body.confirmed_weight_kg,
         lines: (request.body.lines || []).map((l) => ({
           order_line_id: l.order_line_id,
           confirmed_quantity: l.confirmed_quantity,

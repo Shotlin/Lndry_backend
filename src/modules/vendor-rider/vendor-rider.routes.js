@@ -80,14 +80,13 @@ export default async function vendorRiderRoutes(fastify) {
       params: orderIdParams,
       body: {
         type: 'object',
-        required: ['lines'],
         properties: {
-          // kg-priced lines use a whole-number confirmed_quantity here too
-          // (e.g. "Wash & Steam Iron" 1 -> 2), exactly like piece-priced
-          // lines — there's no separate fractional-weight input anymore.
+          // Exact decimal weight (kg) or area (sq ft) for this order's
+          // continuous-unit line, e.g. 1.2 — piece-priced lines never use
+          // this, they go through `lines[].confirmed_quantity` below.
+          confirmed_weight_kg: { type: 'number', minimum: 0.1 },
           lines: {
             type: 'array',
-            minItems: 1,
             items: {
               type: 'object',
               required: ['order_line_id', 'confirmed_quantity'],
