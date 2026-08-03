@@ -1056,31 +1056,23 @@ export class OrdersService {
       this._attachReconciliationPhotos(vendorReconRes.rows[0] || null),
     ])
 
-    const feeBreakdown = typeof order.fee_breakdown === 'string'
-      ? JSON.parse(order.fee_breakdown)
-      : (order.fee_breakdown || {})
+    // `order` here is already camelCased by orders.repository.js's _format()
+    // (fee_breakdown -> feeBreakdown) — reading the snake_case key always
+    // resolved to {}, silently falling back to the hardcoded 2900/500
+    // defaults below instead of this order's real delivery/platform fee.
+    const feeBreakdown = typeof order.feeBreakdown === 'string'
+      ? JSON.parse(order.feeBreakdown)
+      : (order.feeBreakdown || {})
 
     const orderWithLiveItems = liveItems.length > 0 ? { ...order, items: liveItems } : order
     const [enriched] = await this._attachItemThumbnails([orderWithLiveItems])
 
+    // Root-caused: amountPaidPaise was always computed correctly here, but
+    // orderResponseSchema didn't declare it, so fast-json-stringify silently
+    // stripped it from every response before the app ever saw it (fixed in
+    // orders.schema.js). A genuinely-zero amount is a normal state (advance
+    // not yet paid), not a bug, so no diagnostic logging is needed here.
     const amountPaidPaise = Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100)
-    if (amountPaidPaise === 0) {
-      // Diagnostic only — the customer-reported "advance shows ₹0 despite a
-      // successful Razorpay charge" bug hasn't been reproduced via static
-      // code review. Logging here (rather than only in payments.service.js)
-      // lets a real customer session pin down whether the payments row is
-      // missing entirely, unlinked (order_id NULL), or genuinely never
-      // reached PAID — remove once root-caused.
-      const paymentsDebugRes = await query(
-        `SELECT id, status, purpose, amount, order_id, order_draft_id, razorpay_order_id, razorpay_payment_id, created_at
-         FROM payments WHERE order_id = $1 OR order_draft_id = $1 ORDER BY created_at DESC`,
-        [order.id]
-      )
-      logger.warn(
-        { orderId: order.id, orderNumber: order.order_number, payments: paymentsDebugRes.rows },
-        'amountPaidPaise resolved to 0 — dumping matching payments rows for diagnosis'
-      )
-    }
 
     return {
       ...enriched,

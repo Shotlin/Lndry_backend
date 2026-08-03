@@ -98,6 +98,16 @@ const orderResponseSchema = {
     scheduledSlotLabel: { type: ['string', 'null'] },
     timeline: { type: 'array', items: timelineItemSchema },
     tracking: trackingSchema,
+    // Advance-payment + rider/vendor reconciliation feature — these are
+    // computed by _enrichCustomerOrder but were missing here, which meant
+    // fast-json-stringify silently stripped them from every response before
+    // the app ever saw them (same class of bug as the historical
+    // garment-types cost_price incident).
+    amountPaidPaise: { type: 'number' },
+    deliveryFeePaise: { type: 'number' },
+    platformFeePaise: { type: 'number' },
+    riderReevaluation: { type: ['object', 'null'], additionalProperties: true },
+    vendorReevaluation: { type: ['object', 'null'], additionalProperties: true },
   },
 }
 
