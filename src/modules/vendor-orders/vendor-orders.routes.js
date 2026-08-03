@@ -161,10 +161,15 @@ export default async function vendorOrdersRoutes(fastify) {
             type: 'array',
             items: {
               type: 'object',
-              required: ['order_line_id', 'confirmed_quantity'],
+              required: ['order_line_id'],
               properties: {
                 order_line_id: { type: 'string', format: 'uuid' },
-                confirmed_quantity: { type: 'integer', minimum: 0 }
+                confirmed_quantity: { type: 'integer', minimum: 0 },
+                // Reclassify this line to a different service the vendor
+                // actually offers (e.g. moving a delicate item from a
+                // per-kg wash to a per-piece dry-clean service). Resolved
+                // server-side against this vendor's own active rates.
+                new_garment_type_id: { type: 'string', format: 'uuid' }
               }
             }
           },

@@ -463,12 +463,52 @@ export class VendorOrdersService {
          FROM order_lines WHERE order_id = $1`,
         [orderId]
       )
+      const linesById = new Map(linesRes.rows.map((l) => [l.id, l]))
+
+      // Reclassification: the vendor determined an item belongs to a
+      // different service than the customer picked (e.g. a delicate item
+      // selected under a per-kg wash actually needs a per-piece dry-clean
+      // service). Resolve each requested new_garment_type_id against THIS
+      // vendor's own active, approved rates — never trust a client-supplied
+      // rate_paise directly.
+      const reclassifications = new Map()
+      const requestedReclassifications = (confirmedLines || []).filter((l) => l.new_garment_type_id)
+      if (requestedReclassifications.length > 0) {
+        const requestedGarmentTypeIds = [...new Set(requestedReclassifications.map((l) => l.new_garment_type_id))]
+        const ratesRes = await client.query(
+          `SELECT vsr.rate_paise, gt.id AS garment_type_id, gt.name, gt.unit
+           FROM vendor_service_rates vsr
+           JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
+           JOIN garment_types gt ON vsr.garment_type_id = gt.id
+           WHERE vs.vendor_id = $1 AND vsr.garment_type_id = ANY($2::uuid[])
+             AND vsr.is_active = true AND vs.deleted_at IS NULL AND vs.approval_status = 'APPROVED' AND gt.is_active = true`,
+          [vendor.vendorId, requestedGarmentTypeIds]
+        )
+        const rateByGarmentTypeId = new Map(ratesRes.rows.map((r) => [r.garment_type_id, r]))
+
+        for (const line of requestedReclassifications) {
+          if (!linesById.has(line.order_line_id)) {
+            throw { statusCode: 400, message: `Unknown order_line_id: ${line.order_line_id}`, code: 'VALIDATION_ERROR' }
+          }
+          const rate = rateByGarmentTypeId.get(line.new_garment_type_id)
+          if (!rate) {
+            throw { statusCode: 400, message: 'One or more selected services are not available for this vendor', code: 'SERVICE_NOT_AVAILABLE' }
+          }
+          reclassifications.set(line.order_line_id, {
+            garmentTypeId: rate.garment_type_id,
+            name: rate.name,
+            unit: rate.unit,
+            ratePaise: rate.rate_paise,
+          })
+        }
+      }
 
       const computed = computeRecalculatedTotals({
         orderRow: order,
         lines: linesRes.rows,
         confirmedLines,
         confirmedWeightKg,
+        reclassifications,
       })
 
       let reconciliationId

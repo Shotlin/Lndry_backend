@@ -1,5 +1,5 @@
 /**
- * Shared order-line recalculation math, used by both the rider's immediate
+ * Shared order-line recalculation math, used by the rider's immediate
  * doorstep weigh-in (applies instantly, no customer approval) and the
  * vendor's authoritative reconciliation (staged, requires customer accept).
  *
@@ -16,6 +16,15 @@
  *      where supplied and falling back to the existing confirmed/estimated
  *      quantity otherwise — which is also what makes it safe to supply a
  *      weight correction and line corrections in the same call.
+ *
+ * Reclassification (vendor-only — the rider never reclassifies, only
+ * corrects quantity/weight): `reclassifications` lets a line's service
+ * change entirely (e.g. a customer picked "Wash & Fold" per-kg for a
+ * garment the vendor determines is actually a delicate dry-clean item
+ * priced per-piece). The caller resolves the new rate/unit/name against
+ * this vendor's own `vendor_service_rates` *before* calling this function —
+ * kept here as a plain data lookup so this function stays a pure sync
+ * calculation with no DB access.
  */
 
 /**
@@ -24,6 +33,7 @@
  * @param {Array}  params.lines - order_lines rows: { id, garment_type_id, name, unit, rate_paise, estimated_quantity, confirmed_quantity }
  * @param {Array}  [params.confirmedLines] - [{ order_line_id, confirmed_quantity }]
  * @param {number} [params.confirmedWeightKg]
+ * @param {Map<string, {garmentTypeId: string, name: string, unit: string, ratePaise: number}>} [params.reclassifications] - keyed by order_line_id
  * @returns {{
  *   previousSubtotalPaise: number, proposedSubtotalPaise: number,
  *   previousPayableAmountPaise: number, proposedPayableAmountPaise: number,
@@ -31,9 +41,9 @@
  *   newFeeBreakdown: object, lineChanges: Array
  * }}
  */
-export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, confirmedWeightKg }) {
-  if ((!confirmedLines || confirmedLines.length === 0) && confirmedWeightKg == null) {
-    throw { statusCode: 400, message: 'Either confirmed_lines or confirmed_weight_kg required', code: 'INVALID_INPUT' }
+export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, confirmedWeightKg, reclassifications }) {
+  if ((!confirmedLines || confirmedLines.length === 0) && confirmedWeightKg == null && (!reclassifications || reclassifications.size === 0)) {
+    throw { statusCode: 400, message: 'Either confirmed_lines, confirmed_weight_kg, or a reclassification is required', code: 'INVALID_INPUT' }
   }
 
   const feeBreakdown = typeof orderRow.fee_breakdown === 'string'
@@ -42,7 +52,15 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
   const previousSubtotalPaise = feeBreakdown.subtotal_paise ?? orderRow.estimated_amount_paise ?? 0
   const previousPayableAmountPaise = orderRow.payable_amount_paise ?? 0
 
-  const confirmedByLineId = new Map((confirmedLines || []).map(c => [c.order_line_id, c.confirmed_quantity]))
+  // A reclassify-only line entry may omit confirmed_quantity entirely (the
+  // vendor is only changing the service, not the count) — only map entries
+  // that actually specify a quantity, so `.has()` below doesn't report a
+  // change for a line whose quantity was never touched.
+  const confirmedByLineId = new Map(
+    (confirmedLines || [])
+      .filter(c => typeof c.confirmed_quantity === 'number')
+      .map(c => [c.order_line_id, c.confirmed_quantity])
+  )
 
   // Weight correction targets exactly one kg-priced line — the one with the
   // largest existing value (estimated_quantity * rate_paise), so a
@@ -80,23 +98,34 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
       proposedQuantity = confirmedWeightKg
     }
 
-    const proposedTotalPaise = Math.round((line.rate_paise || 0) * proposedQuantity)
+    const reclass = reclassifications?.get(line.id)
+    const isReclassified = !!reclass
+    const proposedGarmentTypeId = reclass?.garmentTypeId ?? line.garment_type_id
+    const proposedName = reclass?.name ?? line.name
+    const proposedUnit = reclass?.unit ?? line.unit
+    const proposedRatePaise = reclass?.ratePaise ?? line.rate_paise ?? 0
+
+    const proposedTotalPaise = Math.round(proposedRatePaise * proposedQuantity)
     proposedSubtotalPaise += proposedTotalPaise
 
-    if (proposedQuantity !== previousQuantity) {
+    if (proposedQuantity !== previousQuantity || isReclassified) {
       lineChanges.push({
         order_line_id: line.id,
-        garment_type_id: line.garment_type_id,
-        name: line.name,
-        unit: line.unit,
+        previous_garment_type_id: line.garment_type_id,
+        proposed_garment_type_id: proposedGarmentTypeId,
+        previous_name: line.name,
+        proposed_name: proposedName,
+        previous_unit: line.unit,
+        proposed_unit: proposedUnit,
+        previous_rate_paise: line.rate_paise ?? 0,
+        proposed_rate_paise: proposedRatePaise,
         previous_quantity: previousQuantity,
         proposed_quantity: proposedQuantity,
         previous_total_paise: previousTotalPaise,
         proposed_total_paise: proposedTotalPaise,
         is_weight_adjustment: isWeightAdjustment,
+        is_reclassified: isReclassified,
       })
-    } else {
-      // Unchanged lines still need to be summed above; nothing to record here.
     }
   }
 

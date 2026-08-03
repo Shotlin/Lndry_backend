@@ -677,15 +677,25 @@ export class OrdersService {
         : (reconciliation.line_changes || [])
 
       for (const change of lineChanges) {
+        // garment_type_id/name/unit/rate_paise are always set from the
+        // proposed_* values — a no-op for non-reclassified lines (proposed
+        // equals previous there), but the mechanism that actually moves a
+        // line to a different service for reclassified ones.
         if (change.is_weight_adjustment) {
           await client.query(
-            `UPDATE order_lines SET confirmed_quantity = 1, total_paise = $1, total = ($1::numeric / 100) WHERE id = $2`,
-            [change.proposed_total_paise, change.order_line_id]
+            `UPDATE order_lines
+             SET confirmed_quantity = 1, total_paise = $1, total = ($1::numeric / 100),
+                 garment_type_id = $2, name = $3, unit = $4, rate_paise = $5
+             WHERE id = $6`,
+            [change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
           )
         } else {
           await client.query(
-            `UPDATE order_lines SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($2::numeric / 100) WHERE id = $3`,
-            [change.proposed_quantity, change.proposed_total_paise, change.order_line_id]
+            `UPDATE order_lines
+             SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($2::numeric / 100),
+                 garment_type_id = $3, name = $4, unit = $5, rate_paise = $6
+             WHERE id = $7`,
+            [change.proposed_quantity, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
           )
         }
       }
