@@ -104,6 +104,11 @@ export class ReviewsRepository {
   }
 
   async checkReviewEligibility(userId, productId) {
+    // productId is passed twice (once plain, once for the ::text cast)
+    // rather than reused by placeholder number — reusing $2 in both a
+    // plain (uuid-inferred) context and an explicit ::text cast leaves
+    // Postgres unable to settle on one type for it, throwing 42P08
+    // "indeterminate_datatype".
     const { rows } = await query(
       `SELECT o.id,
               EXISTS (
@@ -120,10 +125,10 @@ export class ReviewsRepository {
          AND EXISTS (
            SELECT 1
            FROM jsonb_array_elements(o.items) AS item
-           WHERE item->>'productId' = $2::text
+           WHERE item->>'productId' = $3::text
          )
        ORDER BY o.created_at DESC`,
-      [userId, productId]
+      [userId, productId, productId]
     )
 
     if (rows.length === 0) {

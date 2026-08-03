@@ -167,18 +167,22 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
 export async function applyRecalculatedTotals(client, orderId, computed) {
   for (const change of computed.lineChanges) {
     if (change.is_weight_adjustment) {
+      // $1 is passed twice (once plain, once cast to numeric) rather than
+      // reused by placeholder number — reusing $1 in both a plain-integer
+      // context and an explicit ::numeric cast leaves Postgres unable to
+      // settle on one type for it, throwing 42P08 "indeterminate_datatype".
       await client.query(
         `UPDATE order_lines
-         SET confirmed_quantity = 1, total_paise = $1, total = ($1::numeric / 100)
-         WHERE id = $2`,
-        [change.proposed_total_paise, change.order_line_id]
+         SET confirmed_quantity = 1, total_paise = $1, total = ($2::numeric / 100)
+         WHERE id = $3`,
+        [change.proposed_total_paise, change.proposed_total_paise, change.order_line_id]
       )
     } else {
       await client.query(
         `UPDATE order_lines
-         SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($2::numeric / 100)
-         WHERE id = $3`,
-        [change.proposed_quantity, change.proposed_total_paise, change.order_line_id]
+         SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100)
+         WHERE id = $4`,
+        [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.order_line_id]
       )
     }
   }
@@ -186,9 +190,13 @@ export async function applyRecalculatedTotals(client, orderId, computed) {
   await client.query(
     `UPDATE orders
      SET estimated_amount_paise = $1, payable_amount_paise = $2,
-         subtotal = ($1::numeric / 100), total_amount = ($2::numeric / 100),
-         fee_breakdown = $3, updated_at = NOW()
-     WHERE id = $4`,
-    [computed.proposedSubtotalPaise, computed.proposedPayableAmountPaise, JSON.stringify(computed.newFeeBreakdown), orderId]
+         subtotal = ($3::numeric / 100), total_amount = ($4::numeric / 100),
+         fee_breakdown = $5, updated_at = NOW()
+     WHERE id = $6`,
+    [
+      computed.proposedSubtotalPaise, computed.proposedPayableAmountPaise,
+      computed.proposedSubtotalPaise, computed.proposedPayableAmountPaise,
+      JSON.stringify(computed.newFeeBreakdown), orderId,
+    ]
   )
 }

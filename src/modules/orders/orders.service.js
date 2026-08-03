@@ -681,21 +681,26 @@ export class OrdersService {
         // proposed_* values — a no-op for non-reclassified lines (proposed
         // equals previous there), but the mechanism that actually moves a
         // line to a different service for reclassified ones.
+        // Each paise value is passed twice (once plain, once for the
+        // ::numeric cast) rather than reused by placeholder number —
+        // reusing one $N in both a plain-integer context and an explicit
+        // ::numeric cast leaves Postgres unable to settle on a single type
+        // for it, throwing 42P08 "indeterminate_datatype".
         if (change.is_weight_adjustment) {
           await client.query(
             `UPDATE order_lines
-             SET confirmed_quantity = 1, total_paise = $1, total = ($1::numeric / 100),
-                 garment_type_id = $2, name = $3, unit = $4, rate_paise = $5
-             WHERE id = $6`,
-            [change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
+             SET confirmed_quantity = 1, total_paise = $1, total = ($2::numeric / 100),
+                 garment_type_id = $3, name = $4, unit = $5, rate_paise = $6
+             WHERE id = $7`,
+            [change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
           )
         } else {
           await client.query(
             `UPDATE order_lines
-             SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($2::numeric / 100),
-                 garment_type_id = $3, name = $4, unit = $5, rate_paise = $6
-             WHERE id = $7`,
-            [change.proposed_quantity, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
+             SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100),
+                 garment_type_id = $4, name = $5, unit = $6, rate_paise = $7
+             WHERE id = $8`,
+            [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
           )
         }
       }
@@ -712,10 +717,14 @@ export class OrdersService {
       await client.query(
         `UPDATE orders
          SET status = $1, estimated_amount_paise = $2, payable_amount_paise = $3,
-             subtotal = ($2::numeric / 100), total_amount = ($3::numeric / 100),
-             fee_breakdown = $4, updated_at = NOW()
-         WHERE id = $5`,
-        [ORDER_STATUSES.PROCESSING, reconciliation.proposed_subtotal_paise, reconciliation.proposed_payable_amount_paise, JSON.stringify(newFeeBreakdown), orderId]
+             subtotal = ($4::numeric / 100), total_amount = ($5::numeric / 100),
+             fee_breakdown = $6, updated_at = NOW()
+         WHERE id = $7`,
+        [
+          ORDER_STATUSES.PROCESSING, reconciliation.proposed_subtotal_paise, reconciliation.proposed_payable_amount_paise,
+          reconciliation.proposed_subtotal_paise, reconciliation.proposed_payable_amount_paise,
+          JSON.stringify(newFeeBreakdown), orderId,
+        ]
       )
 
       await client.query(
