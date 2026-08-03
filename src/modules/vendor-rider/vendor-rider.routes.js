@@ -13,13 +13,15 @@ import { VendorRiderService } from './vendor-rider.service.js'
  *   GET  /jobs                              — list this rider's assigned jobs
  *   GET  /jobs/:orderId                     — job detail (address, lines)
  *   POST /jobs/:orderId/start-pickup        — mark "on my way" (GOING_FOR_PICKUP)
+ *   POST /jobs/:orderId/measurements        — record corrected weight/piece-count (applies immediately)
  *   POST /jobs/:orderId/pickup-photos       — save garment condition photos
  *   POST /jobs/:orderId/pickup-otp/verify   — confirm pickup
  *   POST /jobs/:orderId/start-delivery      — mark "on my way" (OUT_FOR_DELIVERY)
+ *   POST /jobs/:orderId/collect-balance     — confirm COD cash balance collected
  *   POST /jobs/:orderId/delivery-otp/verify — confirm delivery
  */
 export default async function vendorRiderRoutes(fastify) {
-  const service = new VendorRiderService()
+  const service = new VendorRiderService({ fastify })
   const controller = new VendorRiderController(service)
 
   fastify.addHook('preHandler', fastify.authenticate)
@@ -69,6 +71,32 @@ export default async function vendorRiderRoutes(fastify) {
       params: orderIdParams,
     },
   }, controller.startPickup.bind(controller))
+
+  fastify.post('/jobs/:orderId/measurements', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Record the rider\'s corrected weight/piece-count at pickup (applies immediately, no customer approval)',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+      body: {
+        type: 'object',
+        properties: {
+          confirmed_weight_kg: { type: 'number', minimum: 0.1 },
+          lines: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['order_line_id', 'confirmed_quantity'],
+              properties: {
+                order_line_id: { type: 'string', format: 'uuid' },
+                confirmed_quantity: { type: 'integer', minimum: 0 },
+              },
+            },
+          },
+        },
+      },
+    },
+  }, controller.submitMeasurements.bind(controller))
 
   fastify.post('/jobs/:orderId/pickup-photos', {
     schema: {
@@ -120,6 +148,15 @@ export default async function vendorRiderRoutes(fastify) {
       params: orderIdParams,
     },
   }, controller.startDelivery.bind(controller))
+
+  fastify.post('/jobs/:orderId/collect-balance', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Confirm cash collected for a COD order\'s balance at delivery',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+    },
+  }, controller.collectBalance.bind(controller))
 
   fastify.post('/jobs/:orderId/delivery-otp/verify', {
     schema: {

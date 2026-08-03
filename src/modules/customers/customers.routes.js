@@ -1,10 +1,32 @@
 import { success, error } from '../../utils/apiResponse.js'
 import { UsersService } from '../users/users.service.js'
 import { UsersRepository } from '../users/users.repository.js'
+import { query } from '../../config/database.js'
 
 export default async function customerRoutes(fastify) {
   const repository = new UsersRepository()
   const service = new UsersService(repository)
+
+  // GET /support-contact — a small whitelisted slice of app_settings (just
+  // the support phone/email), exposed to authenticated customers. The full
+  // app_settings table stays admin-only via GET /api/v1/admin/settings.
+  fastify.get('/support-contact', {
+    preHandler: [fastify.authenticate, fastify.authorize(['CUSTOMER'])],
+    schema: {
+      tags: ['Customer Profile'],
+      summary: 'Get the customer support phone/email',
+      security: [{ bearerAuth: [] }]
+    }
+  }, async (request, reply) => {
+    const { rows } = await query(
+      `SELECT key, value FROM app_settings WHERE key IN ('support_phone', 'support_email')`
+    )
+    const settings = Object.fromEntries(rows.map((r) => [r.key, r.value]))
+    return reply.code(200).send(success({
+      phone: settings.support_phone || null,
+      email: settings.support_email || null,
+    }, 'Support contact fetched successfully'))
+  })
 
   fastify.get('/me', {
     preHandler: [fastify.authenticate, fastify.authorize(['CUSTOMER'])],

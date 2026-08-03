@@ -68,14 +68,14 @@ export class VendorOrdersController {
     }
   }
 
-  async reconcileReceipt(request, reply) {
+  async proposeReconciliation(request, reply) {
     try {
-      const result = await this.service.reconcileReceipt(
+      const result = await this.service.proposeReconciliation(
         request.user.id,
         request.params.orderId,
         request.body
       )
-      return reply.send(success(result, 'Receipt reconciled'))
+      return reply.send(success(result, 'Recalculation submitted for customer approval'))
     } catch (err) {
       return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
     }

@@ -44,6 +44,21 @@ export class VendorRiderController {
     }
   }
 
+  async submitMeasurements(request, reply) {
+    try {
+      const result = await this.service.submitMeasurements(request.user.id, request.params.orderId, {
+        confirmedWeightKg: request.body.confirmed_weight_kg,
+        lines: (request.body.lines || []).map((l) => ({
+          order_line_id: l.order_line_id,
+          confirmed_quantity: l.confirmed_quantity,
+        })),
+      })
+      return reply.send(success(result, 'Measurements recorded'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async submitPickupPhotos(request, reply) {
     try {
       const result = await this.service.submitPickupPhotos(
@@ -65,6 +80,15 @@ export class VendorRiderController {
         request.body.otp
       )
       return reply.send(success(result, 'Pickup confirmed'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async collectBalance(request, reply) {
+    try {
+      const result = await this.service.collectBalance(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Balance collected'))
     } catch (err) {
       return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
     }

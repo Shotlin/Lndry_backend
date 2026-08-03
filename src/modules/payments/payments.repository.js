@@ -3,7 +3,7 @@ import { query } from '../../config/database.js'
 // Explicit column list (R14.7 — no SELECT *), matches every field _format() reads.
 const PAYMENT_COLUMNS = `id, order_id, user_id, razorpay_order_id, razorpay_payment_id,
   razorpay_signature, amount, currency, status, method, refund_id, refund_amount,
-  refund_status, metadata, created_at, updated_at, expires_at, order_draft_id`
+  refund_status, metadata, created_at, updated_at, expires_at, order_draft_id, purpose`
 
 /**
  * Payments repository — all SQL queries for payments
@@ -14,8 +14,8 @@ export class PaymentsRepository {
    */
   async create(data) {
     const { rows } = await query(
-      `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, expires_at, metadata, order_draft_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, expires_at, metadata, order_draft_id, purpose)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING ${PAYMENT_COLUMNS}`,
       [
         data.orderId || null,
@@ -28,6 +28,7 @@ export class PaymentsRepository {
         data.expiresAt || null,
         JSON.stringify(data.metadata || {}),
         data.orderDraftId || null,
+        data.purpose || 'FULL',
       ]
     )
     return this._format(rows[0])
@@ -64,6 +65,33 @@ export class PaymentsRepository {
       [orderId]
     )
     return rows[0] ? this._format(rows[0]) : null
+  }
+
+  /**
+   * Find the latest payment of a specific purpose (ADVANCE/BALANCE/FULL)
+   * for an order — distinct from findByOrderId, which only ever sees the
+   * single latest row regardless of purpose and would otherwise wrongly
+   * treat a PAID advance as blocking a legitimate later balance charge.
+   */
+  async findByOrderIdAndPurpose(orderId, purpose) {
+    const { rows } = await query(
+      `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE order_id = $1 AND purpose = $2 ORDER BY created_at DESC LIMIT 1`,
+      [orderId, purpose]
+    )
+    return rows[0] ? this._format(rows[0]) : null
+  }
+
+  /**
+   * Sum of all successfully collected (PAID) payments for an order, in
+   * rupees — the authoritative "amount collected so far" figure, computed
+   * on demand rather than tracked in a denormalized column.
+   */
+  async sumPaidByOrderId(orderId) {
+    const { rows } = await query(
+      `SELECT COALESCE(SUM(amount), 0) AS amount_paid FROM payments WHERE order_id = $1 AND status = 'PAID'`,
+      [orderId]
+    )
+    return parseFloat(rows[0].amount_paid)
   }
 
   /**
@@ -165,6 +193,7 @@ export class PaymentsRepository {
       refundStatus: row.refund_status,
       metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
       orderDraftId: row.order_draft_id,
+      purpose: row.purpose,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }

@@ -106,6 +106,40 @@ export default async function ordersRoutes(fastify) {
     preHandler: [fastify.authenticate],
   }, controller.getOtp.bind(controller))
 
+  // GET /:id/reconciliation — Fetch the vendor's proposed recalculation, if any
+  fastify.get('/:id/reconciliation', {
+    schema: {
+      tags: ['Orders'],
+      summary: 'Get the reconciliation currently awaiting this customer\'s decision',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+    preHandler: [fastify.authenticate],
+  }, controller.getReconciliation.bind(controller))
+
+  // POST /:id/reconciliation/accept — Accept the vendor's proposed recalculation
+  fastify.post('/:id/reconciliation/accept', {
+    schema: {
+      tags: ['Orders'],
+      summary: 'Accept the vendor\'s proposed recalculation',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+    },
+    preHandler: [fastify.authenticate],
+  }, controller.acceptReconciliation.bind(controller))
+
+  // POST /:id/reconciliation/reject — Reject the vendor's proposed recalculation
+  fastify.post('/:id/reconciliation/reject', {
+    schema: {
+      tags: ['Orders'],
+      summary: 'Reject the vendor\'s proposed recalculation',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+      body: {
+        type: 'object',
+        properties: { reason: { type: 'string', maxLength: 500 } },
+      },
+    },
+    preHandler: [fastify.authenticate],
+  }, controller.rejectReconciliation.bind(controller))
+
   // ─── Admin routes ───────────────────────────────────────
 
   // GET /admin/all — List all orders [ADMIN]

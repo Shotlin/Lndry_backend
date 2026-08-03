@@ -159,4 +159,31 @@ export class OrdersController {
       return reply.code(statusCode).send(error(err.message || 'Failed to fetch OTP', code))
     }
   }
+
+  async getReconciliation(request, reply) {
+    try {
+      const result = await this.service.getReconciliation(request.user.id, request.params.id)
+      return reply.send(success(result, result ? 'Reconciliation fetched' : 'No reconciliation pending'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async acceptReconciliation(request, reply) {
+    try {
+      const result = await this.service.acceptReconciliation(request.user.id, request.params.id)
+      return reply.send(success(result, 'Reconciliation accepted'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async rejectReconciliation(request, reply) {
+    try {
+      const result = await this.service.rejectReconciliation(request.user.id, request.params.id, request.body?.reason)
+      return reply.send(success(result, 'Reconciliation rejected'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
 }

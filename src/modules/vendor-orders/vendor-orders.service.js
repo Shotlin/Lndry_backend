@@ -3,6 +3,9 @@ import { logger } from '../../config/logger.js'
 import { ORDER_STATUSES, validateTransition, recordOrderEvent } from '../../utils/state-machine.js'
 import { OrderOtpService } from '../order-otp/order-otp.service.js'
 import { orderQueue } from '../../config/bullmq.js'
+import { computeRecalculatedTotals } from '../../utils/order-recalculation.js'
+import { NotificationsRepository } from '../notifications/notifications.repository.js'
+import { NotificationsService } from '../notifications/notifications.service.js'
 
 /**
  * Vendor Orders Service — handles vendor-side order lifecycle
@@ -15,8 +18,12 @@ import { orderQueue } from '../../config/bullmq.js'
  * - Auto-assign delivery employees on PACKED
  */
 export class VendorOrdersService {
-  constructor(options = {}) {
-    this.otpService = options.otpService || new OrderOtpService()
+  constructor({ fastify, otpService } = {}) {
+    this.fastify = fastify || null
+    this.otpService = otpService || new OrderOtpService()
+    this.notificationsService = fastify
+      ? new NotificationsService(new NotificationsRepository(), fastify)
+      : null
   }
 
   /**
@@ -126,6 +133,18 @@ export class VendorOrdersService {
       [orderId]
     )
     order.timeline = eventsRes.rows
+
+    const paidRes = await query(
+      `SELECT COALESCE(SUM(amount), 0) AS amount_paid FROM payments WHERE order_id = $1 AND status = 'PAID'`,
+      [orderId]
+    )
+    order.amountPaidPaise = Math.round(Number(paidRes.rows[0].amount_paid) * 100)
+
+    const reconRes = await query(
+      `SELECT * FROM order_reconciliations WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [orderId]
+    )
+    order.latestReconciliation = reconRes.rows[0] || null
 
     return order
   }
@@ -395,140 +414,142 @@ export class VendorOrdersService {
   }
 
   /**
-   * Receipt reconciliation — vendor updates actual garment count/weight
-   * when garments are received at vendor (RECEIVED_AT_VENDOR or later).
-   *
-   * Recalculates final order amount using the stored pricing snapshot.
-   * Creates an audit log of the adjustment.
+   * Vendor's authoritative recalculation — supersedes the rider's rough
+   * doorstep correction with a garment-expert re-verification, backed by
+   * required photo evidence. Unlike the rider's step, this NEVER applies
+   * immediately: it stages a proposal and pauses the order at
+   * RECONCILIATION_PENDING until the customer explicitly accepts or rejects
+   * it (see OrdersService.acceptReconciliation/rejectReconciliation).
    */
-  async reconcileReceipt(userId, orderId, body) {
+  async proposeReconciliation(userId, orderId, body) {
     const vendor = await this._resolveVendorId(userId)
     if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
 
-    const { confirmed_lines, confirmed_weight_kg, adjustment_reason } = body
+    const {
+      lines: confirmedLines,
+      confirmed_weight_kg: confirmedWeightKg,
+      adjustment_reason: adjustmentReason,
+      photo_urls: photoUrls,
+    } = body
+
+    if (!Array.isArray(photoUrls) || photoUrls.length === 0) {
+      throw { statusCode: 400, message: 'At least one photo_urls entry is required', code: 'VALIDATION_ERROR' }
+    }
 
     const client = await getClient()
     try {
       await client.query('BEGIN')
 
       const { rows } = await client.query(
-        `SELECT o.id, o.status, o.vendor_id, o.estimated_amount_paise, o.payable_amount_paise,
-                o.fee_breakdown, o.items
-         FROM orders o
-         WHERE o.id = $1 AND o.vendor_id = $2 FOR UPDATE`,
+        `SELECT id, status, user_id, vendor_id, fee_breakdown, estimated_amount_paise, payable_amount_paise
+         FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
         [orderId, vendor.vendorId]
       )
       const order = rows[0]
       if (!order) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
 
-      // Only allow reconciliation when garments are at vendor
-      const allowedStatuses = [
-        ORDER_STATUSES.RECEIVED_AT_VENDOR,
-        ORDER_STATUSES.PROCESSING,
-        ORDER_STATUSES.PACKED,
-      ]
+      // This correction must happen before washing starts — either right
+      // after receiving items, or again after a customer rejection + support call.
+      const allowedStatuses = [ORDER_STATUSES.RECEIVED_AT_VENDOR, ORDER_STATUSES.RECONCILIATION_DISPUTED]
       if (!allowedStatuses.includes(order.status)) {
-        throw { statusCode: 400, message: 'Cannot reconcile receipt at this order stage', code: 'INVALID_STAGE' }
+        throw { statusCode: 400, message: 'Cannot propose a reconciliation at this order stage', code: 'INVALID_STAGE' }
       }
 
-      const feeBreakdown = typeof order.fee_breakdown === 'string'
-        ? JSON.parse(order.fee_breakdown)
-        : (order.fee_breakdown || {})
-      const oldSubtotalPaise = feeBreakdown.subtotal_paise || order.estimated_amount_paise || 0
+      const transition = validateTransition(order.status, ORDER_STATUSES.RECONCILIATION_PENDING, vendor.role)
+      if (!transition.valid) throw { statusCode: 400, message: transition.message, code: 'INVALID_TRANSITION' }
 
-      // Fetch pricing snapshot from order lines to recalculate
       const linesRes = await client.query(
-        `SELECT garment_type_id, rate_paise, estimated_quantity, confirmed_quantity
+        `SELECT id, garment_type_id, name, unit, rate_paise, estimated_quantity, confirmed_quantity
          FROM order_lines WHERE order_id = $1`,
         [orderId]
       )
 
-      let newSubtotalPaise = 0
+      const computed = computeRecalculatedTotals({
+        orderRow: order,
+        lines: linesRes.rows,
+        confirmedLines,
+        confirmedWeightKg,
+      })
 
-      if (confirmed_lines && confirmed_lines.length > 0) {
-        for (const cline of confirmed_lines) {
-          const existingLine = linesRes.rows.find(l => l.garment_type_id === cline.garment_type_id)
-          if (!existingLine) continue
-
-          const ratePaise = existingLine.rate_paise || 0
-          const newTotal = ratePaise * cline.confirmed_quantity
-          newSubtotalPaise += newTotal
-
-          await client.query(
-            `UPDATE order_lines
-             SET confirmed_quantity = $1, total_paise = $2, total = ($2::numeric / 100), quantity = $1
-             WHERE order_id = $3 AND garment_type_id = $4`,
-            [cline.confirmed_quantity, newTotal, orderId, cline.garment_type_id]
-          )
+      let reconciliationId
+      try {
+        const reconRes = await client.query(
+          `INSERT INTO order_reconciliations (
+             order_id, stage, status, proposed_by, proposed_by_role,
+             previous_subtotal_paise, proposed_subtotal_paise,
+             previous_payable_amount_paise, proposed_payable_amount_paise,
+             previous_weight_kg, proposed_weight_kg, line_changes, reason
+           ) VALUES ($1, 'VENDOR_RECEIPT', 'PENDING_CUSTOMER', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           RETURNING id`,
+          [
+            orderId, userId, vendor.role,
+            computed.previousSubtotalPaise, computed.proposedSubtotalPaise,
+            computed.previousPayableAmountPaise, computed.proposedPayableAmountPaise,
+            computed.previousWeightKg, computed.proposedWeightKg,
+            JSON.stringify(computed.lineChanges), adjustmentReason || null,
+          ]
+        )
+        reconciliationId = reconRes.rows[0].id
+      } catch (err) {
+        if (err.code === '23505') {
+          throw { statusCode: 409, message: 'A reconciliation is already awaiting customer approval for this order', code: 'RECONCILIATION_ALREADY_PENDING' }
         }
-      } else if (confirmed_weight_kg) {
-        // Weight-based recalculation
-        const weightLine = linesRes.rows.find(l => l.rate_paise > 0)
-        if (weightLine) {
-          newSubtotalPaise = Math.round(weightLine.rate_paise * confirmed_weight_kg)
-          await client.query(
-            `UPDATE order_lines
-             SET confirmed_quantity = 1, total_paise = $1, total = ($1::numeric / 100)
-             WHERE order_id = $2 AND garment_type_id = $3`,
-            [newSubtotalPaise, orderId, weightLine.garment_type_id]
-          )
-        }
-      } else {
-        throw { statusCode: 400, message: 'Either confirmed_lines or confirmed_weight_kg required', code: 'INVALID_INPUT' }
+        throw err
       }
 
-      // Recalculate totals
-      const deliveryFeePaise = feeBreakdown.delivery_fee_paise || 2900
-      const platformFeePaise = feeBreakdown.platform_fee_paise || 500
-      const newPayableAmountPaise = newSubtotalPaise + deliveryFeePaise + platformFeePaise
-
-      const newFeeBreakdown = {
-        ...feeBreakdown,
-        subtotal_paise: newSubtotalPaise,
-        original_subtotal_paise: oldSubtotalPaise,
-        adjustment_reason: adjustment_reason || 'Receipt reconciliation'
+      for (const url of photoUrls) {
+        await client.query(
+          `INSERT INTO order_pickup_photos (order_id, photo_url, is_grouped, uploaded_by, context, order_reconciliation_id)
+           VALUES ($1, $2, true, $3, 'VENDOR_RECONCILIATION', $4)`,
+          [orderId, url, userId, reconciliationId]
+        )
       }
 
       await client.query(
-        `UPDATE orders
-         SET estimated_amount_paise = $1, payable_amount_paise = $2,
-             subtotal = ($1::numeric / 100), total_amount = ($2::numeric / 100),
-             fee_breakdown = $3, updated_at = NOW()
-         WHERE id = $4`,
-        [newSubtotalPaise, newPayableAmountPaise, JSON.stringify(newFeeBreakdown), orderId]
+        `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [ORDER_STATUSES.RECONCILIATION_PENDING, orderId]
       )
 
-      // Audit log
       await client.query(
-        `INSERT INTO audit_logs (entity_type, entity_id, action, actor_id, actor_role, old_data, new_data, note)
-         VALUES ('ORDER', $1, 'RECEIPT_RECONCILIATION', $2, $3, $4, $5, $6)`,
+        `INSERT INTO audit_logs (actor_user_id, actor_role, actor_shop_id, target_type, target_id, action, before, after)
+         VALUES ($1, $2, $3, 'ORDER', $4, 'RECEIPT_RECONCILIATION_PROPOSED', $5, $6)`,
         [
-          orderId,
-          userId,
-          vendor.role,
-          JSON.stringify({ subtotal_paise: oldSubtotalPaise }),
-          JSON.stringify({ subtotal_paise: newSubtotalPaise, confirmed_weight_kg }),
-          adjustment_reason || 'Receipt reconciliation'
+          userId, vendor.role, vendor.vendorId, orderId,
+          JSON.stringify({ subtotal_paise: computed.previousSubtotalPaise }),
+          JSON.stringify({ subtotal_paise: computed.proposedSubtotalPaise, confirmed_weight_kg: confirmedWeightKg }),
         ]
       )
 
       await recordOrderEvent(client, {
         orderId,
         oldStatus: order.status,
-        newStatus: order.status, // Status doesn't change
+        newStatus: ORDER_STATUSES.RECONCILIATION_PENDING,
         actorId: userId,
         actorRole: vendor.role,
-        note: `Receipt reconciled: subtotal changed from ${oldSubtotalPaise} to ${newSubtotalPaise} paise. Reason: ${adjustment_reason || 'N/A'}`
+        note: `Vendor proposed subtotal change from ${computed.previousSubtotalPaise} to ${computed.proposedSubtotalPaise} paise. Reason: ${adjustmentReason || 'N/A'}`
       })
 
       await client.query('COMMIT')
 
+      if (this.notificationsService && order.user_id) {
+        try {
+          await this.notificationsService.sendNotification(order.user_id, {
+            title: 'Your order total was updated',
+            body: 'The vendor found a difference after weighing your items. Review the new total in the app.',
+            type: 'order_reconciliation_proposed',
+            data: { orderId, reconciliationId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of reconciliation proposal (non-critical)')
+        }
+      }
+
       return {
         orderId,
-        old_subtotal_paise: oldSubtotalPaise,
-        new_subtotal_paise: newSubtotalPaise,
-        new_payable_amount_paise: newPayableAmountPaise,
-        adjustment_reason
+        status: ORDER_STATUSES.RECONCILIATION_PENDING,
+        reconciliation_id: reconciliationId,
+        previous_payable_amount_paise: computed.previousPayableAmountPaise,
+        proposed_payable_amount_paise: computed.proposedPayableAmountPaise,
       }
     } catch (err) {
       await client.query('ROLLBACK')

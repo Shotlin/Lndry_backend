@@ -5,6 +5,7 @@ import { orderQueue } from '../../config/bullmq.js'
 import { logger } from '../../config/logger.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { ORDER_STATUS, ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
+import { ORDER_STATUSES, validateTransition, recordOrderEvent } from '../../utils/state-machine.js'
 import { generateInvoicePDF } from '../../utils/invoiceGenerator.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
@@ -615,6 +616,215 @@ export class OrdersService {
     }
   }
 
+  // ─── Order reconciliation (customer accept/reject) ─────
+
+  /**
+   * The reconciliation currently awaiting this customer's decision, if any
+   * — with its photo evidence. Returns null (not a 404) when nothing is
+   * pending, since "no pending reconciliation" is a normal order state.
+   */
+  async getReconciliation(userId, orderId) {
+    const orderRes = await query(`SELECT id FROM orders WHERE id = $1 AND user_id = $2`, [orderId, userId])
+    if (!orderRes.rows[0]) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+
+    const reconRes = await query(
+      `SELECT * FROM order_reconciliations
+       WHERE order_id = $1 AND status = 'PENDING_CUSTOMER'
+       ORDER BY created_at DESC LIMIT 1`,
+      [orderId]
+    )
+    const reconciliation = reconRes.rows[0]
+    if (!reconciliation) return null
+
+    const photosRes = await query(
+      `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+      [reconciliation.id]
+    )
+
+    return { ...reconciliation, photos: photosRes.rows.map((r) => r.photo_url) }
+  }
+
+  /**
+   * Customer accepts the vendor's proposed recalculation. Applies the
+   * already-computed proposed numbers verbatim (never a fresh recompute) so
+   * what gets applied can never drift from what the customer actually
+   * reviewed in `getReconciliation`.
+   */
+  async acceptReconciliation(userId, orderId) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const orderRes = await client.query(
+        `SELECT id, status, user_id, fee_breakdown FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+        [orderId, userId]
+      )
+      const order = orderRes.rows[0]
+      if (!order) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+
+      const reconRes = await client.query(
+        `SELECT * FROM order_reconciliations WHERE order_id = $1 AND status = 'PENDING_CUSTOMER' FOR UPDATE`,
+        [orderId]
+      )
+      const reconciliation = reconRes.rows[0]
+      if (!reconciliation) throw { statusCode: 404, message: 'No reconciliation awaiting your approval', code: 'RECONCILIATION_NOT_FOUND' }
+
+      const transition = validateTransition(order.status, ORDER_STATUSES.PROCESSING, 'CUSTOMER')
+      if (!transition.valid) throw { statusCode: 400, message: transition.message, code: 'INVALID_TRANSITION' }
+
+      const lineChanges = typeof reconciliation.line_changes === 'string'
+        ? JSON.parse(reconciliation.line_changes)
+        : (reconciliation.line_changes || [])
+
+      for (const change of lineChanges) {
+        if (change.is_weight_adjustment) {
+          await client.query(
+            `UPDATE order_lines SET confirmed_quantity = 1, total_paise = $1, total = ($1::numeric / 100) WHERE id = $2`,
+            [change.proposed_total_paise, change.order_line_id]
+          )
+        } else {
+          await client.query(
+            `UPDATE order_lines SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($2::numeric / 100) WHERE id = $3`,
+            [change.proposed_quantity, change.proposed_total_paise, change.order_line_id]
+          )
+        }
+      }
+
+      const feeBreakdown = typeof order.fee_breakdown === 'string'
+        ? JSON.parse(order.fee_breakdown)
+        : (order.fee_breakdown || {})
+      const newFeeBreakdown = {
+        ...feeBreakdown,
+        subtotal_paise: reconciliation.proposed_subtotal_paise,
+        original_subtotal_paise: reconciliation.previous_subtotal_paise,
+      }
+
+      await client.query(
+        `UPDATE orders
+         SET status = $1, estimated_amount_paise = $2, payable_amount_paise = $3,
+             subtotal = ($2::numeric / 100), total_amount = ($3::numeric / 100),
+             fee_breakdown = $4, updated_at = NOW()
+         WHERE id = $5`,
+        [ORDER_STATUSES.PROCESSING, reconciliation.proposed_subtotal_paise, reconciliation.proposed_payable_amount_paise, JSON.stringify(newFeeBreakdown), orderId]
+      )
+
+      await client.query(
+        `UPDATE order_reconciliations
+         SET status = 'ACCEPTED', customer_decision_at = NOW(), customer_decision_by = $1, updated_at = NOW()
+         WHERE id = $2`,
+        [userId, reconciliation.id]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: ORDER_STATUSES.PROCESSING,
+        actorId: userId,
+        actorRole: 'CUSTOMER',
+        note: 'Customer accepted the vendor\'s recalculated total',
+      })
+
+      await client.query('COMMIT')
+
+      if (this.notificationsService && reconciliation.proposed_by) {
+        try {
+          await this.notificationsService.sendNotification(reconciliation.proposed_by, {
+            title: 'Customer accepted the revised total',
+            body: 'Processing can continue.',
+            type: 'order_reconciliation_accepted',
+            data: { orderId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify vendor of reconciliation acceptance (non-critical)')
+        }
+      }
+
+      return { orderId, status: ORDER_STATUSES.PROCESSING }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Customer rejects the vendor's proposed recalculation. Does NOT touch
+   * order_lines/orders totals — they stay at whatever the rider already
+   * applied. Resolution from here is a manual support phone call, not
+   * another automated flow, so the response carries the support number
+   * directly.
+   */
+  async rejectReconciliation(userId, orderId, reason) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const orderRes = await client.query(
+        `SELECT id, status, user_id FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+        [orderId, userId]
+      )
+      const order = orderRes.rows[0]
+      if (!order) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+
+      const reconRes = await client.query(
+        `SELECT * FROM order_reconciliations WHERE order_id = $1 AND status = 'PENDING_CUSTOMER' FOR UPDATE`,
+        [orderId]
+      )
+      const reconciliation = reconRes.rows[0]
+      if (!reconciliation) throw { statusCode: 404, message: 'No reconciliation awaiting your approval', code: 'RECONCILIATION_NOT_FOUND' }
+
+      const transition = validateTransition(order.status, ORDER_STATUSES.RECONCILIATION_DISPUTED, 'CUSTOMER')
+      if (!transition.valid) throw { statusCode: 400, message: transition.message, code: 'INVALID_TRANSITION' }
+
+      await client.query(
+        `UPDATE order_reconciliations
+         SET status = 'REJECTED', reason = COALESCE($1, reason), customer_decision_at = NOW(), customer_decision_by = $2, updated_at = NOW()
+         WHERE id = $3`,
+        [reason || null, userId, reconciliation.id]
+      )
+
+      await client.query(
+        `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+        [ORDER_STATUSES.RECONCILIATION_DISPUTED, orderId]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: ORDER_STATUSES.RECONCILIATION_DISPUTED,
+        actorId: userId,
+        actorRole: 'CUSTOMER',
+        note: reason ? `Customer rejected the recalculated total: ${reason}` : 'Customer rejected the recalculated total',
+      })
+
+      await client.query('COMMIT')
+
+      if (this.notificationsService && reconciliation.proposed_by) {
+        try {
+          await this.notificationsService.sendNotification(reconciliation.proposed_by, {
+            title: 'Customer rejected the revised total',
+            body: reason || 'The customer disputed the recalculation — please contact them or support.',
+            type: 'order_reconciliation_rejected',
+            data: { orderId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify vendor of reconciliation rejection (non-critical)')
+        }
+      }
+
+      const supportRes = await query(`SELECT value FROM app_settings WHERE key = 'support_phone'`)
+      const supportPhone = supportRes.rows[0]?.value ?? null
+
+      return { orderId, status: ORDER_STATUSES.RECONCILIATION_DISPUTED, support_phone: supportPhone }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
   // ─── Admin methods ─────────────────────────────────────
 
   /**
@@ -779,11 +989,13 @@ export class OrdersService {
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation] = await Promise.all([
+    const [statusHistory, riderLocation, paidRes, reconRes] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
         : Promise.resolve(null),
+      query(`SELECT COALESCE(SUM(amount), 0) AS amount_paid FROM payments WHERE order_id = $1 AND status = 'PAID'`, [order.id]),
+      query(`SELECT * FROM order_reconciliations WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`, [order.id]),
     ])
 
     const [enriched] = await this._attachItemThumbnails([order])
@@ -792,6 +1004,8 @@ export class OrdersService {
       ...enriched,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
       tracking: this._buildTrackingData(order, riderLocation),
+      amountPaidPaise: Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100),
+      latestReconciliation: reconRes.rows[0] || null,
     }
   }
 
@@ -1256,15 +1470,14 @@ export class OrdersService {
         throw { statusCode: 404, message: 'Order draft not found', code: 'DRAFT_NOT_FOUND' }
       }
 
-      // 2. Lock payment FOR UPDATE — skipped for COD, which is paid on delivery
-      // rather than upfront, so there's no payments row to require yet.
-      let payment = null
-      if (!isCod) {
-        const paymentRes = await client.query('SELECT * FROM payments WHERE order_draft_id = $1 AND status = \'PAID\' FOR UPDATE', [orderDraftId])
-        payment = paymentRes.rows[0]
-        if (!payment) {
-          throw { statusCode: 400, message: 'Payment not verified. Please complete payment first.', code: 'PAYMENT_PENDING' }
-        }
+      // 2. Lock payment FOR UPDATE — every order, COD or ONLINE, now requires
+      // a PAID advance before it can be created. COD only ever meant "pay
+      // the *balance* on delivery"; there's no one physically present at
+      // checkout time to hand cash to, so the advance is unconditional.
+      const paymentRes = await client.query('SELECT * FROM payments WHERE order_draft_id = $1 AND status = \'PAID\' FOR UPDATE', [orderDraftId])
+      const payment = paymentRes.rows[0]
+      if (!payment) {
+        throw { statusCode: 400, message: 'Advance payment not verified. Please complete payment first.', code: 'PAYMENT_PENDING' }
       }
 
       const snapshot = typeof draft.snapshot === 'string' ? JSON.parse(draft.snapshot) : draft.snapshot
@@ -1347,7 +1560,7 @@ export class OrdersService {
           taxRupees,
           totalRupees,
           isCod ? 'COD' : 'ONLINE',
-          isCod ? 'PENDING' : 'PAID',
+          'ADVANCE_PAID',
           JSON.stringify(snapshot.address),
           draft.slot_id,
           snapshot.booking_date,
@@ -1393,7 +1606,8 @@ export class OrdersService {
         note: 'Order placed from draft'
       })
 
-      // 10. Link payment (if any — COD has none yet) and consume hold
+      // 10. Link the advance payment (COD and ONLINE both have one now — only
+      // the balance leg differs between them) and consume the slot hold
       if (payment) {
         await client.query('UPDATE payments SET order_id = $1 WHERE id = $2', [order.id, payment.id])
       }

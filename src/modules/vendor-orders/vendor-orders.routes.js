@@ -15,10 +15,10 @@ import { VendorOrdersService } from './vendor-orders.service.js'
  *   POST   /:orderId/accept              — Accept order (→ VENDOR_ACCEPTED)
  *   POST   /:orderId/reject              — Reject order (→ VENDOR_REJECTED)
  *   POST   /:orderId/processing-stage    — Update processing stage
- *   POST   /:orderId/reconcile           — Receipt reconciliation
+ *   POST   /:orderId/reconcile           — Propose recalculation (staged, pending customer approval)
  */
 export default async function vendorOrdersRoutes(fastify) {
-  const service = new VendorOrdersService()
+  const service = new VendorOrdersService({ fastify })
   const controller = new VendorOrdersController(service)
 
   // All routes require authentication
@@ -62,7 +62,8 @@ export default async function vendorOrdersRoutes(fastify) {
             enum: [
               'WAITING_VENDOR_CONFIRMATION', 'VENDOR_ACCEPTED',
               'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED', 'PICKED_UP',
-              'RECEIVED_AT_VENDOR', 'WASHING', 'DRYING', 'IRONING', 'PACKED',
+              'RECEIVED_AT_VENDOR', 'RECONCILIATION_PENDING', 'RECONCILIATION_DISPUTED',
+              'WASHING', 'DRYING', 'IRONING', 'PACKED',
               'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY', 'DELIVERY_OTP_VERIFIED', 'DELIVERED',
               'VENDOR_REJECTED', 'AUTO_REJECTED', 'CUSTOMER_CANCELLED', 'ADMIN_CANCELLED', 'REFUNDED'
             ]
@@ -144,31 +145,38 @@ export default async function vendorOrdersRoutes(fastify) {
     }
   }, controller.updateProcessingStage.bind(controller))
 
-  // POST /:orderId/reconcile — Receipt reconciliation
+  // POST /:orderId/reconcile — Vendor's authoritative recalculation, staged
+  // pending customer approval (does not apply immediately)
   fastify.post('/:orderId/reconcile', {
     schema: {
       tags: ['Vendor Orders'],
-      summary: 'Reconcile garment count/weight after receiving order',
+      summary: 'Propose a recalculated garment count/weight for customer approval',
       security: [{ bearerAuth: [] }],
       params: orderIdParams,
       body: {
         type: 'object',
+        required: ['photo_urls'],
         properties: {
-          confirmed_lines: {
+          lines: {
             type: 'array',
             items: {
               type: 'object',
-              required: ['garment_type_id', 'confirmed_quantity'],
+              required: ['order_line_id', 'confirmed_quantity'],
               properties: {
-                garment_type_id: { type: 'string', format: 'uuid' },
+                order_line_id: { type: 'string', format: 'uuid' },
                 confirmed_quantity: { type: 'integer', minimum: 0 }
               }
             }
           },
           confirmed_weight_kg: { type: 'number', minimum: 0.1 },
-          adjustment_reason: { type: 'string', maxLength: 500 }
+          adjustment_reason: { type: 'string', maxLength: 500 },
+          photo_urls: {
+            type: 'array',
+            minItems: 1,
+            items: { type: 'string' }
+          }
         }
       }
     }
-  }, controller.reconcileReceipt.bind(controller))
+  }, controller.proposeReconciliation.bind(controller))
 }

@@ -21,15 +21,37 @@ export class PaymentsService {
   }
 
   /**
-   * Create a Razorpay order for an existing app order
+   * Configurable advance amount (default ₹50 / 5000 paise), read from
+   * app_settings so it's admin-adjustable without a code change — same
+   * lookup pattern already used elsewhere for store-level settings.
+   */
+  async _getAdvanceAmountPaise() {
+    try {
+      const { rows } = await query(`SELECT value FROM app_settings WHERE key = 'order_advance_amount_paise'`)
+      const parsed = Number(rows[0]?.value)
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : 5000
+    } catch (err) {
+      logger.warn({ err: err.message }, 'Failed to read configurable advance amount, using default')
+      return 5000
+    }
+  }
+
+  /**
+   * Create a Razorpay order for an existing app order — or, now, for a
+   * fixed advance against a not-yet-placed draft, or the remaining balance
+   * against an already-placed order. `purpose` is inferred when omitted:
+   * draft-based requests are always ADVANCE; order-based requests are FULL
+   * (legacy cart checkout, unchanged) unless an advance has already been
+   * paid for that order, in which case they're BALANCE.
    */
   async createPaymentOrder(userId, body) {
-    const { orderId, order_draft_id, orderDraftId } = typeof body === 'string' ? { orderId: body } : (body || {})
+    const { orderId, order_draft_id, orderDraftId, purpose: requestedPurpose } = typeof body === 'string' ? { orderId: body } : (body || {})
     const orderDraftIdVal = order_draft_id || orderDraftId
 
     let amountPaise = 0
     let amountRupees = 0
     let receipt = ''
+    let purpose = requestedPurpose
 
     if (orderDraftIdVal) {
       const draftRes = await query('SELECT id, payable_amount_paise FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
@@ -37,7 +59,11 @@ export class PaymentsService {
       if (!draft) {
         return { success: false, message: 'Order draft not found' }
       }
-      amountPaise = draft.payable_amount_paise
+      purpose = purpose || 'ADVANCE'
+      const advancePaise = await this._getAdvanceAmountPaise()
+      // Never charge more than the order's own estimate, so a tiny order
+      // isn't forced to overpay the configured advance.
+      amountPaise = Math.min(advancePaise, draft.payable_amount_paise)
       amountRupees = amountPaise / 100
       receipt = draft.id
     } else if (orderId) {
@@ -48,21 +74,37 @@ export class PaymentsService {
       if (order.paymentMethod !== 'ONLINE') {
         return { success: false, message: 'Order is not set for online payment' }
       }
-      if (order.paymentStatus === 'PAID') {
-        return { success: false, message: 'Order is already paid' }
+
+      const alreadyPaidRupees = await this.repo.sumPaidByOrderId(orderId)
+      if (!purpose) {
+        purpose = alreadyPaidRupees > 0 ? 'BALANCE' : 'FULL'
       }
-      amountPaise = Math.round(order.totalAmount * 100)
-      amountRupees = order.totalAmount
+
+      if (purpose === 'FULL') {
+        if (order.paymentStatus === 'PAID') {
+          return { success: false, message: 'Order is already paid' }
+        }
+        amountPaise = Math.round(order.totalAmount * 100)
+      } else {
+        const balancePaise = Math.round(order.totalAmount * 100) - Math.round(alreadyPaidRupees * 100)
+        amountPaise = Math.max(0, balancePaise)
+        if (amountPaise === 0) {
+          return { success: false, message: 'No balance due' }
+        }
+      }
+      amountRupees = amountPaise / 100
       receipt = order.orderNumber
     } else {
       return { success: false, message: 'Either orderId or order_draft_id must be provided' }
     }
 
-    // Check if payment record already exists
+    // Check if a payment of THIS purpose is already paid — checking only
+    // the latest row of any purpose would wrongly block a legitimate
+    // BALANCE charge once an ADVANCE row is already PAID.
     if (orderId) {
-      const existing = await this.repo.findByOrderId(orderId)
+      const existing = await this.repo.findByOrderIdAndPurpose(orderId, purpose)
       if (existing && existing.status === 'PAID') {
-        return { success: false, message: 'Payment already completed' }
+        return { success: false, message: `${purpose === 'FULL' ? 'Payment' : purpose.charAt(0) + purpose.slice(1).toLowerCase() + ' payment'} already completed` }
       }
     }
 
@@ -84,6 +126,7 @@ export class PaymentsService {
         status: 'PENDING',
         expiresAt,
         metadata: { receipt },
+        purpose,
       })
 
       if (orderId) {
@@ -100,6 +143,7 @@ export class PaymentsService {
           amount: amountRupees,
           currency: 'INR',
           keyId: 'mock_key_id',
+          purpose,
         },
       }
     }
@@ -113,6 +157,7 @@ export class PaymentsService {
         orderId: orderId || null,
         orderDraftId: orderDraftIdVal || null,
         userId,
+        purpose,
       },
     })
 
@@ -127,6 +172,7 @@ export class PaymentsService {
       status: 'PENDING',
       expiresAt,
       metadata: { receipt },
+      purpose,
     })
 
     if (orderId) {
@@ -148,6 +194,7 @@ export class PaymentsService {
         amount: amountRupees,
         currency: 'INR',
         keyId: env.RAZORPAY_KEY_ID,
+        purpose,
       },
     }
   }
@@ -226,7 +273,29 @@ export class PaymentsService {
       status: 'PAID',
     })
 
-    if (payment.orderId) {
+    if (payment.orderId && payment.purpose === 'BALANCE') {
+      // Balance-at-delivery leg: just mark paid and tell the customer.
+      // Must NOT run any of the FULL-path side effects below — this order
+      // is already well past PAYMENT_PENDING (e.g. out for delivery), so
+      // forcing it back to WAITING_VENDOR_CONFIRMATION or re-queuing an
+      // auto-reject job would corrupt its real lifecycle state.
+      await this.ordersRepo.updateStatus(payment.orderId, undefined, {
+        paymentStatus: 'PAID',
+      })
+      try {
+        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
+        const { NotificationsService } = await import('../notifications/notifications.service.js')
+        const notifService = new NotificationsService(new NotificationsRepository(), null)
+        await notifService.sendNotification(userId, {
+          title: 'Balance payment received',
+          body: `Your remaining balance of ₹${updated.amount} has been received.`,
+          type: 'order_balance_paid',
+          data: { orderId: payment.orderId },
+        })
+      } catch (err) {
+        logger.warn({ err: err.message, orderId: payment.orderId }, 'Balance-paid notification failed (non-critical)')
+      }
+    } else if (payment.orderId && payment.purpose === 'FULL') {
       // Update order payment status (legacy path)
       await this.ordersRepo.updateStatus(payment.orderId, 'WAITING_VENDOR_CONFIRMATION', {
         paymentStatus: 'PAID',
@@ -267,15 +336,23 @@ export class PaymentsService {
         logger.warn({ err: err.message, orderId: payment.orderId }, 'Order notification after payment verify failed (non-critical)')
       }
     }
+    // payment.purpose === 'ADVANCE' never reaches here with payment.orderId
+    // set — at this point only order_draft_id is set, the order doesn't
+    // exist yet (it's created by placeOrderFromDraft once this verify
+    // succeeds), exactly as before this change.
 
-    // Clear the cart - only after payment is confirmed.
-    try {
-      const { CartRepository } = await import('../../../archived_modules/cart/cart.repository.js')
-      const cartRepo = new CartRepository()
-      await cartRepo.clearCart(userId)
-      await cartRepo.clearExtras(userId)
-    } catch (err) {
-      logger.warn({ err: err.message, userId }, 'Cart clear after payment verify failed (non-critical)')
+    // Clear the cart - only after payment is confirmed. Skipped for a
+    // BALANCE payment: the customer may have an unrelated new order's items
+    // sitting in their cart right now, and this isn't a fresh checkout.
+    if (payment.purpose !== 'BALANCE') {
+      try {
+        const { CartRepository } = await import('../../../archived_modules/cart/cart.repository.js')
+        const cartRepo = new CartRepository()
+        await cartRepo.clearCart(userId)
+        await cartRepo.clearExtras(userId)
+      } catch (err) {
+        logger.warn({ err: err.message, userId }, 'Cart clear after payment verify failed (non-critical)')
+      }
     }
 
     logger.info(

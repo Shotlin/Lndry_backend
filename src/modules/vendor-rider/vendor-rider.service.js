@@ -1,6 +1,10 @@
 import { query, getClient } from '../../config/database.js'
+import { logger } from '../../config/logger.js'
 import { OrderOtpService } from '../order-otp/order-otp.service.js'
-import { validateTransition, recordOrderEvent } from '../../utils/state-machine.js'
+import { ORDER_STATUSES, validateTransition, recordOrderEvent } from '../../utils/state-machine.js'
+import { computeRecalculatedTotals, applyRecalculatedTotals } from '../../utils/order-recalculation.js'
+import { NotificationsRepository } from '../notifications/notifications.repository.js'
+import { NotificationsService } from '../notifications/notifications.service.js'
 
 /**
  * Vendor Rider service — the restricted job-fulfillment surface for a
@@ -9,8 +13,11 @@ import { validateTransition, recordOrderEvent } from '../../utils/state-machine.
  * src/modules/delivery/ (RIDER role, no vendor_id, commission/payouts).
  */
 export class VendorRiderService {
-  constructor({ otpService } = {}) {
+  constructor({ fastify, otpService } = {}) {
     this.otpService = otpService || new OrderOtpService()
+    this.notificationsService = fastify
+      ? new NotificationsService(new NotificationsRepository(), fastify)
+      : null
   }
 
   async _resolveRider(userId) {
@@ -43,6 +50,10 @@ export class VendorRiderService {
       .filter(Boolean)
       .join(', ')
 
+    const totalPaise = row.total_amount != null ? Math.round(Number(row.total_amount) * 100) : null
+    const amountPaidPaise = row.amount_paid != null ? Math.round(Number(row.amount_paid) * 100) : 0
+    const balanceDuePaise = totalPaise != null ? Math.max(0, totalPaise - amountPaidPaise) : null
+
     return {
       assignment_id: row.assignment_id,
       order_id: row.order_id,
@@ -59,6 +70,8 @@ export class VendorRiderService {
           ? row.vendor_delivery_slot_label
           : row.scheduled_slot_label,
       assigned_at: row.assigned_at,
+      payment_method: row.payment_method ?? null,
+      balance_due_paise: balanceDuePaise,
     }
   }
 
@@ -72,6 +85,8 @@ export class VendorRiderService {
       `SELECT oa.id AS assignment_id, oa.order_id, oa.assignment_type, oa.assigned_at,
               o.order_number, o.status AS order_status, o.delivery_address,
               o.scheduled_slot_label, o.vendor_delivery_slot_label, o.vendor_delivery_slot_at,
+              o.payment_method, o.total_amount,
+              (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE order_id = o.id AND status = 'PAID') AS amount_paid,
               u.name AS customer_name, u.phone AS customer_phone
        FROM order_assignments oa
        JOIN orders o ON o.id = oa.order_id
@@ -93,6 +108,8 @@ export class VendorRiderService {
       `SELECT oa.id AS assignment_id, oa.order_id, oa.assignment_type, oa.assigned_at,
               o.order_number, o.status AS order_status, o.delivery_address,
               o.scheduled_slot_label, o.vendor_delivery_slot_label, o.vendor_delivery_slot_at,
+              o.payment_method, o.total_amount,
+              (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE order_id = o.id AND status = 'PAID') AS amount_paid,
               u.name AS customer_name, u.phone AS customer_phone
        FROM order_assignments oa
        JOIN orders o ON o.id = oa.order_id
@@ -237,6 +254,167 @@ export class VendorRiderService {
       )
     }
     return { orderId, photosSaved: photos.length }
+  }
+
+  /**
+   * Rider's doorstep weigh-in/recount — corrects the customer's rough
+   * self-declared weight/piece-count. Applies immediately, no customer
+   * approval needed (this is just fixing a guess, not an authoritative
+   * recalculation — that's the vendor's later, gated step). Must happen
+   * before pickup-OTP verification; enforced only by allowed order statuses
+   * (UI-sequenced, same trust posture as submitPickupPhotos vs. the OTP step).
+   */
+  async submitMeasurements(userId, orderId, { confirmedWeightKg, lines: confirmedLines } = {}) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+    await this._assertOwnsAssignment(userId, orderId, 'PICKUP')
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows } = await client.query(
+        `SELECT id, status, fee_breakdown, estimated_amount_paise, payable_amount_paise
+         FROM orders WHERE id = $1 FOR UPDATE`,
+        [orderId]
+      )
+      const order = rows[0]
+      if (!order) {
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      const allowedStatuses = [ORDER_STATUSES.PICKUP_ASSIGNED, ORDER_STATUSES.GOING_FOR_PICKUP]
+      if (!allowedStatuses.includes(order.status)) {
+        throw { statusCode: 400, message: 'Measurements can only be recorded before pickup is confirmed', code: 'INVALID_STAGE' }
+      }
+
+      const linesRes = await client.query(
+        `SELECT id, garment_type_id, name, unit, rate_paise, estimated_quantity, confirmed_quantity
+         FROM order_lines WHERE order_id = $1`,
+        [orderId]
+      )
+
+      const computed = computeRecalculatedTotals({
+        orderRow: order,
+        lines: linesRes.rows,
+        confirmedLines,
+        confirmedWeightKg,
+      })
+
+      await applyRecalculatedTotals(client, orderId, computed)
+
+      await client.query(
+        `INSERT INTO order_reconciliations (
+           order_id, stage, status, proposed_by, proposed_by_role,
+           previous_subtotal_paise, proposed_subtotal_paise,
+           previous_payable_amount_paise, proposed_payable_amount_paise,
+           previous_weight_kg, proposed_weight_kg, line_changes
+         ) VALUES ($1, 'RIDER_PICKUP', 'APPLIED', $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+        [
+          orderId, userId, rider.role,
+          computed.previousSubtotalPaise, computed.proposedSubtotalPaise,
+          computed.previousPayableAmountPaise, computed.proposedPayableAmountPaise,
+          computed.previousWeightKg, computed.proposedWeightKg,
+          JSON.stringify(computed.lineChanges),
+        ]
+      )
+
+      await client.query(
+        `INSERT INTO audit_logs (actor_user_id, actor_role, actor_shop_id, target_type, target_id, action, before, after)
+         VALUES ($1, $2, $3, 'ORDER', $4, 'RIDER_MEASUREMENT', $5, $6)`,
+        [
+          userId, rider.role, rider.vendorId, orderId,
+          JSON.stringify({ subtotal_paise: computed.previousSubtotalPaise }),
+          JSON.stringify({ subtotal_paise: computed.proposedSubtotalPaise, confirmed_weight_kg: confirmedWeightKg }),
+        ]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: order.status, // Status doesn't change — immediate apply, no gate
+        actorId: userId,
+        actorRole: rider.role,
+        note: `Rider measurement: subtotal changed from ${computed.previousSubtotalPaise} to ${computed.proposedSubtotalPaise} paise`,
+      })
+
+      await client.query('COMMIT')
+
+      return {
+        orderId,
+        old_subtotal_paise: computed.previousSubtotalPaise,
+        new_subtotal_paise: computed.proposedSubtotalPaise,
+        new_payable_amount_paise: computed.proposedPayableAmountPaise,
+      }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Rider confirms cash collected for a COD order's balance at delivery —
+   * purely additive: COD today never marks anything paid at all, so this
+   * doesn't change any existing behavior, just adds a confirmation step.
+   * UI-sequenced before the delivery-OTP screen, not server-hard-gated,
+   * matching the same trust posture already extended to COD elsewhere.
+   */
+  async collectBalance(userId, orderId) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+    await this._assertOwnsAssignment(userId, orderId, 'DELIVERY')
+
+    const { rows } = await query(
+      `SELECT id, user_id, payment_method, total_amount FROM orders WHERE id = $1`,
+      [orderId]
+    )
+    const order = rows[0]
+    if (!order) {
+      throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+    }
+    if (order.payment_method !== 'COD') {
+      throw { statusCode: 400, message: 'This order\'s balance is settled online, not by the rider', code: 'NOT_COD' }
+    }
+
+    const paidRes = await query(
+      `SELECT COALESCE(SUM(amount), 0) AS amount_paid FROM payments WHERE order_id = $1 AND status = 'PAID'`,
+      [orderId]
+    )
+    const alreadyPaidPaise = Math.round(Number(paidRes.rows[0].amount_paid) * 100)
+    const totalPaise = Math.round(Number(order.total_amount) * 100)
+    const balancePaise = Math.max(0, totalPaise - alreadyPaidPaise)
+
+    if (balancePaise === 0) {
+      return { orderId, balance_collected_paise: 0, message: 'No balance due' }
+    }
+
+    await query(
+      `INSERT INTO payments (order_id, user_id, amount, currency, status, method, purpose)
+       VALUES ($1, $2, $3, 'INR', 'PAID', 'CASH', 'BALANCE')`,
+      [orderId, order.user_id, balancePaise / 100]
+    )
+    await query(`UPDATE orders SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1`, [orderId])
+
+    if (this.notificationsService && order.user_id) {
+      try {
+        await this.notificationsService.sendNotification(order.user_id, {
+          title: 'Balance payment received',
+          body: `Your remaining balance of ₹${(balancePaise / 100).toFixed(2)} was collected in cash.`,
+          type: 'order_balance_paid',
+          data: { orderId },
+        })
+      } catch (err) {
+        logger.warn({ err: err.message, orderId }, 'Balance-collected notification failed (non-critical)')
+      }
+    }
+
+    return { orderId, balance_collected_paise: balancePaise }
   }
 
   async verifyPickupOtp(userId, orderId, otp) {
