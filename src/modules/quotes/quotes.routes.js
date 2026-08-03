@@ -91,10 +91,16 @@ export default async function quotesRoutes(fastify) {
       security: [{ bearerAuth: [] }],
       body: {
         type: 'object',
-        required: ['vendor_id', 'service_id'],
+        required: ['vendor_id'],
         properties: {
           vendor_id: { type: 'string', format: 'uuid' },
-          service_id: { type: 'string', format: 'uuid' }, // vendor_service_id
+          // Informational only — no longer used to constrain rate lookup,
+          // since a single order can span multiple of this vendor's
+          // services (e.g. a per-kg wash line and a per-piece dry-clean
+          // line in the same cart). Each garment_line resolves its own
+          // rate against (vendor_id, garment_type_id) regardless of which
+          // service it's rated under.
+          service_id: { type: 'string', format: 'uuid' },
           garment_lines: {
             type: 'array',
             items: {
@@ -123,7 +129,10 @@ export default async function quotesRoutes(fastify) {
     let estimate_paise = 0
     const snapshot_lines = []
 
-    // 2. Pricing calculation (Category -> Vendor Service -> Garment Type -> Vendor Service Rate)
+    // 2. Pricing calculation — each garment_line resolves its own rate
+    // against (vendor_id, garment_type_id), so a single quote/order can
+    // freely mix lines from different vendor_services (e.g. a per-kg wash
+    // item alongside a per-piece dry-clean item for the same vendor).
     if (garment_lines && garment_lines.length > 0) {
       for (const line of garment_lines) {
         const rateRes = await query(
@@ -131,12 +140,13 @@ export default async function quotesRoutes(fastify) {
              FROM vendor_service_rates vsr
              JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
              JOIN garment_types gt ON vsr.garment_type_id = gt.id
-            WHERE vs.id = $1
-              AND vs.vendor_id = $2
-              AND vsr.garment_type_id = $3
+            WHERE vs.vendor_id = $1
+              AND vsr.garment_type_id = $2
               AND vsr.is_active = true
-              AND vs.deleted_at IS NULL`,
-          [service_id, vendor_id, line.garment_type_id]
+              AND vs.deleted_at IS NULL
+              AND vs.approval_status = 'APPROVED'
+            LIMIT 1`,
+          [vendor_id, line.garment_type_id]
         )
 
         if (rateRes.rows.length === 0) {
@@ -158,19 +168,19 @@ export default async function quotesRoutes(fastify) {
         })
       }
     } else if (estimated_weight_kg) {
-      // Find weight rate ('kg' unit) under the selected service
+      // Find weight rate ('kg' unit) — any of this vendor's active services.
       const rateRes = await query(
         `SELECT vsr.rate_paise, gt.id, gt.name, gt.unit
            FROM vendor_service_rates vsr
            JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
            JOIN garment_types gt ON vsr.garment_type_id = gt.id
-          WHERE vs.id = $1
-            AND vs.vendor_id = $2
+          WHERE vs.vendor_id = $1
             AND gt.unit = 'kg'
             AND vsr.is_active = true
             AND vs.deleted_at IS NULL
+            AND vs.approval_status = 'APPROVED'
           LIMIT 1`,
-        [service_id, vendor_id]
+        [vendor_id]
       )
 
       if (rateRes.rows.length === 0) {
@@ -203,7 +213,7 @@ export default async function quotesRoutes(fastify) {
         customer_id, vendor_id, service_id, estimated_weight_kg, estimate_paise, pricing_snapshot, expires_at
       ) VALUES ($1, $2, $3, $4, $5, $6, $7)
       RETURNING id, expires_at`,
-      [customerId, vendor_id, service_id, estimated_weight_kg || null, estimate_paise, JSON.stringify(snapshot_lines), expiry]
+      [customerId, vendor_id, service_id || null, estimated_weight_kg || null, estimate_paise, JSON.stringify(snapshot_lines), expiry]
     )
     const quote_id = insertRes.rows[0].id
 
@@ -277,7 +287,9 @@ export default async function quotesRoutes(fastify) {
     let estimate_paise = 0
     const snapshot_lines = []
 
-    // 2. Pricing recalculation (Category -> Vendor Service -> Garment Type -> Vendor Service Rate)
+    // 2. Pricing recalculation — same per-line (vendor_id, garment_type_id)
+    // resolution as POST /quotes, so a quote can be updated to span
+    // multiple of this vendor's services too.
     if (garment_lines && garment_lines.length > 0) {
       for (const line of garment_lines) {
         const rateRes = await query(
@@ -285,12 +297,13 @@ export default async function quotesRoutes(fastify) {
              FROM vendor_service_rates vsr
              JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
              JOIN garment_types gt ON vsr.garment_type_id = gt.id
-            WHERE vs.id = $1
-              AND vs.vendor_id = $2
-              AND vsr.garment_type_id = $3
+            WHERE vs.vendor_id = $1
+              AND vsr.garment_type_id = $2
               AND vsr.is_active = true
-              AND vs.deleted_at IS NULL`,
-          [dbQuote.service_id, dbQuote.vendor_id, line.garment_type_id]
+              AND vs.deleted_at IS NULL
+              AND vs.approval_status = 'APPROVED'
+            LIMIT 1`,
+          [dbQuote.vendor_id, line.garment_type_id]
         )
 
         if (rateRes.rows.length === 0) {
@@ -317,13 +330,13 @@ export default async function quotesRoutes(fastify) {
            FROM vendor_service_rates vsr
            JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
            JOIN garment_types gt ON vsr.garment_type_id = gt.id
-          WHERE vs.id = $1
-            AND vs.vendor_id = $2
+          WHERE vs.vendor_id = $1
             AND gt.unit = 'kg'
             AND vsr.is_active = true
             AND vs.deleted_at IS NULL
+            AND vs.approval_status = 'APPROVED'
           LIMIT 1`,
-        [dbQuote.service_id, dbQuote.vendor_id]
+        [dbQuote.vendor_id]
       )
 
       if (rateRes.rows.length === 0) {
