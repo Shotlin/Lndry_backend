@@ -67,7 +67,7 @@ export class VendorOrdersService {
     const whereClause = conditions.join(' AND ')
     const listRes = await query(
       `SELECT o.id, o.order_number, o.status, o.user_id, o.items, o.subtotal,
-              o.delivery_fee, o.platform_fee, o.tax_amount, o.total_amount,
+              o.delivery_fee, o.platform_fee, o.tax_amount, o.handling_fee, o.total_amount,
               o.payment_method, o.payment_status,
               o.delivery_address, o.vendor_slot_id, o.pickup_date,
               o.estimated_amount_paise, o.payable_amount_paise, o.fee_breakdown,
@@ -77,7 +77,7 @@ export class VendorOrdersService {
        FROM orders o
        LEFT JOIN users u ON o.user_id = u.id
        WHERE ${whereClause}
-       ORDER BY o.created_at DESC
+       ORDER BY o.updated_at DESC
        LIMIT $${pIdx} OFFSET $${pIdx + 1}`,
       [...params, limit, offset]
     )

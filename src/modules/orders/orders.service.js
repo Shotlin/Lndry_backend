@@ -1033,7 +1033,7 @@ export class OrdersService {
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes] = await Promise.all([
+    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
@@ -1043,6 +1043,12 @@ export class OrdersService {
       query(`SELECT * FROM order_reconciliations WHERE order_id = $1 AND stage = 'RIDER_PICKUP' ORDER BY created_at DESC LIMIT 1`, [order.id]),
       // Vendor's authoritative recalculation — the one the customer may need to act on.
       query(`SELECT * FROM order_reconciliations WHERE order_id = $1 AND stage = 'VENDOR_RECEIPT' ORDER BY created_at DESC LIMIT 1`, [order.id]),
+      // order.items (JSONB) is a snapshot frozen at checkout — it never
+      // reflects a rider/vendor correction or reclassification. order_lines
+      // is the live source of truth, so it replaces the snapshot here
+      // whenever it has rows (older orders predating order_lines fall back
+      // to the snapshot).
+      this.repo.getOrderItems(order.id),
     ])
 
     const [riderReevaluation, vendorReevaluation] = await Promise.all([
@@ -1054,13 +1060,33 @@ export class OrdersService {
       ? JSON.parse(order.fee_breakdown)
       : (order.fee_breakdown || {})
 
-    const [enriched] = await this._attachItemThumbnails([order])
+    const orderWithLiveItems = liveItems.length > 0 ? { ...order, items: liveItems } : order
+    const [enriched] = await this._attachItemThumbnails([orderWithLiveItems])
+
+    const amountPaidPaise = Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100)
+    if (amountPaidPaise === 0) {
+      // Diagnostic only — the customer-reported "advance shows ₹0 despite a
+      // successful Razorpay charge" bug hasn't been reproduced via static
+      // code review. Logging here (rather than only in payments.service.js)
+      // lets a real customer session pin down whether the payments row is
+      // missing entirely, unlinked (order_id NULL), or genuinely never
+      // reached PAID — remove once root-caused.
+      const paymentsDebugRes = await query(
+        `SELECT id, status, purpose, amount, order_id, order_draft_id, razorpay_order_id, razorpay_payment_id, created_at
+         FROM payments WHERE order_id = $1 OR order_draft_id = $1 ORDER BY created_at DESC`,
+        [order.id]
+      )
+      logger.warn(
+        { orderId: order.id, orderNumber: order.order_number, payments: paymentsDebugRes.rows },
+        'amountPaidPaise resolved to 0 — dumping matching payments rows for diagnosis'
+      )
+    }
 
     return {
       ...enriched,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
       tracking: this._buildTrackingData(order, riderLocation),
-      amountPaidPaise: Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100),
+      amountPaidPaise,
       deliveryFeePaise: feeBreakdown.delivery_fee_paise ?? 2900,
       platformFeePaise: feeBreakdown.platform_fee_paise ?? 500,
       riderReevaluation,

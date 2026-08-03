@@ -493,16 +493,29 @@ export class OrdersRepository {
   }
 
   /**
-   * Get order items from order_items table
+   * Get order items from order_lines table — the live, current-state source
+   * (kept in sync by rider/vendor reconciliation and reclassification),
+   * unlike the `orders.items` JSONB column which is a point-in-time
+   * snapshot captured once at checkout and never updated afterwards.
+   * `price`/`total` prefer the paise-precision `rate_paise`/`total_paise`
+   * columns (kept correct through reconciliation) and fall back to the
+   * legacy rupee columns (only ones populated before any reconciliation
+   * has ever touched a line, since `rate_paise`/`total_paise` start NULL
+   * at order creation).
    * Phase 3: surfaces shop_product_id and vendor_id for audit/UI parity
    * with the JSONB items column.
    */
   async getOrderItems(orderId) {
     const { rows } = await query(
-      `SELECT garment_type_id AS garment_rate_id, name, price, quantity, unit, total,
+      `SELECT garment_type_id AS garment_rate_id, garment_type_id AS product_id,
+              name, unit,
+              COALESCE(rate_paise / 100.0, price) AS price,
+              COALESCE(confirmed_quantity, quantity) AS quantity,
+              COALESCE(total_paise / 100.0, total) AS total,
               shop_product_id, vendor_id
        FROM order_lines
-       WHERE order_id = $1`,
+       WHERE order_id = $1
+       ORDER BY created_at ASC`,
       [orderId]
     )
     return rows
