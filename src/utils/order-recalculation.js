@@ -4,25 +4,29 @@
  * vendor's authoritative reconciliation (staged, requires customer accept).
  *
  * Extracted from the pre-existing (and, until this change, non-functional)
- * `reconcileReceipt` in vendor-orders.service.js. Two real bugs fixed along
+ * `reconcileReceipt` in vendor-orders.service.js. Real bugs fixed along
  * the way:
  *   1. The old weight-adjustment target line was picked via
  *      `.find(l => l.rate_paise > 0)` — nearly every line matches that, not
- *      just the kg-priced one. This version filters on `unit === 'kg'`.
+ *      just the kg-priced one.
  *   2. When `confirmed_lines` was supplied, the old subtotal was summed only
  *      over the lines explicitly mentioned — any other line on the order
  *      silently dropped out of the total. This version always recomputes
- *      the full subtotal over every line on the order, applying corrections
- *      where supplied and falling back to the existing confirmed/estimated
- *      quantity otherwise — which is also what makes it safe to supply a
- *      weight correction and line corrections in the same call.
+ *      the full subtotal over every line on the order.
+ *   3. kg-priced lines are now whole-number quantities, exactly like
+ *      piece-priced lines — no separate fractional-weight code path. A
+ *      rider/vendor corrects a kg line the same way as a piece line: pick
+ *      a new whole count via +/-, e.g. "Wash & Steam Iron: 1 kg → 2 kg".
+ *      This also means `confirmed_quantity`/`quantity` never need the old
+ *      sentinel-value=1 workaround — every line always stores its real
+ *      confirmed count.
  *
  * Reclassification (vendor-only — the rider never reclassifies, only
- * corrects quantity/weight): `reclassifications` lets a line's service
- * change entirely (e.g. a customer picked "Wash & Fold" per-kg for a
- * garment the vendor determines is actually a delicate dry-clean item
- * priced per-piece). The caller resolves the new rate/unit/name against
- * this vendor's own `vendor_service_rates` *before* calling this function —
+ * corrects quantity): `reclassifications` lets a line's service change
+ * entirely (e.g. a customer picked "Wash & Fold" per-kg for a garment the
+ * vendor determines is actually a delicate dry-clean item priced
+ * per-piece). The caller resolves the new rate/unit/name against this
+ * vendor's own `vendor_service_rates` *before* calling this function —
  * kept here as a plain data lookup so this function stays a pure sync
  * calculation with no DB access.
  */
@@ -31,19 +35,18 @@
  * @param {object} params
  * @param {object} params.orderRow - { fee_breakdown, estimated_amount_paise, payable_amount_paise }
  * @param {Array}  params.lines - order_lines rows: { id, garment_type_id, name, unit, rate_paise, estimated_quantity, confirmed_quantity }
- * @param {Array}  [params.confirmedLines] - [{ order_line_id, confirmed_quantity }]
- * @param {number} [params.confirmedWeightKg]
+ * @param {Array}  [params.confirmedLines] - [{ order_line_id, confirmed_quantity }] — confirmed_quantity is a whole
+ *   number for every line regardless of unit (kg lines count whole kilograms, piece lines count items).
  * @param {Map<string, {garmentTypeId: string, name: string, unit: string, ratePaise: number}>} [params.reclassifications] - keyed by order_line_id
  * @returns {{
  *   previousSubtotalPaise: number, proposedSubtotalPaise: number,
  *   previousPayableAmountPaise: number, proposedPayableAmountPaise: number,
- *   previousWeightKg: number|null, proposedWeightKg: number|null,
  *   newFeeBreakdown: object, lineChanges: Array
  * }}
  */
-export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, confirmedWeightKg, reclassifications }) {
-  if ((!confirmedLines || confirmedLines.length === 0) && confirmedWeightKg == null && (!reclassifications || reclassifications.size === 0)) {
-    throw { statusCode: 400, message: 'Either confirmed_lines, confirmed_weight_kg, or a reclassification is required', code: 'INVALID_INPUT' }
+export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, reclassifications }) {
+  if ((!confirmedLines || confirmedLines.length === 0) && (!reclassifications || reclassifications.size === 0)) {
+    throw { statusCode: 400, message: 'Either confirmed_lines or a reclassification is required', code: 'INVALID_INPUT' }
   }
 
   const feeBreakdown = typeof orderRow.fee_breakdown === 'string'
@@ -62,41 +65,15 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
       .map(c => [c.order_line_id, c.confirmed_quantity])
   )
 
-  // Weight correction targets exactly one kg-priced line — the one with the
-  // largest existing value (estimated_quantity * rate_paise), so a
-  // multi-kg-service order picks its dominant line rather than an arbitrary
-  // positive-rate match.
-  let weightTargetLineId = null
-  let previousWeightKg = null
-  let proposedWeightKg = null
-  if (confirmedWeightKg != null) {
-    const kgLines = lines.filter(l => l.unit === 'kg')
-    if (kgLines.length > 0) {
-      const target = kgLines.reduce((best, l) => {
-        const value = (l.estimated_quantity || 0) * (l.rate_paise || 0)
-        const bestValue = (best.estimated_quantity || 0) * (best.rate_paise || 0)
-        return value > bestValue ? l : best
-      }, kgLines[0])
-      weightTargetLineId = target.id
-      previousWeightKg = target.confirmed_quantity ?? target.estimated_quantity ?? null
-      proposedWeightKg = confirmedWeightKg
-    }
-  }
-
   const lineChanges = []
   let proposedSubtotalPaise = 0
 
   for (const line of lines) {
     const previousQuantity = line.confirmed_quantity ?? line.estimated_quantity ?? 0
     const previousTotalPaise = Math.round((line.rate_paise || 0) * previousQuantity)
-    const isWeightAdjustment = line.id === weightTargetLineId
-    let proposedQuantity = previousQuantity
-
-    if (confirmedByLineId.has(line.id)) {
-      proposedQuantity = confirmedByLineId.get(line.id)
-    } else if (isWeightAdjustment) {
-      proposedQuantity = confirmedWeightKg
-    }
+    const proposedQuantity = confirmedByLineId.has(line.id)
+      ? confirmedByLineId.get(line.id)
+      : previousQuantity
 
     const reclass = reclassifications?.get(line.id)
     const isReclassified = !!reclass
@@ -123,7 +100,6 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
         proposed_quantity: proposedQuantity,
         previous_total_paise: previousTotalPaise,
         proposed_total_paise: proposedTotalPaise,
-        is_weight_adjustment: isWeightAdjustment,
         is_reclassified: isReclassified,
       })
     }
@@ -144,8 +120,6 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
     proposedSubtotalPaise,
     previousPayableAmountPaise,
     proposedPayableAmountPaise,
-    previousWeightKg,
-    proposedWeightKg,
     newFeeBreakdown,
     lineChanges,
   }
@@ -153,12 +127,9 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
 
 /**
  * Writes a `computeRecalculatedTotals` result to `order_lines`/`orders`.
- * `confirmed_quantity`/`quantity` are INTEGER columns, so a weight-adjusted
- * line (fractional kg) can't store the real weight there — it's recorded as
- * the sentinel `confirmed_quantity=1`, `quantity` left untouched, with
- * `total_paise` carrying the real computed money value. The actual
- * fractional weight lives in `order_reconciliations.proposed_weight_kg`.
- * A piece-adjusted line stores its real integer count in both columns.
+ * Every changed line stores its real confirmed count in both
+ * `confirmed_quantity` and `quantity` — kg lines included, since weight is
+ * now always a whole number just like a piece count.
  *
  * @param {import('pg').PoolClient} client
  * @param {string} orderId
@@ -166,25 +137,17 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
  */
 export async function applyRecalculatedTotals(client, orderId, computed) {
   for (const change of computed.lineChanges) {
-    if (change.is_weight_adjustment) {
-      // $1 is passed twice (once plain, once cast to numeric) rather than
-      // reused by placeholder number — reusing $1 in both a plain-integer
-      // context and an explicit ::numeric cast leaves Postgres unable to
-      // settle on one type for it, throwing 42P08 "indeterminate_datatype".
-      await client.query(
-        `UPDATE order_lines
-         SET confirmed_quantity = 1, total_paise = $1, total = ($2::numeric / 100)
-         WHERE id = $3`,
-        [change.proposed_total_paise, change.proposed_total_paise, change.order_line_id]
-      )
-    } else {
-      await client.query(
-        `UPDATE order_lines
-         SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100)
-         WHERE id = $4`,
-        [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.order_line_id]
-      )
-    }
+    // The paise value is passed twice (once plain, once for the ::numeric
+    // cast) rather than reused by placeholder number — reusing one $N in
+    // both a plain-integer context and an explicit ::numeric cast leaves
+    // Postgres unable to settle on a single type for it, throwing 42P08
+    // "indeterminate_datatype".
+    await client.query(
+      `UPDATE order_lines
+       SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100)
+       WHERE id = $4`,
+      [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.order_line_id]
+    )
   }
 
   await client.query(

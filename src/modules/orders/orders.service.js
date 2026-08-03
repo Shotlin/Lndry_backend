@@ -680,29 +680,21 @@ export class OrdersService {
         // garment_type_id/name/unit/rate_paise are always set from the
         // proposed_* values — a no-op for non-reclassified lines (proposed
         // equals previous there), but the mechanism that actually moves a
-        // line to a different service for reclassified ones.
-        // Each paise value is passed twice (once plain, once for the
-        // ::numeric cast) rather than reused by placeholder number —
-        // reusing one $N in both a plain-integer context and an explicit
-        // ::numeric cast leaves Postgres unable to settle on a single type
-        // for it, throwing 42P08 "indeterminate_datatype".
-        if (change.is_weight_adjustment) {
-          await client.query(
-            `UPDATE order_lines
-             SET confirmed_quantity = 1, total_paise = $1, total = ($2::numeric / 100),
-                 garment_type_id = $3, name = $4, unit = $5, rate_paise = $6
-             WHERE id = $7`,
-            [change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
-          )
-        } else {
-          await client.query(
-            `UPDATE order_lines
-             SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100),
-                 garment_type_id = $4, name = $5, unit = $6, rate_paise = $7
-             WHERE id = $8`,
-            [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
-          )
-        }
+        // line to a different service for reclassified ones. Every line
+        // (kg or piece) stores its real confirmed count now — no sentinel
+        // value, since weight is always a whole number just like a piece
+        // count. Each paise value is passed twice (once plain, once for the
+        // ::numeric cast) rather than reused by placeholder number — reusing
+        // one $N in both a plain-integer context and an explicit ::numeric
+        // cast leaves Postgres unable to settle on a single type for it,
+        // throwing 42P08 "indeterminate_datatype".
+        await client.query(
+          `UPDATE order_lines
+           SET confirmed_quantity = $1, quantity = $1, total_paise = $2, total = ($3::numeric / 100),
+               garment_type_id = $4, name = $5, unit = $6, rate_paise = $7
+           WHERE id = $8`,
+          [change.proposed_quantity, change.proposed_total_paise, change.proposed_total_paise, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, change.order_line_id]
+        )
       }
 
       const feeBreakdown = typeof order.fee_breakdown === 'string'
@@ -1007,15 +999,39 @@ export class OrdersService {
     }
   }
 
+  /**
+   * Attaches photo evidence to a reconciliation row for customer display.
+   */
+  async _attachReconciliationPhotos(row) {
+    if (!row) return null
+    const photosRes = await query(
+      `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+      [row.id]
+    )
+    return { ...row, photos: photosRes.rows.map((r) => r.photo_url) }
+  }
+
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation, paidRes, reconRes] = await Promise.all([
+    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
         : Promise.resolve(null),
       query(`SELECT COALESCE(SUM(amount), 0) AS amount_paid FROM payments WHERE order_id = $1 AND status = 'PAID'`, [order.id]),
-      query(`SELECT * FROM order_reconciliations WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`, [order.id]),
+      // Rider's immediate-apply weigh-in — informational, no accept/reject.
+      query(`SELECT * FROM order_reconciliations WHERE order_id = $1 AND stage = 'RIDER_PICKUP' ORDER BY created_at DESC LIMIT 1`, [order.id]),
+      // Vendor's authoritative recalculation — the one the customer may need to act on.
+      query(`SELECT * FROM order_reconciliations WHERE order_id = $1 AND stage = 'VENDOR_RECEIPT' ORDER BY created_at DESC LIMIT 1`, [order.id]),
     ])
+
+    const [riderReevaluation, vendorReevaluation] = await Promise.all([
+      this._attachReconciliationPhotos(riderReconRes.rows[0] || null),
+      this._attachReconciliationPhotos(vendorReconRes.rows[0] || null),
+    ])
+
+    const feeBreakdown = typeof order.fee_breakdown === 'string'
+      ? JSON.parse(order.fee_breakdown)
+      : (order.fee_breakdown || {})
 
     const [enriched] = await this._attachItemThumbnails([order])
 
@@ -1024,7 +1040,10 @@ export class OrdersService {
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
       tracking: this._buildTrackingData(order, riderLocation),
       amountPaidPaise: Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100),
-      latestReconciliation: reconRes.rows[0] || null,
+      deliveryFeePaise: feeBreakdown.delivery_fee_paise ?? 2900,
+      platformFeePaise: feeBreakdown.platform_fee_paise ?? 500,
+      riderReevaluation,
+      vendorReevaluation,
     }
   }
 

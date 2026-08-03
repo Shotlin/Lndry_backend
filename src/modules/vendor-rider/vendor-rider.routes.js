@@ -80,10 +80,14 @@ export default async function vendorRiderRoutes(fastify) {
       params: orderIdParams,
       body: {
         type: 'object',
+        required: ['lines'],
         properties: {
-          confirmed_weight_kg: { type: 'number', minimum: 0.1 },
+          // kg-priced lines use a whole-number confirmed_quantity here too
+          // (e.g. "Wash & Steam Iron" 1 -> 2), exactly like piece-priced
+          // lines — there's no separate fractional-weight input anymore.
           lines: {
             type: 'array',
+            minItems: 1,
             items: {
               type: 'object',
               required: ['order_line_id', 'confirmed_quantity'],

@@ -427,7 +427,6 @@ export class VendorOrdersService {
 
     const {
       lines: confirmedLines,
-      confirmed_weight_kg: confirmedWeightKg,
       adjustment_reason: adjustmentReason,
       photo_urls: photoUrls,
     } = body
@@ -507,7 +506,6 @@ export class VendorOrdersService {
         orderRow: order,
         lines: linesRes.rows,
         confirmedLines,
-        confirmedWeightKg,
         reclassifications,
       })
 
@@ -518,14 +516,13 @@ export class VendorOrdersService {
              order_id, stage, status, proposed_by, proposed_by_role,
              previous_subtotal_paise, proposed_subtotal_paise,
              previous_payable_amount_paise, proposed_payable_amount_paise,
-             previous_weight_kg, proposed_weight_kg, line_changes, reason
-           ) VALUES ($1, 'VENDOR_RECEIPT', 'PENDING_CUSTOMER', $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             line_changes, reason
+           ) VALUES ($1, 'VENDOR_RECEIPT', 'PENDING_CUSTOMER', $2, $3, $4, $5, $6, $7, $8, $9)
            RETURNING id`,
           [
             orderId, userId, vendor.role,
             computed.previousSubtotalPaise, computed.proposedSubtotalPaise,
             computed.previousPayableAmountPaise, computed.proposedPayableAmountPaise,
-            computed.previousWeightKg, computed.proposedWeightKg,
             JSON.stringify(computed.lineChanges), adjustmentReason || null,
           ]
         )
@@ -556,7 +553,7 @@ export class VendorOrdersService {
         [
           userId, vendor.role, vendor.vendorId, orderId,
           JSON.stringify({ subtotal_paise: computed.previousSubtotalPaise }),
-          JSON.stringify({ subtotal_paise: computed.proposedSubtotalPaise, confirmed_weight_kg: confirmedWeightKg }),
+          JSON.stringify({ subtotal_paise: computed.proposedSubtotalPaise }),
         ]
       )
 

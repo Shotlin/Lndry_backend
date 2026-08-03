@@ -173,7 +173,6 @@ export default async function vendorOrdersRoutes(fastify) {
               }
             }
           },
-          confirmed_weight_kg: { type: 'number', minimum: 0.1 },
           adjustment_reason: { type: 'string', maxLength: 500 },
           photo_urls: {
             type: 'array',
