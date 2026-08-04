@@ -144,7 +144,20 @@ export class VendorOrdersService {
       `SELECT * FROM order_reconciliations WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [orderId]
     )
-    order.latestReconciliation = reconRes.rows[0] || null
+    if (reconRes.rows[0]) {
+      // Photos aren't on order_reconciliations itself — attached here so the
+      // vendor's own order-detail screen can keep showing exactly what was
+      // submitted (services, quantities, amount, reason, evidence) while a
+      // proposal is pending/disputed, instead of reverting to stale
+      // pre-reconciliation data.
+      const photosRes = await query(
+        `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+        [reconRes.rows[0].id]
+      )
+      order.latestReconciliation = { ...reconRes.rows[0], photos: photosRes.rows.map((r) => r.photo_url) }
+    } else {
+      order.latestReconciliation = null
+    }
 
     return order
   }
