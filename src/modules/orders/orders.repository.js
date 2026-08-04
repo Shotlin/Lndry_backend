@@ -433,10 +433,21 @@ export class OrdersRepository {
    * Update order status
    */
   async updateStatus(id, status, extra = {}) {
-    const sets = ['status = $1', 'updated_at = NOW()']
-    const params = [status]
-    let idx = 2
+    // `status` is intentionally optional (callers pass `undefined` to touch
+    // only `extra` fields, e.g. payments.service.js setting paymentExpiresAt
+    // on an in-flight order without changing its lifecycle status) — must be
+    // conditional like every other field here, not unconditionally included.
+    // node-pg sends a JS `undefined` parameter as SQL NULL, so an
+    // unconditional `status = $1` silently wiped the order's real status
+    // back to NULL on every one of those calls.
+    const sets = ['updated_at = NOW()']
+    const params = []
+    let idx = 1
 
+    if (status) {
+      sets.push(`status = $${idx++}`)
+      params.push(status)
+    }
     if (extra.cancelledReason) {
       sets.push(`cancelled_reason = $${idx++}`)
       params.push(extra.cancelledReason)
@@ -448,6 +459,10 @@ export class OrdersRepository {
     if (extra.paymentStatus) {
       sets.push(`payment_status = $${idx++}`)
       params.push(extra.paymentStatus)
+    }
+    if (extra.paymentExpiresAt) {
+      sets.push(`payment_expires_at = $${idx++}`)
+      params.push(extra.paymentExpiresAt)
     }
 
     params.push(id)
