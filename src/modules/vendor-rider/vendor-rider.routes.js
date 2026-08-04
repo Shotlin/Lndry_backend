@@ -18,6 +18,7 @@ import { VendorRiderService } from './vendor-rider.service.js'
  *   POST /jobs/:orderId/pickup-otp/verify   — confirm pickup
  *   POST /jobs/:orderId/start-delivery      — mark "on my way" (OUT_FOR_DELIVERY)
  *   POST /jobs/:orderId/collect-balance     — confirm COD cash balance collected
+ *   POST /jobs/:orderId/delivery-photos     — save optional delivery-proof photo(s)
  *   POST /jobs/:orderId/delivery-otp/verify — confirm delivery
  */
 export default async function vendorRiderRoutes(fastify) {
@@ -160,6 +161,34 @@ export default async function vendorRiderRoutes(fastify) {
       params: orderIdParams,
     },
   }, controller.collectBalance.bind(controller))
+
+  fastify.post('/jobs/:orderId/delivery-photos', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Save optional delivery-proof photo(s) before OTP entry',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+      body: {
+        type: 'object',
+        required: ['photos'],
+        properties: {
+          photos: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              required: ['url', 'is_grouped'],
+              properties: {
+                url: { type: 'string' },
+                order_line_id: { type: 'string', format: 'uuid', nullable: true },
+                is_grouped: { type: 'boolean' },
+              },
+            },
+          },
+        },
+      },
+    },
+  }, controller.submitDeliveryPhotos.bind(controller))
 
   fastify.post('/jobs/:orderId/delivery-otp/verify', {
     schema: {

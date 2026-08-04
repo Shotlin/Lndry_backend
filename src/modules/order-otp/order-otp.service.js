@@ -1,6 +1,7 @@
 import bcrypt from 'bcrypt'
 import { query } from '../../config/database.js'
 import { redis } from '../../config/redis.js'
+import { getOrderBalanceDuePaise } from '../../utils/order-balance.js'
 
 /**
  * Service to manage pickup and delivery OTPs using the order_otps table and Redis.
@@ -119,6 +120,19 @@ export class OrderOtpService {
     }
     if (orderRows[0].user_id !== userId) {
       throw { statusCode: 403, message: 'Forbidden - order ownership check failed', code: 'FORBIDDEN' }
+    }
+
+    // Never reveal the delivery OTP while the order's balance is unpaid —
+    // the customer app locks/blurs this and unlocks once payment clears.
+    if (purpose === 'DELIVERY') {
+      const balanceDuePaise = await getOrderBalanceDuePaise(orderId)
+      if (balanceDuePaise > 0) {
+        throw {
+          statusCode: 403,
+          message: 'Complete the remaining payment to unlock your Delivery OTP.',
+          code: 'PAYMENT_PENDING',
+        }
+      }
     }
 
     const plaintextOtp = await redis.get(`order_otp:${orderId}:${purpose}`)

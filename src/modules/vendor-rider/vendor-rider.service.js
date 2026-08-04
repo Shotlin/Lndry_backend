@@ -5,6 +5,7 @@ import { ORDER_STATUSES, validateTransition, recordOrderEvent } from '../../util
 import { computeRecalculatedTotals, applyRecalculatedTotals } from '../../utils/order-recalculation.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
+import { getOrderBalanceDuePaise } from '../../utils/order-balance.js'
 
 /**
  * Vendor Rider service — the restricted job-fulfillment surface for a
@@ -434,9 +435,44 @@ export class VendorRiderService {
       throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
     }
     await this._assertOwnsAssignment(userId, orderId, 'DELIVERY')
+
+    const balanceDuePaise = await getOrderBalanceDuePaise(orderId)
+    if (balanceDuePaise > 0) {
+      throw {
+        statusCode: 400,
+        message: 'Customer payment is still pending. Delivery cannot be completed.',
+        code: 'PAYMENT_PENDING',
+      }
+    }
+
     await this.otpService.verifyOtp(orderId, 'DELIVERY', otp)
     await this._advanceOrder(orderId, userId, 'DELIVERY_OTP_VERIFIED', 'DELIVERED', 'DELIVERY')
     return { orderId, status: 'DELIVERED' }
+  }
+
+  /**
+   * Optional delivery-proof photo, captured before the delivery OTP screen —
+   * same table/pattern as submitPickupPhotos, distinguished by `context`.
+   */
+  async submitDeliveryPhotos(userId, orderId, photos) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+    await this._assertOwnsAssignment(userId, orderId, 'DELIVERY')
+
+    if (!Array.isArray(photos) || photos.length === 0) {
+      throw { statusCode: 400, message: 'photos array is required', code: 'VALIDATION_ERROR' }
+    }
+
+    for (const photo of photos) {
+      await query(
+        `INSERT INTO order_pickup_photos (order_id, order_line_id, photo_url, is_grouped, uploaded_by, context)
+         VALUES ($1, $2, $3, $4, $5, 'DELIVERY_PROOF')`,
+        [orderId, photo.order_line_id || null, photo.url, !!photo.is_grouped, userId]
+      )
+    }
+    return { orderId, photosSaved: photos.length }
   }
 
   /**

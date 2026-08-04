@@ -94,6 +94,19 @@ export class VendorRiderController {
     }
   }
 
+  async submitDeliveryPhotos(request, reply) {
+    try {
+      const result = await this.service.submitDeliveryPhotos(
+        request.user.id,
+        request.params.orderId,
+        request.body.photos
+      )
+      return reply.send(success(result, 'Delivery photos saved'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async verifyDeliveryOtp(request, reply) {
     try {
       const result = await this.service.verifyDeliveryOtp(
