@@ -613,6 +613,35 @@ export class VendorsService {
     }
   }
 
+  /**
+   * Flat, vendor-scoped list of every garment-type this vendor can actually
+   * charge for, across all their active+approved services in one call —
+   * built for the reconciliation "move item to a different service" /
+   * "add a new service" picker UI, which needs category + service + garment
+   * name + unit + price + image together rather than the paginated
+   * per-service shape `getVendorServices`/`getVendorServiceDetails` return.
+   */
+  async getReconciliationCatalogue(userId) {
+    const vendor = await this.repo.findByUserId(userId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+
+    const { rows } = await query(
+      `SELECT vsr.garment_type_id, gt.name AS garment_name, gt.unit, vsr.rate_paise,
+              vs.id AS vendor_service_id, vs.name AS service_name,
+              sc.id AS category_id, sc.name AS category_name,
+              COALESCE(vs.image_asset_id, sc.image_url) AS image_url
+       FROM vendor_service_rates vsr
+       JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
+       JOIN garment_types gt ON vsr.garment_type_id = gt.id
+       LEFT JOIN service_categories sc ON gt.category_id = sc.id
+       WHERE vs.vendor_id = $1 AND vsr.is_active = true AND vs.is_available = true
+         AND vs.deleted_at IS NULL AND vs.approval_status = 'APPROVED' AND gt.is_active = true
+       ORDER BY sc.name, vs.name, gt.name`,
+      [vendor.id]
+    )
+    return rows
+  }
+
   async createVendorServiceDraft(userId, payload) {
     const categoryId = typeof payload === 'object' ? payload.category_id : payload
     const customName = typeof payload === 'object' ? payload.name : null

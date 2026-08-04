@@ -690,7 +690,24 @@ export class OrdersService {
         // reusing one $N in both a plain-integer context and an explicit
         // ::numeric cast leaves Postgres unable to settle on a single type
         // for it, throwing 42P08 "indeterminate_datatype".
-        if (change.is_weight_adjustment) {
+        if (change.is_new) {
+          // A service that wasn't on the order at all — either a genuine
+          // addition, or the destination for a partial quantity moved out
+          // of an existing continuous-unit line. Didn't exist as an
+          // order_lines row until now (staged only in this reconciliation's
+          // line_changes JSON since proposeReconciliation), so this is an
+          // INSERT, not an UPDATE. Same INTEGER-column sentinel as the
+          // weight-adjustment branch applies if this new line is itself
+          // continuous-unit.
+          const storedQuantity = change.is_weight_adjustment ? 1 : change.proposed_quantity
+          await client.query(
+            `INSERT INTO order_lines (
+               order_id, garment_type_id, name, unit, rate_paise,
+               estimated_quantity, confirmed_quantity, quantity, price, total_paise, total
+             ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, ($5::numeric / 100), $7, ($7::numeric / 100))`,
+            [orderId, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, storedQuantity, change.proposed_total_paise]
+          )
+        } else if (change.is_weight_adjustment) {
           await client.query(
             `UPDATE order_lines
              SET confirmed_quantity = 1, total_paise = $1, total = ($2::numeric / 100),

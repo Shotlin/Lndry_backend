@@ -30,6 +30,17 @@
  * this vendor's own `vendor_service_rates` *before* calling this function —
  * kept here as a plain data lookup so this function stays a pure sync
  * calculation with no DB access.
+ *
+ * New lines (vendor-only, same reasoning as reclassification): `newLines`
+ * adds a service to the order that wasn't there at checkout — either a
+ * wholly new addition, or the destination for a *partial* quantity moved
+ * out of an existing continuous-unit line (the vendor reduces that line's
+ * kg/sqft via `confirmedWeightKg` and adds the moved garments here under
+ * whatever service/quantity they actually belong to — reclassification only
+ * ever converts 100% of a line, this is what covers "some of it moves").
+ * Each entry needs no `order_line_id` (it doesn't exist yet) — it's staged
+ * in `order_reconciliations.line_changes` with `order_line_id: null` and
+ * only actually INSERTed into `order_lines` once the customer accepts.
  */
 
 // Units priced by a continuous measurement rather than a discrete count —
@@ -44,6 +55,7 @@ const CONTINUOUS_UNITS = new Set(['kg', 'sqft'])
  * @param {Array}  [params.confirmedLines] - [{ order_line_id, confirmed_quantity }] — whole-number counts, piece lines only.
  * @param {number} [params.confirmedWeightKg] - exact decimal measurement (kg or sq ft) for this order's continuous-unit line.
  * @param {Map<string, {garmentTypeId: string, name: string, unit: string, ratePaise: number}>} [params.reclassifications] - keyed by order_line_id
+ * @param {Array<{garmentTypeId: string, name: string, unit: string, ratePaise: number, quantity: number}>} [params.newLines] - brand-new services to add
  * @returns {{
  *   previousSubtotalPaise: number, proposedSubtotalPaise: number,
  *   previousPayableAmountPaise: number, proposedPayableAmountPaise: number,
@@ -51,9 +63,10 @@ const CONTINUOUS_UNITS = new Set(['kg', 'sqft'])
  *   newFeeBreakdown: object, lineChanges: Array
  * }}
  */
-export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, confirmedWeightKg, reclassifications }) {
-  if ((!confirmedLines || confirmedLines.length === 0) && confirmedWeightKg == null && (!reclassifications || reclassifications.size === 0)) {
-    throw { statusCode: 400, message: 'Either confirmed_lines, confirmed_weight_kg, or a reclassification is required', code: 'INVALID_INPUT' }
+export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, confirmedWeightKg, reclassifications, newLines }) {
+  const hasNewLines = Array.isArray(newLines) && newLines.length > 0
+  if ((!confirmedLines || confirmedLines.length === 0) && confirmedWeightKg == null && (!reclassifications || reclassifications.size === 0) && !hasNewLines) {
+    throw { statusCode: 400, message: 'Either confirmed_lines, confirmed_weight_kg, a reclassification, or a new line is required', code: 'INVALID_INPUT' }
   }
 
   const feeBreakdown = typeof orderRow.fee_breakdown === 'string'
@@ -135,8 +148,35 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
         proposed_total_paise: proposedTotalPaise,
         is_weight_adjustment: isWeightAdjustment,
         is_reclassified: isReclassified,
+        is_new: false,
       })
     }
+  }
+
+  for (const newLine of (newLines || [])) {
+    const proposedTotalPaise = Math.round((newLine.ratePaise || 0) * newLine.quantity)
+    proposedSubtotalPaise += proposedTotalPaise
+    lineChanges.push({
+      order_line_id: null,
+      previous_garment_type_id: null,
+      proposed_garment_type_id: newLine.garmentTypeId,
+      previous_name: null,
+      proposed_name: newLine.name,
+      previous_unit: null,
+      proposed_unit: newLine.unit,
+      previous_rate_paise: 0,
+      proposed_rate_paise: newLine.ratePaise || 0,
+      previous_quantity: 0,
+      proposed_quantity: newLine.quantity,
+      previous_total_paise: 0,
+      proposed_total_paise: proposedTotalPaise,
+      // A new line can itself be continuous-unit (e.g. moved to a different
+      // kg-priced service) — same INTEGER-column sentinel treatment as an
+      // existing line's weight adjustment applies on insert.
+      is_weight_adjustment: CONTINUOUS_UNITS.has((newLine.unit || '').toLowerCase()),
+      is_reclassified: false,
+      is_new: true,
+    })
   }
 
   const deliveryFeePaise = feeBreakdown.delivery_fee_paise ?? 2900
@@ -180,7 +220,24 @@ export function computeRecalculatedTotals({ orderRow, lines, confirmedLines, con
  */
 export async function applyRecalculatedTotals(client, orderId, computed) {
   for (const change of computed.lineChanges) {
-    if (change.is_weight_adjustment) {
+    if (change.is_new) {
+      // Continuous-unit (kg/sqft) new lines hit the same INTEGER-column
+      // problem as an existing line's weight adjustment — quantity columns
+      // get the sentinel `1`, with the real decimal value only recoverable
+      // via total_paise/rate_paise (same convention as order_reconciliations
+      // .proposed_weight_kg for existing lines).
+      const storedQuantity = change.is_weight_adjustment ? 1 : change.proposed_quantity
+      await client.query(
+        `INSERT INTO order_lines (
+           order_id, garment_type_id, name, unit, rate_paise,
+           estimated_quantity, confirmed_quantity, quantity, price, total_paise, total
+         ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, ($5::numeric / 100), $7, ($7::numeric / 100))`,
+        [
+          orderId, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit,
+          change.proposed_rate_paise, storedQuantity, change.proposed_total_paise,
+        ]
+      )
+    } else if (change.is_weight_adjustment) {
       // $1 is passed twice (once plain, once cast to numeric) rather than
       // reused by placeholder number — reusing $1 in both a plain-integer
       // context and an explicit ::numeric cast leaves Postgres unable to

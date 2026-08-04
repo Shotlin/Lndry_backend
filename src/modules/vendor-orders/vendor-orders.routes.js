@@ -177,6 +177,24 @@ export default async function vendorOrdersRoutes(fastify) {
           // continuous-unit line, e.g. 1.2 — piece-priced lines never use
           // this, they go through `lines[].confirmed_quantity` above.
           confirmed_weight_kg: { type: 'number', minimum: 0.1 },
+          // A service that wasn't on the order at all — a genuine addition,
+          // or the destination for a partial quantity moved out of an
+          // existing line (reduce that line via confirmed_quantity/
+          // confirmed_weight_kg above, then add the moved garments here
+          // under whatever service/quantity they actually belong to).
+          // garment_type_id resolved server-side against this vendor's own
+          // active rates, same as lines[].new_garment_type_id.
+          new_lines: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['garment_type_id', 'quantity'],
+              properties: {
+                garment_type_id: { type: 'string', format: 'uuid' },
+                quantity: { type: 'number', exclusiveMinimum: 0 }
+              }
+            }
+          },
           adjustment_reason: { type: 'string', maxLength: 500 },
           photo_urls: {
             type: 'array',

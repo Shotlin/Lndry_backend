@@ -311,6 +311,12 @@ export default async function vendorApplicationsRoutes(fastify) {
     preHandler: commonPreHandlers,
   }, controller.createVendorServiceDraft.bind(controller))
 
+  // GET /services/catalogue — Flat garment-type list across all this
+  // vendor's active services, for the reconciliation move/add-service picker
+  fastify.get('/services/catalogue', {
+    preHandler: commonPreHandlers,
+  }, controller.getReconciliationCatalogue.bind(controller))
+
   // GET /services/:serviceId — Full service details (with garment rates)
   fastify.get('/services/:serviceId', {
     preHandler: commonPreHandlers,

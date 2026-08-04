@@ -430,6 +430,7 @@ export class VendorOrdersService {
       confirmed_weight_kg: confirmedWeightKg,
       adjustment_reason: adjustmentReason,
       photo_urls: photoUrls,
+      new_lines: requestedNewLines,
     } = body
 
     if (!Array.isArray(photoUrls) || photoUrls.length === 0) {
@@ -465,16 +466,26 @@ export class VendorOrdersService {
       )
       const linesById = new Map(linesRes.rows.map((l) => [l.id, l]))
 
-      // Reclassification: the vendor determined an item belongs to a
-      // different service than the customer picked (e.g. a delicate item
-      // selected under a per-kg wash actually needs a per-piece dry-clean
-      // service). Resolve each requested new_garment_type_id against THIS
-      // vendor's own active, approved rates — never trust a client-supplied
-      // rate_paise directly.
-      const reclassifications = new Map()
+      // Reclassification (100% of an existing line moves to a different
+      // service, e.g. a delicate item selected under a per-kg wash actually
+      // needs a per-piece dry-clean service) and new lines (a service that
+      // wasn't on the order at all — either a genuine addition, or the
+      // destination for a *partial* quantity moved out of an existing
+      // continuous-unit line, which the vendor achieves by reducing that
+      // line's confirmed_weight_kg and adding the moved garments here).
+      // Both resolve requested garment_type_ids against THIS vendor's own
+      // active, approved rates in one batched query — never trust a
+      // client-supplied rate_paise directly.
       const requestedReclassifications = (confirmedLines || []).filter((l) => l.new_garment_type_id)
-      if (requestedReclassifications.length > 0) {
-        const requestedGarmentTypeIds = [...new Set(requestedReclassifications.map((l) => l.new_garment_type_id))]
+      const requestedNewLinesArr = (requestedNewLines || []).filter((l) => l.garment_type_id && l.quantity > 0)
+      const requestedGarmentTypeIds = [...new Set([
+        ...requestedReclassifications.map((l) => l.new_garment_type_id),
+        ...requestedNewLinesArr.map((l) => l.garment_type_id),
+      ])]
+
+      const reclassifications = new Map()
+      const newLines = []
+      if (requestedGarmentTypeIds.length > 0) {
         const ratesRes = await client.query(
           `SELECT vsr.rate_paise, gt.id AS garment_type_id, gt.name, gt.unit
            FROM vendor_service_rates vsr
@@ -501,6 +512,20 @@ export class VendorOrdersService {
             ratePaise: rate.rate_paise,
           })
         }
+
+        for (const line of requestedNewLinesArr) {
+          const rate = rateByGarmentTypeId.get(line.garment_type_id)
+          if (!rate) {
+            throw { statusCode: 400, message: 'One or more selected services are not available for this vendor', code: 'SERVICE_NOT_AVAILABLE' }
+          }
+          newLines.push({
+            garmentTypeId: rate.garment_type_id,
+            name: rate.name,
+            unit: rate.unit,
+            ratePaise: rate.rate_paise,
+            quantity: line.quantity,
+          })
+        }
       }
 
       const computed = computeRecalculatedTotals({
@@ -509,6 +534,7 @@ export class VendorOrdersService {
         confirmedLines,
         confirmedWeightKg,
         reclassifications,
+        newLines,
       })
 
       let reconciliationId

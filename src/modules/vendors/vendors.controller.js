@@ -294,6 +294,15 @@ export class VendorsController {
     }
   }
 
+  async getReconciliationCatalogue(request, reply) {
+    try {
+      const res = await this.service.getReconciliationCatalogue(request.user.id)
+      return reply.send(success(res, 'Reconciliation catalogue fetched successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch catalogue'))
+    }
+  }
+
   async createVendorServiceDraft(request, reply) {
     try {
       const payload = request.body || {}
