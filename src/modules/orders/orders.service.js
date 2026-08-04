@@ -704,8 +704,8 @@ export class OrdersService {
             `INSERT INTO order_lines (
                order_id, garment_type_id, name, unit, rate_paise,
                estimated_quantity, confirmed_quantity, quantity, price, total_paise, total
-             ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, ($5::numeric / 100), $7, ($7::numeric / 100))`,
-            [orderId, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, storedQuantity, change.proposed_total_paise]
+             ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, ($7::numeric / 100), $8, ($9::numeric / 100))`,
+            [orderId, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit, change.proposed_rate_paise, storedQuantity, change.proposed_rate_paise, change.proposed_total_paise, change.proposed_total_paise]
           )
         } else if (change.is_weight_adjustment) {
           await client.query(

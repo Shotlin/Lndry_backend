@@ -226,15 +226,20 @@ export async function applyRecalculatedTotals(client, orderId, computed) {
       // get the sentinel `1`, with the real decimal value only recoverable
       // via total_paise/rate_paise (same convention as order_reconciliations
       // .proposed_weight_kg for existing lines).
+      // Each of rate_paise/total_paise is passed twice (once plain, once
+      // cast to numeric) rather than reused by placeholder number — same
+      // 42P08 "indeterminate_datatype" trap as the weight-adjustment branch
+      // below, just easier to miss inside a longer column list.
       const storedQuantity = change.is_weight_adjustment ? 1 : change.proposed_quantity
       await client.query(
         `INSERT INTO order_lines (
            order_id, garment_type_id, name, unit, rate_paise,
            estimated_quantity, confirmed_quantity, quantity, price, total_paise, total
-         ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, ($5::numeric / 100), $7, ($7::numeric / 100))`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $6, $6, ($7::numeric / 100), $8, ($9::numeric / 100))`,
         [
           orderId, change.proposed_garment_type_id, change.proposed_name, change.proposed_unit,
-          change.proposed_rate_paise, storedQuantity, change.proposed_total_paise,
+          change.proposed_rate_paise, storedQuantity, change.proposed_rate_paise,
+          change.proposed_total_paise, change.proposed_total_paise,
         ]
       )
     } else if (change.is_weight_adjustment) {
