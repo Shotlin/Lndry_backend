@@ -22,6 +22,7 @@ const COLUMNS = `
   packaging_fee_enabled, packaging_fee_value, packaging_fee_label,
   packaging_fee_description,
   delivery_eta_minutes,
+  gst_enabled, gst_rate, gst_label,
   created_at, updated_at, updated_by
 `
 
@@ -59,6 +60,9 @@ const UPDATABLE_COLUMNS = [
   'packaging_fee_label',
   'packaging_fee_description',
   'delivery_eta_minutes',
+  'gst_enabled',
+  'gst_rate',
+  'gst_label',
 ]
 
 const NUMERIC_COLUMNS = new Set([
@@ -73,6 +77,7 @@ const NUMERIC_COLUMNS = new Set([
   'small_cart_fee',
   'surge_fee_value',
   'packaging_fee_value',
+  'gst_rate',
 ])
 
 export class FeeSettingsRepository {

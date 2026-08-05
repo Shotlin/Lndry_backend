@@ -89,6 +89,9 @@ export class FeeSettingsService {
       packaging_fee_label: 'Packaging fee',
       packaging_fee_description: 'Covers eco-friendly packaging materials.',
       delivery_eta_minutes: 30,
+      gst_enabled: false,
+      gst_rate: 18,
+      gst_label: 'GST',
     }
   }
 }

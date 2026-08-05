@@ -62,6 +62,12 @@ export const updateFeeSettingsSchema = z
 
     // ETA (display only)
     delivery_eta_minutes: z.number().int().min(0).max(100000),
+
+    // GST — exclusive, charged on top of (subtotal - coupon + other fees).
+    // Off by default; enabling it is the admin's explicit action.
+    gst_enabled: z.boolean(),
+    gst_rate: z.number().min(0).max(100),
+    gst_label: label,
   })
   .partial()
   .superRefine((data, ctx) => {

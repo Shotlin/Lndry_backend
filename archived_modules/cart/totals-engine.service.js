@@ -287,12 +287,36 @@ export class TotalsEngine {
     }
 
     const couponDisc = this._round(Math.max(0, this._num(couponDiscount)))
-    const taxAmount = this._round(tax)
     const tip = this._round(Math.max(0, this._num(tipAmount)))
 
     const feesTotal = this._round(
       delivery.amount + handlingFee + platformFee + smallCartFee + surgeFee + packagingFee
     )
+
+    // ── GST ───────────────────────────────────────────────────
+    // Exclusive tax: computed on (subtotal - coupon + all other fees), not
+    // just the item subtotal. Excludes the tip (a voluntary gratuity, not
+    // consideration for goods/services). Off by default (gst_enabled=false)
+    // so this is a no-op until an admin explicitly turns it on; the `tax`
+    // param is a legacy override slot no real caller currently sets a
+    // nonzero value for, kept only for backward compatibility.
+    const preTaxTotal = this._round(Math.max(0, subtotal - couponDisc + feesTotal))
+    const gstAmount = config.gst_enabled
+      ? this._round((preTaxTotal * this._num(config.gst_rate)) / 100)
+      : 0
+    const taxAmount = this._round(gstAmount + this._num(tax))
+
+    if (gstAmount > 0) {
+      fees.push({
+        code: 'GST',
+        label: config.gst_label || 'GST',
+        amount: gstAmount,
+        originalAmount: gstAmount,
+        waived: false,
+        description: `${this._formatMoney(config.gst_rate)}% tax on the order total.`,
+        metadata: { rate: this._num(config.gst_rate) },
+      })
+    }
 
     let totalPayable = this._round(
       subtotal - couponDisc + feesTotal + taxAmount + tip
