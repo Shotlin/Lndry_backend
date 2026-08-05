@@ -523,6 +523,147 @@ export class VendorsController {
     }
   }
 
+  async adminSetDailyCapacity(request, reply) {
+    const { id } = request.params
+    const { max_orders_per_day } = request.body || {}
+    if (max_orders_per_day === undefined) return reply.code(400).send(error('max_orders_per_day is required'))
+    try {
+      const res = await this.service.adminSetDailyCapacity(id, max_orders_per_day, request.user.id)
+      return reply.send(success(res, 'Daily capacity updated'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update daily capacity'))
+    }
+  }
+
+  async adminCreatePickupSlot(request, reply) {
+    const { id } = request.params
+    try {
+      const slot = await this.service.adminCreatePickupSlot(id, request.body)
+      return reply.code(201).send(success(slot, 'Pickup slot created successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create pickup slot'))
+    }
+  }
+
+  async adminUpdatePickupSlot(request, reply) {
+    const { id, slotId } = request.params
+    try {
+      const slot = await this.service.adminUpdatePickupSlot(id, slotId, request.body)
+      return reply.send(success(slot, 'Pickup slot updated successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update pickup slot'))
+    }
+  }
+
+  async adminDeletePickupSlot(request, reply) {
+    const { id, slotId } = request.params
+    try {
+      await this.service.adminDeletePickupSlot(id, slotId)
+      return reply.send(success(null, 'Pickup slot deleted successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete pickup slot'))
+    }
+  }
+
+  // ─── Admin — a vendor's own services & garment rates ────────────────────
+  // Thin wrappers over the same vendorId-first core the vendor's own
+  // self-service catalogue endpoints use (see vendors.service.js).
+
+  async adminGetVendorServices(request, reply) {
+    const { id } = request.params
+    const { status, category_id, page, limit } = request.query || {}
+    try {
+      const res = await this.service.adminGetVendorServices(id, { status, categoryId: category_id, page: page ? +page : 1, limit: limit ? +limit : 20 })
+      return reply.send(success(res.services, 'Vendor services fetched', { total: res.total, page: res.page, limit: res.limit }))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch vendor services'))
+    }
+  }
+
+  async adminCreateVendorService(request, reply) {
+    const { id } = request.params
+    try {
+      const payload = request.body || {}
+      if (!payload.category_id) return reply.code(400).send(error('category_id is required'))
+      const res = await this.service.adminCreateVendorService(id, payload, request.user.id)
+      return reply.code(201).send(success(res, 'Service created successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create service'))
+    }
+  }
+
+  async adminGetVendorServiceDetails(request, reply) {
+    const { id, serviceId } = request.params
+    try {
+      const res = await this.service.adminGetVendorServiceDetails(id, serviceId)
+      return reply.send(success(res, 'Service details fetched successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch service details'))
+    }
+  }
+
+  async adminUpdateVendorService(request, reply) {
+    const { id, serviceId } = request.params
+    try {
+      const res = await this.service.adminUpdateVendorService(id, serviceId, request.body || {}, request.user.id)
+      return reply.send(success(res, 'Service updated successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update service'))
+    }
+  }
+
+  async adminDeleteVendorService(request, reply) {
+    const { id, serviceId } = request.params
+    try {
+      await this.service.adminDeleteVendorService(id, serviceId)
+      return reply.send(success(null, 'Service deleted successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete service'))
+    }
+  }
+
+  async adminAddGarmentRate(request, reply) {
+    const { id, serviceId } = request.params
+    try {
+      const res = await this.service.adminAddGarmentRate(id, serviceId, request.body)
+      return reply.code(201).send(success(res, 'Garment rate added successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to add garment rate'))
+    }
+  }
+
+  async adminUpdateGarmentRate(request, reply) {
+    const { id, serviceId, garmentTypeId } = request.params
+    try {
+      await this.service.adminUpdateGarmentRate(id, serviceId, garmentTypeId, request.body)
+      return reply.send(success(null, 'Garment rate updated successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update garment rate'))
+    }
+  }
+
+  async adminDeleteGarmentRate(request, reply) {
+    const { id, serviceId, garmentTypeId } = request.params
+    try {
+      await this.service.adminDeleteGarmentRate(id, serviceId, garmentTypeId)
+      return reply.send(success(null, 'Garment rate deleted successfully'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete garment rate'))
+    }
+  }
+
+  async adminBulkUpsertGarmentRates(request, reply) {
+    const { id, serviceId } = request.params
+    const { garment_rates } = request.body || {}
+    if (!Array.isArray(garment_rates)) return reply.code(400).send(error('garment_rates array is required'))
+    try {
+      await this.service.adminBulkUpsertGarmentRates(id, serviceId, garment_rates)
+      return reply.send(success(null, 'Garment rates bulk upsert completed'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to bulk upsert garment rates'))
+    }
+  }
+
   async getPickupSlots(request, reply) {
     try {
       const slots = await this.service.getPickupSlots(request.user.id)

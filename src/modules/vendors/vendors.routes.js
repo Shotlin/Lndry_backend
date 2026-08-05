@@ -250,6 +250,209 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.rejectCapacityRequest.bind(controller))
 
+  // ─── Admin direct capacity/slot management for an approved vendor ──────
+  // Reuses vendors.service.js's vendorId-first slot core (shared with the
+  // vendor's own self-service /vendor/pickup-slots endpoints).
+
+  fastify.put('/admin/:id/capacity', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Directly set a vendor\'s daily capacity [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        required: ['max_orders_per_day'],
+        properties: { max_orders_per_day: { type: 'integer', minimum: 1 } }
+      }
+    }
+  }, controller.adminSetDailyCapacity.bind(controller))
+
+  fastify.post('/admin/:id/slots', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Create a pickup/delivery slot for a vendor [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        required: ['day_of_week', 'start', 'end'],
+        properties: {
+          day_of_week: { type: 'integer', minimum: 0, maximum: 6 },
+          start: { type: 'string' },
+          end: { type: 'string' },
+          max_orders: { type: 'integer', minimum: 1 }
+        }
+      }
+    }
+  }, controller.adminCreatePickupSlot.bind(controller))
+
+  fastify.patch('/admin/:id/slots/:slotId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Update a vendor\'s pickup/delivery slot [Admin]',
+      params: {
+        type: 'object',
+        required: ['id', 'slotId'],
+        properties: { id: { type: 'string', format: 'uuid' }, slotId: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        properties: {
+          max_orders: { type: 'integer', minimum: 1 },
+          is_active: { type: 'boolean' },
+          start: { type: 'string' },
+          end: { type: 'string' }
+        }
+      }
+    }
+  }, controller.adminUpdatePickupSlot.bind(controller))
+
+  fastify.delete('/admin/:id/slots/:slotId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Delete a vendor\'s pickup/delivery slot [Admin]',
+      params: {
+        type: 'object',
+        required: ['id', 'slotId'],
+        properties: { id: { type: 'string', format: 'uuid' }, slotId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminDeletePickupSlot.bind(controller))
+
+  // ─── Admin — manage a vendor's own services & garment rates ────────────
+  // Reuses the same vendorId-first core the vendor's own self-service
+  // /vendor/services endpoints use (see vendors.service.js).
+
+  fastify.get('/admin/:id/services', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'List a vendor\'s services [Admin]',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } },
+      querystring: {
+        type: 'object',
+        properties: {
+          status: { type: 'string' },
+          category_id: { type: 'string', format: 'uuid' },
+          page: { type: 'integer', default: 1 },
+          limit: { type: 'integer', default: 20 }
+        }
+      }
+    }
+  }, controller.adminGetVendorServices.bind(controller))
+
+  fastify.post('/admin/:id/services', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Create a service for a vendor [Admin]',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } }
+    }
+  }, controller.adminCreateVendorService.bind(controller))
+
+  fastify.get('/admin/:id/services/:serviceId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Get a vendor service\'s full details with garment rates [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId'],
+        properties: { id: { type: 'string', format: 'uuid' }, serviceId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminGetVendorServiceDetails.bind(controller))
+
+  fastify.patch('/admin/:id/services/:serviceId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Update a vendor\'s service [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId'],
+        properties: { id: { type: 'string', format: 'uuid' }, serviceId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminUpdateVendorService.bind(controller))
+
+  fastify.delete('/admin/:id/services/:serviceId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Delete a vendor\'s service [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId'],
+        properties: { id: { type: 'string', format: 'uuid' }, serviceId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminDeleteVendorService.bind(controller))
+
+  fastify.post('/admin/:id/services/:serviceId/garment-rates', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Add/link a garment rate to a vendor\'s service [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId'],
+        properties: { id: { type: 'string', format: 'uuid' }, serviceId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminAddGarmentRate.bind(controller))
+
+  fastify.patch('/admin/:id/services/:serviceId/garment-rates/:garmentTypeId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Update a vendor service\'s garment rate [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId', 'garmentTypeId'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          serviceId: { type: 'string', format: 'uuid' },
+          garmentTypeId: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, controller.adminUpdateGarmentRate.bind(controller))
+
+  fastify.delete('/admin/:id/services/:serviceId/garment-rates/:garmentTypeId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Deactivate a vendor service\'s garment rate [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId', 'garmentTypeId'],
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          serviceId: { type: 'string', format: 'uuid' },
+          garmentTypeId: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, controller.adminDeleteGarmentRate.bind(controller))
+
+  fastify.post('/admin/:id/services/:serviceId/garment-rates/bulk', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Bulk upsert garment rates for a vendor\'s service [Admin]',
+      params: {
+        type: 'object', required: ['id', 'serviceId'],
+        properties: { id: { type: 'string', format: 'uuid' }, serviceId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminBulkUpsertGarmentRates.bind(controller))
+
   // ─── Admin review of vendor-created catalogue services ─────────────────
   // A vendor picking subcategories + setting prices under a category
   // creates a `vendor_services` row that needs sign-off before it's

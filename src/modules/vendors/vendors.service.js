@@ -571,12 +571,14 @@ export class VendorsService {
     return rows
   }
 
-  async getVendorServices(userId, { status, categoryId, page = 1, limit = 20 } = {}) {
-    const vendor = await this.repo.findByUserId(userId)
-    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+  // ─── Vendor services & garment rates — shared core (vendorId-first) ────
+  // Reused by both the vendor's own self-service catalogue endpoints and
+  // the admin equivalents further below, so there's one implementation of
+  // each operation instead of a parallel admin copy.
 
+  async _getVendorServicesForVendor(vendorId, { status, categoryId, page = 1, limit = 20 } = {}) {
     const conditions = ['vs.vendor_id = $1', 'vs.deleted_at IS NULL']
-    const params = [vendor.id]
+    const params = [vendorId]
     let idx = 2
 
     if (categoryId) {
@@ -628,6 +630,17 @@ export class VendorsService {
     }
   }
 
+  async getVendorServices(userId, opts = {}) {
+    const vendor = await this.repo.findByUserId(userId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._getVendorServicesForVendor(vendor.id, opts)
+  }
+
+  async adminGetVendorServices(id, opts = {}) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._getVendorServicesForVendor(vendorId, opts)
+  }
+
   /**
    * Flat, vendor-scoped list of every garment-type this vendor can actually
    * charge for, across all their active+approved services in one call —
@@ -657,16 +670,16 @@ export class VendorsService {
     return rows
   }
 
-  async createVendorServiceDraft(userId, payload) {
+  // `reviewCtx` lets an admin-initiated create bypass the PENDING review
+  // cycle — the admin IS the approver, so a service they add on a vendor's
+  // behalf shouldn't need a second admin to re-approve it.
+  async _createVendorServiceForVendor(vendorId, payload, reviewCtx = null) {
     const categoryId = typeof payload === 'object' ? payload.category_id : payload
     const customName = typeof payload === 'object' ? payload.name : null
     const customDesc = typeof payload === 'object' ? payload.description : null
     const customPrice = typeof payload === 'object' ? (payload.price_per_piece !== undefined ? payload.price_per_piece / 100 : (payload.price !== undefined ? payload.price : null)) : null
     const customMinWeight = typeof payload === 'object' ? (payload.min_weight_kg !== undefined ? payload.min_weight_kg : 1.0) : 1.0
     const isAvailable = typeof payload === 'object' ? (payload.is_available !== undefined ? payload.is_available : true) : false
-
-    const vendor = await this.repo.findByUserId(userId)
-    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
 
     const catRes = await query('SELECT name, description FROM service_categories WHERE id = $1', [categoryId])
     const cat = catRes.rows[0]
@@ -675,15 +688,18 @@ export class VendorsService {
     const serviceName = customName || cat.name
     const serviceDesc = customDesc || cat.description
     const serviceStatus = customName ? 'PUBLISHED' : 'DRAFT'
+    const approvalStatus = reviewCtx ? 'APPROVED' : 'PENDING'
+    const approvedAt = reviewCtx ? new Date() : null
+    const approvedBy = reviewCtx ? reviewCtx.adminUserId : null
 
-    // Every (re)submission through this endpoint requires a fresh admin
-    // review — the vendor is declaring "this is what I want to offer,
-    // at these prices" and that always needs a guidelines check before
-    // it can go live to customers (see discovery.routes.js's
-    // `approval_status = 'APPROVED'` gate).
+    // Every vendor-initiated (re)submission through this endpoint requires
+    // a fresh admin review before it can go live to customers (see
+    // discovery.routes.js's `approval_status = 'APPROVED'` gate) — unless
+    // an admin is the one creating it (reviewCtx set), in which case it's
+    // approved immediately.
     const { rows: vsRows } = await query(
       `INSERT INTO vendor_services (vendor_id, category_id, name, description, price, min_weight_kg, status, is_available, approval_status, approved_at, approved_by, rejection_reason)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'PENDING', NULL, NULL, NULL)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NULL)
        ON CONFLICT (vendor_id, category_id) DO UPDATE SET
          deleted_at = NULL,
          status = $7,
@@ -692,13 +708,13 @@ export class VendorsService {
          price = COALESCE(EXCLUDED.price, vendor_services.price),
          min_weight_kg = COALESCE(EXCLUDED.min_weight_kg, vendor_services.min_weight_kg),
          is_available = EXCLUDED.is_available,
-         approval_status = 'PENDING',
-         approved_at = NULL,
-         approved_by = NULL,
+         approval_status = $9,
+         approved_at = $10,
+         approved_by = $11,
          rejection_reason = NULL,
          updated_at = NOW()
        RETURNING id, status, name, description, price, min_weight_kg, is_available, approval_status`,
-      [vendor.id, categoryId, serviceName, serviceDesc, customPrice, customMinWeight, serviceStatus, isAvailable]
+      [vendorId, categoryId, serviceName, serviceDesc, customPrice, customMinWeight, serviceStatus, isAvailable, approvalStatus, approvedAt, approvedBy]
     )
     const vs = vsRows[0]
 
@@ -735,10 +751,18 @@ export class VendorsService {
     }
   }
 
-  async getVendorServiceDetails(userId, serviceId) {
+  async createVendorServiceDraft(userId, payload) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._createVendorServiceForVendor(vendor.id, payload)
+  }
 
+  async adminCreateVendorService(id, payload, adminUserId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._createVendorServiceForVendor(vendorId, payload, { adminUserId })
+  }
+
+  async _getVendorServiceDetailsForVendor(vendorId, serviceId) {
     const serviceRes = await query(
       `SELECT vs.id, vs.name, vs.description, vs.inclusions, vs.exclusions,
               vs.completion_time_hours, vs.image_asset_id, vs.status, vs.is_available, vs.category_id,
@@ -749,7 +773,7 @@ export class VendorsService {
        FROM vendor_services vs
        LEFT JOIN service_categories sc ON vs.category_id = sc.id
        WHERE vs.id = $1 AND vs.vendor_id = $2 AND vs.deleted_at IS NULL`,
-      [serviceId, vendor.id]
+      [serviceId, vendorId]
     )
 
     const service = serviceRes.rows[0]
@@ -780,10 +804,21 @@ export class VendorsService {
     }
   }
 
-  async updateVendorService(userId, serviceId, payload) {
-    const isAvailable = typeof payload === 'object' ? payload.is_available : payload
+  async getVendorServiceDetails(userId, serviceId) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._getVendorServiceDetailsForVendor(vendor.id, serviceId)
+  }
+
+  async adminGetVendorServiceDetails(id, serviceId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._getVendorServiceDetailsForVendor(vendorId, serviceId)
+  }
+
+  // Same reviewCtx bypass as _createVendorServiceForVendor above — an
+  // admin's own content/pricing edit is approved immediately.
+  async _updateVendorServiceForVendor(vendorId, serviceId, payload, reviewCtx = null) {
+    const isAvailable = typeof payload === 'object' ? payload.is_available : payload
 
     if (typeof payload === 'object' && (payload.name !== undefined || payload.description !== undefined || payload.price_per_piece !== undefined || payload.min_weight_kg !== undefined)) {
       const updates = []
@@ -798,10 +833,16 @@ export class VendorsService {
       if (payload.is_available !== undefined) { updates.push(`is_available = $${idx++}`); params.push(payload.is_available) }
 
       // Content/pricing edits require a fresh admin review, same as a new
-      // submission — only the plain availability-toggle branch below skips this.
-      updates.push(`approval_status = 'PENDING'`, `approved_at = NULL`, `approved_by = NULL`, `rejection_reason = NULL`)
+      // submission — only the plain availability-toggle branch below skips
+      // this, and an admin's own edit (reviewCtx set) skips it too.
+      if (reviewCtx) {
+        updates.push(`approval_status = 'APPROVED'`, `approved_at = NOW()`, `approved_by = $${idx++}`, `rejection_reason = NULL`)
+        params.push(reviewCtx.adminUserId)
+      } else {
+        updates.push(`approval_status = 'PENDING'`, `approved_at = NULL`, `approved_by = NULL`, `rejection_reason = NULL`)
+      }
       updates.push(`updated_at = NOW()`)
-      params.push(serviceId, vendor.id)
+      params.push(serviceId, vendorId)
 
       const res = await query(
         `UPDATE vendor_services
@@ -826,31 +867,47 @@ export class VendorsService {
         `UPDATE vendor_services
          SET is_available = $1, updated_at = NOW()
          WHERE id = $2 AND vendor_id = $3`,
-        [isAvailable !== false, serviceId, vendor.id]
+        [isAvailable !== false, serviceId, vendorId]
       )
       return { success: true, id: serviceId, is_available: isAvailable !== false }
     }
   }
 
-  async deleteVendorService(userId, serviceId) {
+  async updateVendorService(userId, serviceId, payload) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._updateVendorServiceForVendor(vendor.id, serviceId, payload)
+  }
 
+  async adminUpdateVendorService(id, serviceId, payload, adminUserId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._updateVendorServiceForVendor(vendorId, serviceId, payload, { adminUserId })
+  }
+
+  async _deleteVendorServiceForVendor(vendorId, serviceId) {
     await query(
       `UPDATE vendor_services
        SET deleted_at = NOW(), updated_at = NOW()
        WHERE id = $1 AND vendor_id = $2`,
-      [serviceId, vendor.id]
+      [serviceId, vendorId]
     )
 
     return { success: true }
   }
 
-  async addGarmentRate(userId, serviceId, data) {
+  async deleteVendorService(userId, serviceId) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._deleteVendorServiceForVendor(vendor.id, serviceId)
+  }
 
-    const vsRes = await query('SELECT category_id FROM vendor_services WHERE id = $1 AND vendor_id = $2', [serviceId, vendor.id])
+  async adminDeleteVendorService(id, serviceId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._deleteVendorServiceForVendor(vendorId, serviceId)
+  }
+
+  async _addGarmentRateForVendor(vendorId, serviceId, data) {
+    const vsRes = await query('SELECT category_id FROM vendor_services WHERE id = $1 AND vendor_id = $2', [serviceId, vendorId])
     const vs = vsRes.rows[0]
     if (!vs) throw { statusCode: 404, message: 'Vendor service not found' }
 
@@ -881,10 +938,18 @@ export class VendorsService {
     return { garment_type_id: gtId, rate_paise: ratePaise, is_available: true }
   }
 
-  async updateGarmentRate(userId, serviceId, garmentTypeId, data) {
+  async addGarmentRate(userId, serviceId, data) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._addGarmentRateForVendor(vendor.id, serviceId, data)
+  }
 
+  async adminAddGarmentRate(id, serviceId, data) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._addGarmentRateForVendor(vendorId, serviceId, data)
+  }
+
+  async _updateGarmentRateForVendor(vendorId, serviceId, garmentTypeId, data) {
     const updates = []
     const params = []
     let idx = 1
@@ -912,10 +977,18 @@ export class VendorsService {
     return { success: true }
   }
 
-  async deleteGarmentRate(userId, serviceId, garmentTypeId) {
+  async updateGarmentRate(userId, serviceId, garmentTypeId, data) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._updateGarmentRateForVendor(vendor.id, serviceId, garmentTypeId, data)
+  }
 
+  async adminUpdateGarmentRate(id, serviceId, garmentTypeId, data) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._updateGarmentRateForVendor(vendorId, serviceId, garmentTypeId, data)
+  }
+
+  async _deleteGarmentRateForVendor(vendorId, serviceId, garmentTypeId) {
     await query(
       `UPDATE vendor_service_rates
        SET is_active = false, updated_at = NOW()
@@ -926,10 +999,18 @@ export class VendorsService {
     return { success: true }
   }
 
-  async bulkUpsertGarmentRates(userId, serviceId, items) {
+  async deleteGarmentRate(userId, serviceId, garmentTypeId) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._deleteGarmentRateForVendor(vendor.id, serviceId, garmentTypeId)
+  }
 
+  async adminDeleteGarmentRate(id, serviceId, garmentTypeId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._deleteGarmentRateForVendor(vendorId, serviceId, garmentTypeId)
+  }
+
+  async _bulkUpsertGarmentRatesForVendor(vendorId, serviceId, items) {
     if (items.length === 0) return { success: true }
 
     // Set-based upsert instead of one query per item — a vendor saving
@@ -956,12 +1037,31 @@ export class VendorsService {
     return { success: true }
   }
 
+  async bulkUpsertGarmentRates(userId, serviceId, items) {
+    const vendor = await this.repo.findByUserId(userId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._bulkUpsertGarmentRatesForVendor(vendor.id, serviceId, items)
+  }
+
+  async adminBulkUpsertGarmentRates(id, serviceId, items) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._bulkUpsertGarmentRatesForVendor(vendorId, serviceId, items)
+  }
+
   async publishService(userId, serviceId) {
     return this.updateVendorService(userId, serviceId, true)
   }
 
   async unpublishService(userId, serviceId, reason) {
     return this.updateVendorService(userId, serviceId, false)
+  }
+
+  async adminPublishService(id, serviceId, adminUserId) {
+    return this.adminUpdateVendorService(id, serviceId, true, adminUserId)
+  }
+
+  async adminUnpublishService(id, serviceId, adminUserId) {
+    return this.adminUpdateVendorService(id, serviceId, false, adminUserId)
   }
 
   // ─── Admin review of vendor-created services ───────────────────────────
@@ -1168,7 +1268,7 @@ export class VendorsService {
     }
 
     const vendor = target.record
-    const { rows: slots } = await query('SELECT id, day_of_week, start_time, end_time, max_orders, is_active FROM vendor_slots WHERE vendor_id = $1', [vendor.id])
+    const slots = await this._getPickupSlotsForVendor(vendor.id)
     const { rows: exceptions } = await query('SELECT id, date, type, limit_count, reason FROM slot_exceptions WHERE vendor_id = $1', [vendor.id])
     const { rows: requests } = await query('SELECT * FROM capacity_requests WHERE vendor_id = $1 ORDER BY created_at DESC LIMIT 10', [vendor.id])
     return {
@@ -1229,34 +1329,29 @@ export class VendorsService {
     return updated[0]
   }
 
-  async getPickupSlots(userId) {
-    const vendor = await this.repo.findByUserId(userId)
-    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+  // ─── Pickup slots — shared core (vendorId-first), reused by both the
+  // vendor's own self-service endpoints and the admin equivalents below.
+  // Keeps one implementation instead of forking logic per caller.
 
+  async _getPickupSlotsForVendor(vendorId) {
     const { rows } = await query(
       'SELECT id, day_of_week, start_time, end_time, max_orders, is_active FROM vendor_slots WHERE vendor_id = $1',
-      [vendor.id]
+      [vendorId]
     )
     return rows
   }
 
-  async createPickupSlot(userId, data) {
-    const vendor = await this.repo.findByUserId(userId)
-    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
-
+  async _createPickupSlotForVendor(vendorId, data) {
     const { rows } = await query(
       `INSERT INTO vendor_slots (vendor_id, day_of_week, start_time, end_time, max_orders, is_active)
        VALUES ($1, $2, $3, $4, $5, true)
        RETURNING id, day_of_week, start_time, end_time, max_orders, is_active`,
-      [vendor.id, data.day_of_week, data.start, data.end, data.max_orders || 5]
+      [vendorId, data.day_of_week, data.start, data.end, data.max_orders || 5]
     )
     return rows[0]
   }
 
-  async updatePickupSlot(userId, slotId, data) {
-    const vendor = await this.repo.findByUserId(userId)
-    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
-
+  async _updatePickupSlotForVendor(vendorId, slotId, data) {
     const updates = []
     const params = []
     let idx = 1
@@ -1271,9 +1366,19 @@ export class VendorsService {
       params.push(data.is_active)
     }
 
+    if (data.start !== undefined) {
+      updates.push(`start_time = $${idx++}`)
+      params.push(data.start)
+    }
+
+    if (data.end !== undefined) {
+      updates.push(`end_time = $${idx++}`)
+      params.push(data.end)
+    }
+
     if (updates.length === 0) return { success: true }
 
-    params.push(vendor.id, slotId)
+    params.push(vendorId, slotId)
     const { rows } = await query(
       `UPDATE vendor_slots
        SET ${updates.join(', ')}, updated_at = NOW()
@@ -1284,12 +1389,86 @@ export class VendorsService {
     return rows[0] || null
   }
 
+  async _deletePickupSlotForVendor(vendorId, slotId) {
+    await query('DELETE FROM vendor_slots WHERE vendor_id = $1 AND id = $2', [vendorId, slotId])
+    return { success: true }
+  }
+
+  // ─── Self-service (vendor's own JWT) ────────────────────────────────────
+
+  async getPickupSlots(userId) {
+    const vendor = await this.repo.findByUserId(userId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._getPickupSlotsForVendor(vendor.id)
+  }
+
+  async createPickupSlot(userId, data) {
+    const vendor = await this.repo.findByUserId(userId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._createPickupSlotForVendor(vendor.id, data)
+  }
+
+  async updatePickupSlot(userId, slotId, data) {
+    const vendor = await this.repo.findByUserId(userId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._updatePickupSlotForVendor(vendor.id, slotId, data)
+  }
+
   async deletePickupSlot(userId, slotId) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
+    return this._deletePickupSlotForVendor(vendor.id, slotId)
+  }
 
-    await query('DELETE FROM vendor_slots WHERE vendor_id = $1 AND id = $2', [vendor.id, slotId])
-    return { success: true }
+  // ─── Admin (operating on a specific vendor id, must already be approved) ─
+
+  async _requireAdminVendorId(id) {
+    const target = await this._resolveReviewTarget(id)
+    if (!target || target.kind !== 'vendor') {
+      throw { statusCode: 404, message: 'Approved vendor not found' }
+    }
+    return target.record.id
+  }
+
+  async adminGetPickupSlots(id) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._getPickupSlotsForVendor(vendorId)
+  }
+
+  async adminCreatePickupSlot(id, data) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._createPickupSlotForVendor(vendorId, data)
+  }
+
+  async adminUpdatePickupSlot(id, slotId, data) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._updatePickupSlotForVendor(vendorId, slotId, data)
+  }
+
+  async adminDeletePickupSlot(id, slotId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return this._deletePickupSlotForVendor(vendorId, slotId)
+  }
+
+  // Admin sets the daily capacity directly — unlike a vendor's own request,
+  // this doesn't go through capacity_requests approval (the admin IS the
+  // approver). Any existing PENDING request for this vendor is superseded
+  // (marked APPROVED with a note) so it doesn't linger inconsistently next
+  // to a newer, directly-set number.
+  async adminSetDailyCapacity(id, maxOrdersPerDay, adminUserId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    const vendor = await this.repo.findById(vendorId)
+    const operatingHours = vendor.operating_hours || {}
+    operatingHours.max_orders_per_day = maxOrdersPerDay
+    await this.repo.update(vendorId, { operating_hours: operatingHours })
+
+    await query(
+      `UPDATE capacity_requests SET status = 'APPROVED', admin_note = 'Set directly by admin', reviewed_by = $1, reviewed_at = NOW(), updated_at = NOW()
+       WHERE vendor_id = $2 AND status = 'PENDING'`,
+      [adminUserId, vendorId]
+    )
+
+    return { daily_limit: maxOrdersPerDay }
   }
 
   async createCapacityException(userId, data) {
