@@ -424,9 +424,14 @@ export class CouponsService {
       return { valid: false, code: ERROR_CODES.COUPON_LIMIT_REACHED, message: 'Coupon usage limit reached' }
     }
 
-    // usage_limit_per_user (new multi-vendor field)
-    // Skip DB lookup for demo coupons — they have non-UUID IDs
-    const perUserLimit = coupon.usageLimitPerUser ?? coupon.perUserLimit ?? 1
+    // per_user_limit is what the admin dashboard's "Uses Per Customer" field
+    // actually writes (createCouponSchema/updateCouponSchema never expose
+    // usageLimitPerUser, and the dashboard always omits it, so it silently
+    // stays at its DB default of 1). Preferring usageLimitPerUser here meant
+    // every coupon was capped at 1 use/user no matter what an admin set —
+    // per_user_limit must win until usage_limit_per_user is wired up
+    // end-to-end from the dashboard.
+    const perUserLimit = coupon.perUserLimit ?? coupon.usageLimitPerUser ?? 1
     const userUsage = _isValidUUID(coupon.id)
       ? await this.repo.getUserUsageCount(coupon.id, userId)
       : 0
@@ -591,7 +596,9 @@ export class CouponsService {
       const usage = coupon.isDemo
         ? 0
         : await this.repo.getUserUsageCount(coupon.id, userId)
-      const perUserLimit = coupon.usageLimitPerUser ?? coupon.perUserLimit ?? 1
+      // See validateCouponEligibility() above — per_user_limit is the
+      // column the admin dashboard actually controls, so it must win.
+      const perUserLimit = coupon.perUserLimit ?? coupon.usageLimitPerUser ?? 1
       if (usage >= perUserLimit) continue
 
       if (!(await this._isTargetEligible(coupon, userId))) continue
