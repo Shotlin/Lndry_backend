@@ -5,6 +5,12 @@ import { env } from '../../config/env.js'
 import { WatermarkService } from '../watermark/watermark.service.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 
+// Single source of truth for which onboarding documents block submission —
+// previously duplicated as three separate hardcoded arrays across
+// getApplicationMe/submitApplication/resubmitApplication, which is exactly
+// the kind of drift that let migration 069's own vendor_id/vendor_application_id
+// split slip through inconsistently. Keep them referencing this constant.
+const REQUIRED_APPLICATION_DOCS = ['owner_identity', 'shop_photo', 'service_list']
 
 export class VendorsService {
   constructor(repository, deps = {}) {
@@ -138,7 +144,7 @@ export class VendorsService {
       : this.repo.updateApplication(target.record.id, updates)
   }
 
-  async adminReview(id, { status, approvedRadius, documentReviews, rejectionReason, correctionSections }) {
+  async adminReview(id, { status, approvedRadius, approvedDailyCapacity, documentReviews, rejectionReason, correctionSections }) {
     const target = await this._resolveReviewTarget(id)
     if (!target) {
       throw { statusCode: 404, message: 'Application or Vendor not found' }
@@ -197,7 +203,7 @@ export class VendorsService {
     const updatedApp = await this.repo.updateApplication(id, updates)
 
     if (status === 'APPROVED') {
-      await this._promoteApplicationToVendor(app, approvedRadius)
+      await this._promoteApplicationToVendor(app, approvedRadius, approvedDailyCapacity)
     }
 
     logger.info({ vendorApplicationId: id, status, approvedRadius }, 'Vendor application reviewed by admin')
@@ -208,11 +214,12 @@ export class VendorsService {
   // row. Shared by adminReview's APPROVED branch and the
   // ALLOW_AUTO_APPROVE_VENDOR dev shortcut in submitApplication below — both
   // need to do this identically.
-  async _promoteApplicationToVendor(app, approvedRadius) {
+  async _promoteApplicationToVendor(app, approvedRadius, approvedDailyCapacity) {
     let baseSlug = slugify(app.name, { lower: true, strict: true })
     const slugCount = await this.repo.getSlugCount(baseSlug)
     const slug = slugCount > 0 ? `${baseSlug}-${slugCount + 1}` : baseSlug
     const branchCode = 'VND-' + Math.random().toString(36).substring(2, 8).toUpperCase()
+    const dailyCapacity = approvedDailyCapacity || app.requested_daily_capacity
 
     const vendor = await this.repo.create({
       name: app.name,
@@ -238,6 +245,7 @@ export class VendorsService {
       bank_holder_name: app.bank_holder_name,
       gst_number: app.gst_number,
       pan_number: app.pan_number,
+      operating_hours: dailyCapacity ? { max_orders_per_day: dailyCapacity } : {},
       created_by: app.owner_id,
       status: 'APPROVED',
       vendor_approved: true,
@@ -330,12 +338,14 @@ export class VendorsService {
     if (!app.gst_number && !app.pan_number) {
       missingSteps.push('tax_details')
     }
-    const requiredDocs = ['owner_identity', 'shop_photo']
     const uploadedDocs = documents.map(d => d.document_type)
-    for (const docType of requiredDocs) {
+    for (const docType of REQUIRED_APPLICATION_DOCS) {
       if (!uploadedDocs.includes(docType)) {
         missingSteps.push(`document:${docType}`)
       }
+    }
+    if (app.requested_daily_capacity == null) {
+      missingSteps.push('capacity')
     }
 
     return {
@@ -415,6 +425,9 @@ export class VendorsService {
     if (data.requested_radius_km !== undefined) {
       updates.requested_service_radius_km = data.requested_radius_km
     }
+    if (data.requested_daily_capacity !== undefined) {
+      updates.requested_daily_capacity = data.requested_daily_capacity
+    }
     return this._withDocuments(await this.repo.updateApplication(appId, updates))
   }
 
@@ -440,8 +453,9 @@ export class VendorsService {
     }
     const docs = await this.repo.getApplicationDocuments(appId)
     const uploadedTypes = docs.map(d => d.document_type)
-    if (!uploadedTypes.includes('owner_identity') || !uploadedTypes.includes('shop_photo')) {
-      throw { statusCode: 400, message: 'Missing required onboarding documents: Owner Identity and Shop Photo are required' }
+    const missingDocs = REQUIRED_APPLICATION_DOCS.filter(d => !uploadedTypes.includes(d))
+    if (missingDocs.length > 0 || app.requested_daily_capacity == null) {
+      throw { statusCode: 400, message: `Missing required onboarding fields: ${[...missingDocs, ...(app.requested_daily_capacity == null ? ['requested daily capacity'] : [])].join(', ')}` }
     }
 
     if (this._isAutoApproveVendorEnabled()) {
@@ -450,7 +464,7 @@ export class VendorsService {
         rejection_reason: null,
         correction_sections: null
       })
-      await this._promoteApplicationToVendor(updatedApp, updatedApp.requested_service_radius_km)
+      await this._promoteApplicationToVendor(updatedApp, updatedApp.requested_service_radius_km, updatedApp.requested_daily_capacity)
       logger.info({ vendorApplicationId: appId, userId }, 'Vendor application auto-approved (ALLOW_AUTO_APPROVE_VENDOR)')
       return this._withDocuments(updatedApp)
     }
@@ -465,8 +479,9 @@ export class VendorsService {
     }
     const docs = await this.repo.getApplicationDocuments(appId)
     const uploadedTypes = docs.map(d => d.document_type)
-    if (!uploadedTypes.includes('owner_identity') || !uploadedTypes.includes('shop_photo')) {
-      throw { statusCode: 400, message: 'Missing required onboarding documents: Owner Identity and Shop Photo are required' }
+    const missingDocs = REQUIRED_APPLICATION_DOCS.filter(d => !uploadedTypes.includes(d))
+    if (missingDocs.length > 0 || app.requested_daily_capacity == null) {
+      throw { statusCode: 400, message: `Missing required onboarding fields: ${[...missingDocs, ...(app.requested_daily_capacity == null ? ['requested daily capacity'] : [])].join(', ')}` }
     }
     return this.repo.updateApplication(appId, {
       status: 'WAITING_FOR_APPROVAL',
@@ -1095,22 +1110,123 @@ export class VendorsService {
 
     const { rows: slots } = await query('SELECT id, day_of_week, start_time, end_time, max_orders, is_active FROM vendor_slots WHERE vendor_id = $1', [vendor.id])
     const { rows: exceptions } = await query('SELECT id, date, type, limit_count, reason FROM slot_exceptions WHERE vendor_id = $1', [vendor.id])
+    const { rows: pending } = await query(
+      `SELECT id, requested_daily_limit, status, created_at FROM capacity_requests
+       WHERE vendor_id = $1 AND status = 'PENDING' LIMIT 1`,
+      [vendor.id]
+    )
 
     return {
       daily_limit: vendor.operating_hours?.max_orders_per_day || null,
       weekly_availability: slots,
-      exceptions
+      exceptions,
+      pending_capacity_request: pending[0] || null
     }
   }
 
-  async updateDailyLimit(userId, maxOrdersPerDay) {
+  // Previously wrote vendor.operating_hours.max_orders_per_day instantly.
+  // Now creates/replaces a pending admin-moderated request instead — see
+  // capacity_requests (migration 090). A vendor resubmitting while one is
+  // already PENDING overwrites it (upsert), backed by a partial unique index
+  // on (vendor_id) WHERE status = 'PENDING'.
+  async requestCapacityChange(userId, requestedDailyLimit) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }
 
-    const operatingHours = vendor.operating_hours || {}
-    operatingHours.max_orders_per_day = maxOrdersPerDay
+    const currentLimit = vendor.operating_hours?.max_orders_per_day || null
+    const { rows } = await query(
+      `INSERT INTO capacity_requests (vendor_id, requested_daily_limit, current_daily_limit_snapshot, status)
+       VALUES ($1, $2, $3, 'PENDING')
+       ON CONFLICT (vendor_id) WHERE status = 'PENDING'
+       DO UPDATE SET requested_daily_limit = $2, current_daily_limit_snapshot = $3, created_at = NOW(), updated_at = NOW()
+       RETURNING *`,
+      [vendor.id, requestedDailyLimit, currentLimit]
+    )
+    return rows[0]
+  }
 
-    return this.repo.update(vendor.id, { operating_hours: operatingHours })
+  // ─── Admin review of ongoing capacity-change requests ──────────────────
+
+  async adminListCapacityRequests({ status = 'PENDING', page = 1, limit = 20 } = {}) {
+    const offset = (page - 1) * limit
+    const { rows } = await query(
+      `SELECT cr.*, v.name AS vendor_name, v.branch_code
+       FROM capacity_requests cr JOIN vendors v ON v.id = cr.vendor_id
+       WHERE cr.status = $1 ORDER BY cr.created_at ASC LIMIT $2 OFFSET $3`,
+      [status, limit, offset]
+    )
+    const countRes = await query(`SELECT COUNT(*)::int AS total FROM capacity_requests WHERE status = $1`, [status])
+    return { requests: rows, total: countRes.rows[0].total, page, limit }
+  }
+
+  async adminGetVendorCapacity(id) {
+    const target = await this._resolveReviewTarget(id)
+    if (!target) throw { statusCode: 404, message: 'Vendor or application not found' }
+
+    if (target.kind === 'application') {
+      return { stage: 'application', requested_daily_capacity: target.record.requested_daily_capacity }
+    }
+
+    const vendor = target.record
+    const { rows: slots } = await query('SELECT id, day_of_week, start_time, end_time, max_orders, is_active FROM vendor_slots WHERE vendor_id = $1', [vendor.id])
+    const { rows: exceptions } = await query('SELECT id, date, type, limit_count, reason FROM slot_exceptions WHERE vendor_id = $1', [vendor.id])
+    const { rows: requests } = await query('SELECT * FROM capacity_requests WHERE vendor_id = $1 ORDER BY created_at DESC LIMIT 10', [vendor.id])
+    return {
+      stage: 'vendor',
+      daily_limit: vendor.operating_hours?.max_orders_per_day || null,
+      weekly_availability: slots,
+      exceptions,
+      requests
+    }
+  }
+
+  async adminReviewCapacityRequest(requestId, adminUserId, { status, adminNote }) {
+    if (!['APPROVED', 'REJECTED'].includes(status)) {
+      throw { statusCode: 400, message: 'Invalid capacity request status' }
+    }
+
+    const { rows: existing } = await query('SELECT * FROM capacity_requests WHERE id = $1', [requestId])
+    const reqRow = existing[0]
+    if (!reqRow) throw { statusCode: 404, message: 'Capacity request not found' }
+    if (reqRow.status !== 'PENDING') throw { statusCode: 400, message: 'This request has already been reviewed' }
+
+    let vendorUserId = null
+    if (status === 'APPROVED') {
+      const vendor = await this.repo.findById(reqRow.vendor_id)
+      const operatingHours = vendor.operating_hours || {}
+      operatingHours.max_orders_per_day = reqRow.requested_daily_limit
+      await this.repo.update(vendor.id, { operating_hours: operatingHours })
+      vendorUserId = vendor.created_by
+    }
+
+    const { rows: updated } = await query(
+      `UPDATE capacity_requests SET status = $1, admin_note = $2, reviewed_by = $3, reviewed_at = NOW(), updated_at = NOW()
+       WHERE id = $4 RETURNING *`,
+      [status, adminNote || null, adminUserId, requestId]
+    )
+
+    if (this.notificationsService) {
+      if (!vendorUserId) {
+        const vendor = await this.repo.findById(reqRow.vendor_id)
+        vendorUserId = vendor?.created_by
+      }
+      if (vendorUserId) {
+        try {
+          await this.notificationsService.sendNotification(vendorUserId, {
+            title: status === 'APPROVED' ? 'Capacity request approved' : 'Capacity request rejected',
+            body: status === 'APPROVED'
+              ? `Your daily capacity is now ${reqRow.requested_daily_limit} orders.`
+              : (adminNote || 'Your capacity change request was not approved.'),
+            type: 'capacity_review',
+            data: { capacity_request_id: requestId }
+          })
+        } catch (err) {
+          logger.error({ err, requestId }, 'Failed to notify vendor of capacity review')
+        }
+      }
+    }
+
+    return updated[0]
   }
 
   async getPickupSlots(userId) {

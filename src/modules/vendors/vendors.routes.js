@@ -159,6 +159,7 @@ export default async function vendorRoutes(fastify) {
         properties: {
           status: { type: 'string', enum: ['APPROVED', 'REJECTED', 'CORRECTION_REQUIRED', 'SUSPENDED'] },
           approvedRadius: { type: 'number' },
+          approvedDailyCapacity: { type: 'integer', minimum: 1 },
           rejectionReason: { type: 'string' },
           correctionSections: {
             type: 'array',
@@ -180,6 +181,74 @@ export default async function vendorRoutes(fastify) {
       }
     }
   }, controller.adminReview.bind(controller))
+
+  // ─── Admin review of ongoing (post-approval) capacity-change requests ──
+  // Static paths ('/admin/capacity-requests') are matched ahead of the
+  // parametric '/admin/:id' by Fastify's router regardless of registration
+  // order, so no collision with the generic details route above.
+
+  fastify.get('/admin/capacity-requests', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'List capacity change requests [Admin]',
+      querystring: {
+        type: 'object',
+        properties: {
+          status: { type: 'string', enum: ['PENDING', 'APPROVED', 'REJECTED'], default: 'PENDING' },
+          page: { type: 'integer', default: 1 },
+          limit: { type: 'integer', default: 20 }
+        }
+      }
+    }
+  }, controller.adminListCapacityRequests.bind(controller))
+
+  fastify.get('/admin/:id/capacity', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Get a vendor (or application)\'s capacity — daily limit, slots, and request history [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminGetVendorCapacity.bind(controller))
+
+  fastify.post('/admin/capacity-requests/:id/approve', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Approve a pending capacity change request [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        properties: { adminNote: { type: 'string', maxLength: 500 } }
+      }
+    }
+  }, controller.approveCapacityRequest.bind(controller))
+
+  fastify.post('/admin/capacity-requests/:id/reject', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Reject a pending capacity change request [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        properties: { adminNote: { type: 'string', maxLength: 500 } }
+      }
+    }
+  }, controller.rejectCapacityRequest.bind(controller))
 
   // ─── Admin review of vendor-created catalogue services ─────────────────
   // A vendor picking subcategories + setting prices under a category

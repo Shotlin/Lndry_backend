@@ -140,9 +140,9 @@ export default async function vendorApplicationsRoutes(fastify) {
       },
       body: {
         type: 'object',
-        required: ['requested_radius_km'],
         properties: {
-          requested_radius_km: { type: 'number', minimum: 0.1 }
+          requested_radius_km: { type: 'number', minimum: 0.1 },
+          requested_daily_capacity: { type: 'integer', minimum: 1 }
         }
       }
     }

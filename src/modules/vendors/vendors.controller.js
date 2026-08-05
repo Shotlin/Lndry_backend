@@ -469,10 +469,57 @@ export class VendorsController {
     const { max_orders_per_day } = request.body || {}
     if (max_orders_per_day === undefined) return reply.code(400).send(error('max_orders_per_day is required'))
     try {
-      const vendor = await this.service.updateDailyLimit(request.user.id, max_orders_per_day)
-      return reply.send(success(vendor, 'Daily capacity limit updated'))
+      const capacityRequest = await this.service.requestCapacityChange(request.user.id, max_orders_per_day)
+      return reply.send(success(capacityRequest, 'Capacity change requested — pending admin approval'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update daily capacity limit'))
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to request capacity change'))
+    }
+  }
+
+  // ─── Admin review of capacity requests ─────────────────────────────────
+
+  async adminListCapacityRequests(request, reply) {
+    const { status, page, limit } = request.query || {}
+    try {
+      const res = await this.service.adminListCapacityRequests({
+        status: status || 'PENDING',
+        page: page ? +page : 1,
+        limit: limit ? +limit : 20,
+      })
+      return reply.send(success(res.requests, 'Capacity requests fetched', { total: res.total }))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch capacity requests'))
+    }
+  }
+
+  async adminGetVendorCapacity(request, reply) {
+    try {
+      const res = await this.service.adminGetVendorCapacity(request.params.id)
+      return reply.send(success(res, 'Vendor capacity fetched'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch vendor capacity'))
+    }
+  }
+
+  async approveCapacityRequest(request, reply) {
+    const { id } = request.params
+    const { adminNote } = request.body || {}
+    try {
+      const res = await this.service.adminReviewCapacityRequest(id, request.user.id, { status: 'APPROVED', adminNote })
+      return reply.send(success(res, 'Capacity request approved'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to approve capacity request'))
+    }
+  }
+
+  async rejectCapacityRequest(request, reply) {
+    const { id } = request.params
+    const { adminNote } = request.body || {}
+    try {
+      const res = await this.service.adminReviewCapacityRequest(id, request.user.id, { status: 'REJECTED', adminNote })
+      return reply.send(success(res, 'Capacity request rejected'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to reject capacity request'))
     }
   }
 

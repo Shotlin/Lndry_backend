@@ -399,6 +399,7 @@ export class VendorsRepository {
       lng: 'lng',
       requested_service_radius_km: 'requested_service_radius_km',
       approved_service_radius_km: 'approved_service_radius_km',
+      requested_daily_capacity: 'requested_daily_capacity',
       status: 'status',
       rejection_reason: 'rejection_reason'
     }
