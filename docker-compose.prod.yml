@@ -5,6 +5,8 @@ x-backend-service: &backend-service
   restart: unless-stopped
   env_file:
     - ./deploy/production/app.env
+  volumes:
+    - ${DOCUMENTS_DATA_DIR:-/srv/lndry/documents}:/app/storage/documents
   environment:
     NODE_ENV: production
     HOST: 0.0.0.0
