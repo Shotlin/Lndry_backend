@@ -28,7 +28,8 @@ export class FirstTimeOffersController {
     const actor = this._actorCtx(request)
     const result = await this.service.create(request.body, actor)
     if (!result.success) {
-      return reply.code(httpStatusFor(result.code) || 400).send(error(result.message, result.code || 'VALIDATION_ERROR'))
+      const code = result.code || 'VALIDATION_ERROR'
+      return reply.code(httpStatusFor(code)).send(error(result.message, code))
     }
     return reply.code(201).send(success(result.offer, 'First-time offer created'))
   }
