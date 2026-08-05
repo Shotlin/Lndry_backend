@@ -29,6 +29,7 @@ import adminThemeTabRoutes from './theme-tabs/theme-tabs.routes.js'
 import adminSectionRoutes from './sections/sections.routes.js'
 import adminCustomerSegmentsRoutes from './customer-segments/customer-segments.routes.js'
 import adminFirstTimeOffersRoutes from './first-time-offers/first-time-offers.routes.js'
+import adminOrderRecoveryRoutes from './order-recovery/order-recovery.routes.js'
 
 /**
  * Admin routes plugin
@@ -93,4 +94,5 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminSectionRoutes, { prefix: '/sections' })
   fastify.register(adminCustomerSegmentsRoutes, { prefix: '/customer-segments' })
   fastify.register(adminFirstTimeOffersRoutes, { prefix: '/first-time-offers' })
+  fastify.register(adminOrderRecoveryRoutes, { prefix: '/incomplete-orders' })
 }
