@@ -23,6 +23,7 @@ const COUPON_COLUMNS = `
   coupon_type, absorber, vendor_id,
   applicable_shop_ids, applicable_category_ids, applicable_product_ids,
   usage_limit_total, usage_limit_per_user,
+  target_type, target_segment_id,
   created_by,
   created_at, updated_at
 `
@@ -76,6 +77,57 @@ export class CouponsRepository {
       [couponId]
     )
     return rows[0].count
+  }
+
+  /**
+   * True once userId has placed a real order — used by FIRST_TIME coupon
+   * targeting. Counts every status except CANCELLED, including PENDING, so
+   * a second order placed while the first is still unpaid doesn't look
+   * "first-time" again (adapted from bakaloo-backend's coupons.repository.js).
+   */
+  async hasPriorOrder(userId) {
+    const { rows } = await query(
+      `SELECT EXISTS(
+         SELECT 1 FROM orders WHERE user_id = $1 AND status != 'CANCELLED'
+       ) AS has_prior`,
+      [userId]
+    )
+    return rows[0].has_prior
+  }
+
+  /** True if userId is in a coupon's individual-target list. */
+  async isTargetUser(couponId, userId) {
+    const { rows } = await query(
+      `SELECT 1 FROM coupon_target_users WHERE coupon_id = $1 AND user_id = $2 LIMIT 1`,
+      [couponId, userId]
+    )
+    return rows.length > 0
+  }
+
+  /** Replace a coupon's individual-target user list wholesale. */
+  async setTargetUsers(couponId, userIds) {
+    await query(`DELETE FROM coupon_target_users WHERE coupon_id = $1`, [couponId])
+    if (userIds?.length) {
+      await query(
+        `INSERT INTO coupon_target_users (coupon_id, user_id)
+         SELECT $1, uid FROM UNNEST($2::uuid[]) AS uid
+         ON CONFLICT (coupon_id, user_id) DO NOTHING`,
+        [couponId, userIds]
+      )
+    }
+  }
+
+  /** List a coupon's individually-targeted customers, enriched for admin display. */
+  async getTargetUsers(couponId) {
+    const { rows } = await query(
+      `SELECT u.id, u.name, u.phone, u.email
+       FROM coupon_target_users ctu
+       INNER JOIN users u ON u.id = ctu.user_id
+       WHERE ctu.coupon_id = $1
+       ORDER BY u.name`,
+      [couponId]
+    )
+    return rows
   }
 
   /**
@@ -152,6 +204,7 @@ export class CouponsRepository {
          coupon_type, absorber, vendor_id,
          applicable_shop_ids, applicable_category_ids, applicable_product_ids,
          usage_limit_total, usage_limit_per_user,
+         target_type, target_segment_id,
          created_by
        )
        VALUES (
@@ -163,7 +216,8 @@ export class CouponsRepository {
          $11, $12, $13,
          $14, $15, $16,
          $17, $18,
-         $19
+         $19, $20,
+         $21
        )
        RETURNING ${COUPON_COLUMNS}`,
       [
@@ -185,10 +239,16 @@ export class CouponsRepository {
         data.applicableProductIds ?? null,
         data.usageLimitTotal ?? null,
         data.usageLimitPerUser ?? 1,
+        data.targetType ?? 'ALL',
+        data.targetSegmentId ?? null,
         data.createdBy ?? null,
       ]
     )
-    return this._format(rows[0])
+    const coupon = this._format(rows[0])
+    if (data.targetType === 'INDIVIDUAL' && data.targetUserIds?.length) {
+      await this.setTargetUsers(coupon.id, data.targetUserIds)
+    }
+    return coupon
   }
 
   /**
@@ -219,6 +279,8 @@ export class CouponsRepository {
       applicableProductIds:  'applicable_product_ids',
       usageLimitTotal:       'usage_limit_total',
       usageLimitPerUser:     'usage_limit_per_user',
+      targetType:            'target_type',
+      targetSegmentId:       'target_segment_id',
       createdBy:             'created_by',
     }
 
@@ -228,6 +290,10 @@ export class CouponsRepository {
         fields.push(`${dbKey} = $${idx++}`)
         params.push(val)
       }
+    }
+
+    if (data.targetUserIds !== undefined) {
+      await this.setTargetUsers(id, data.targetUserIds)
     }
 
     if (fields.length === 0) return this.findById(id)
@@ -274,6 +340,8 @@ export class CouponsRepository {
       applicableProductIds:  row.applicable_product_ids,
       usageLimitTotal:       row.usage_limit_total,
       usageLimitPerUser:     row.usage_limit_per_user,
+      targetType:            row.target_type,
+      targetSegmentId:       row.target_segment_id,
       createdBy:             row.created_by,
       createdAt:             row.created_at,
       updatedAt:             row.updated_at,

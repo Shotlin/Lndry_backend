@@ -9,6 +9,7 @@ import {
   createCouponSchema,
   updateCouponSchema,
   deleteCouponSchema,
+  couponTargetUsersSchema,
 } from './coupons.schema.js'
 
 /**
@@ -67,4 +68,10 @@ export default async function couponsRoutes(fastify) {
     schema: deleteCouponSchema,
     preHandler: [fastify.authenticate, requirePermission('shop_coupons.delete')],
   }, controller.delete.bind(controller))
+
+  // GET /:id/target-users — Individually-targeted customers [ADMIN]
+  fastify.get('/:id/target-users', {
+    schema: couponTargetUsersSchema,
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+  }, controller.targetUsers.bind(controller))
 }

@@ -91,4 +91,10 @@ export class CouponsController {
     }
     return reply.code(200).send(success(null, 'Coupon deleted'))
   }
+
+  /** GET /:id/target-users — Admin (INDIVIDUAL-targeted coupon edit-dialog prefill) */
+  async targetUsers(request, reply) {
+    const users = await this.service.getTargetUsers(request.params.id)
+    return reply.code(200).send(success(users, 'Coupon target users fetched'))
+  }
 }

@@ -3,6 +3,7 @@ import { ERROR_CODES } from '../../constants/errors.js'
 import { HQ_ROLES } from '../../utils/permissions.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { findDemoCouponByCode, mergeDemoCoupons } from './demo-coupons.js'
+import { CustomerSegmentsRepository } from '../admin/customer-segments/customer-segments.repository.js'
 
 /** Returns true only for properly formatted UUIDs. */
 function _isValidUUID(value) {
@@ -21,8 +22,9 @@ function _isValidUUID(value) {
  *   9.6 — Audit events (coupon_created, coupon_updated, coupon_deleted)
  */
 export class CouponsService {
-  constructor(repository) {
+  constructor(repository, segmentsRepo = new CustomerSegmentsRepository()) {
     this.repo = repository
+    this.segmentsRepo = segmentsRepo
   }
 
   // ═══════════════════════════════════════════════════════════════════
@@ -392,6 +394,22 @@ export class CouponsService {
       return { valid: false, code: ERROR_CODES.COUPON_EXPIRED, message: 'Coupon has expired' }
     }
 
+    // Targeting — SEGMENT/INDIVIDUAL/FIRST_TIME (ALL, and demo coupons which
+    // have no targetType at all, skip this block entirely via _isTargetEligible).
+    if (!(await this._isTargetEligible(coupon, userId))) {
+      return coupon.targetType === 'SEGMENT'
+        ? {
+            valid: false,
+            code: ERROR_CODES.COUPON_SEGMENT_RESTRICTED,
+            message: 'This coupon is only available for selected customers.',
+          }
+        : {
+            valid: false,
+            code: ERROR_CODES.COUPON_NOT_APPLICABLE,
+            message: 'This coupon is not applicable to your account.',
+          }
+    }
+
     // usage_limit_total (new multi-vendor field)
     // Skip DB lookup for demo coupons — they have non-UUID IDs
     if (coupon.usageLimitTotal != null && _isValidUUID(coupon.id)) {
@@ -561,7 +579,9 @@ export class CouponsService {
   }
 
   /**
-   * Get available coupons for a user (filter out maxed-out ones)
+   * Get available coupons for a user (filter out maxed-out and
+   * not-eligible-for-this-user ones — segment/individual/first-time-only
+   * coupons stay hidden from customers who can't use them).
    */
   async getAvailable(userId) {
     const coupons = mergeDemoCoupons(await this.repo.findAvailable())
@@ -572,12 +592,30 @@ export class CouponsService {
         ? 0
         : await this.repo.getUserUsageCount(coupon.id, userId)
       const perUserLimit = coupon.usageLimitPerUser ?? coupon.perUserLimit ?? 1
-      if (usage < perUserLimit) {
-        available.push(this._toPublicCoupon(coupon))
-      }
+      if (usage >= perUserLimit) continue
+
+      if (!(await this._isTargetEligible(coupon, userId))) continue
+
+      available.push(this._toPublicCoupon(coupon))
     }
 
     return available
+  }
+
+  /** Targeting-only eligibility check (no cartTotal/usage-limit — used by getAvailable). */
+  async _isTargetEligible(coupon, userId) {
+    if (coupon.targetType === 'SEGMENT') {
+      return coupon.targetSegmentId
+        ? this.segmentsRepo.isMember(coupon.targetSegmentId, userId)
+        : false
+    }
+    if (coupon.targetType === 'INDIVIDUAL') {
+      return _isValidUUID(coupon.id) ? this.repo.isTargetUser(coupon.id, userId) : false
+    }
+    if (coupon.targetType === 'FIRST_TIME') {
+      return !(await this.repo.hasPriorOrder(userId))
+    }
+    return true
   }
 
   /**
@@ -600,6 +638,11 @@ export class CouponsService {
 
   async listAll(filters) {
     return this.repo.findAll(filters)
+  }
+
+  /** Individually-targeted customers for a coupon (dashboard edit-dialog prefill). */
+  async getTargetUsers(couponId) {
+    return this.repo.getTargetUsers(couponId)
   }
 
   /**
