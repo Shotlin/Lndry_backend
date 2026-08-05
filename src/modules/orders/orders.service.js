@@ -18,6 +18,8 @@ import { CartService } from '../../../archived_modules/cart/cart.service.js'
 import { AddressesRepository } from '../addresses/addresses.repository.js'
 import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { CouponsService } from '../coupons/coupons.service.js'
+import { FirstTimeOffersRepository } from '../admin/first-time-offers/first-time-offers.repository.js'
+import { FirstTimeOffersService } from '../admin/first-time-offers/first-time-offers.service.js'
 import { ShopProductsRepository } from '../shop-garment_rates/shop-garment_rates.repository.js'
 import { ShopProductsService } from '../shop-garment_rates/shop-garment_rates.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
@@ -46,6 +48,10 @@ export class OrdersService {
     this.couponsRepo = options.couponsRepository || new CouponsRepository()
     this.couponsService =
       options.couponsService || new CouponsService(this.couponsRepo)
+    this.firstTimeOffersRepo =
+      options.firstTimeOffersRepository || new FirstTimeOffersRepository()
+    this.firstTimeOffersService =
+      options.firstTimeOffersService || new FirstTimeOffersService(this.firstTimeOffersRepo, this.couponsRepo)
     this.shopProductsRepo =
       options.shopProductsRepository || new ShopProductsRepository()
     // Build a ShopProductsService for stock-transition side effects so that
@@ -1491,13 +1497,54 @@ export class OrdersService {
       appliedCouponDiscount = Number(couponResult.discount || 0)
     }
 
+    // 4c. First-time offer — auto-applies for eligible first-time customers,
+    // no code needed (adapted from bakaloo-backend's orders.service.js).
+    // Discount-type rewards (FLAT_DISCOUNT/PERCENTAGE_DISCOUNT) yield to an
+    // already-applied coupon — they'd otherwise stack two separate
+    // order-level discounts through different mechanisms. COUPON_UNLOCK
+    // doesn't touch the discount line at all, so it always applies when
+    // eligible; its effect (adding the customer to the unlocked coupon's
+    // individual-target list) only actually happens once the order is
+    // confirmed — see placeOrderFromDraft below — so an abandoned draft
+    // never grants it.
+    let firstTimeOffer = null
+    let firstTimeReward = null
+    const subtotalRupeesForOffer = this._paiseToRupees(quote.estimate_paise)
+    const resolvedOffer = await this.firstTimeOffersService.resolveForCheckout(userId, subtotalRupeesForOffer)
+    let extraDiscount = 0
+    if (resolvedOffer?.autoApply) {
+      if (resolvedOffer.rewardType === 'FREE_DELIVERY') {
+        // Needs the actual delivery fee, which only the fee engine knows —
+        // compute a first-pass breakdown with just the coupon discount to
+        // learn it, then fold the delivery fee in as an extra discount below.
+        const preBreakdown = await this._buildDraftFeeBreakdown({
+          quote, vendor, distanceKm: distance, couponDiscount: appliedCouponDiscount,
+        })
+        const reward = this.firstTimeOffersService.computeReward(
+          resolvedOffer, subtotalRupeesForOffer, this._paiseToRupees(preBreakdown.delivery_fee_paise)
+        )
+        firstTimeOffer = resolvedOffer
+        firstTimeReward = reward
+        extraDiscount = reward.deliveryFeeAmount || 0
+      } else {
+        const reward = this.firstTimeOffersService.computeReward(resolvedOffer, subtotalRupeesForOffer)
+        if (reward.discount && appliedCouponCode) {
+          // Discount slot already taken by a coupon — skip the stack.
+        } else {
+          firstTimeOffer = resolvedOffer
+          firstTimeReward = reward
+          extraDiscount = reward.discount || 0
+        }
+      }
+    }
+
     // 5. Canonical backend pricing. Quote owns item pricing; TotalsEngine owns
     // fees/taxes/discount math so draft and final order use the same snapshot.
     const feeBreakdown = await this._buildDraftFeeBreakdown({
       quote,
       vendor,
       distanceKm: distance,
-      couponDiscount: appliedCouponDiscount,
+      couponDiscount: appliedCouponDiscount + extraDiscount,
     })
     const payableAmount = feeBreakdown.total_payable_paise
 
@@ -1507,6 +1554,9 @@ export class OrdersService {
       slot_id: slotId,
       booking_date: bookingDate,
       fee_breakdown: feeBreakdown,
+      first_time_offer: firstTimeOffer
+        ? { id: firstTimeOffer.id, rewardType: firstTimeOffer.rewardType, unlockCouponId: firstTimeReward?.unlockCouponId ?? null }
+        : null,
       coupon_code: appliedCouponCode
     }
 
@@ -1714,6 +1764,18 @@ export class OrdersService {
           await this.couponsService.recordUsage(appliedCouponCode, userId, order.id)
         } catch (err) {
           logger.warn({ err: err.message, orderId: order.id }, 'Coupon usage recording failed')
+        }
+      }
+
+      // First-time-offer COUPON_UNLOCK reward — only takes effect now that
+      // the order is actually confirmed, not at draft-prepare time, so an
+      // abandoned draft never grants it (see prepareOrder above).
+      const unlockCouponId = snapshot.first_time_offer?.unlockCouponId
+      if (unlockCouponId) {
+        try {
+          await this.couponsRepo.addTargetUser(unlockCouponId, userId)
+        } catch (err) {
+          logger.warn({ err: err.message, orderId: order.id }, 'First-time-offer coupon unlock failed')
         }
       }
 
