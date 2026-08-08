@@ -57,6 +57,16 @@ export class CartMilestonesService {
     return eligible
   }
 
+  /**
+   * Customer-facing "milestone perks" widget data — same eligible-tier list
+   * as getEligibleTiers, just the entry point the customer route calls so
+   * admin-only concerns (listAll/create/update/delete) stay visually
+   * separate from what's exposed to a regular authenticated customer.
+   */
+  async listActiveTiersForCustomer(userId) {
+    return this.getEligibleTiers(userId)
+  }
+
   /** Resolve the best-fit (highest currently-satisfied) milestone reward for checkout, or null. */
   async resolveForCheckout(userId, orderTotal) {
     const eligible = await this.getEligibleTiers(userId)

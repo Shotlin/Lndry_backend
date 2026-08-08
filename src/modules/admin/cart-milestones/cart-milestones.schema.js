@@ -47,6 +47,41 @@ export const listCartMilestonesSchema = {
   },
 }
 
+export const activeCartMilestonesSchema = {
+  tags: ['Cart Milestones'],
+  summary: 'Active cart milestone tiers for the current customer',
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            tiers: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  name: { type: 'string' },
+                  minOrderAmount: { type: 'number' },
+                  rewardType: { type: 'string' },
+                  rewardValue: { type: ['number', 'null'] },
+                  maxDiscount: { type: ['number', 'null'] },
+                  messageBefore: { type: ['string', 'null'] },
+                  messageAfter: { type: ['string', 'null'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 export const createCartMilestoneSchema = {
   tags: ['Cart Milestones'],
   summary: 'Create cart milestone [ADMIN]',

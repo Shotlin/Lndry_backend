@@ -508,6 +508,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/first-time-offers',
   })
 
+  // Cart Milestones — customer-facing active tiers (admin CRUD is under /api/v1/admin/cart-milestones)
+  const { customerCartMilestonesRoutes } = await import('./modules/admin/cart-milestones/cart-milestones.routes.js')
+  await app.register(customerCartMilestonesRoutes, {
+    prefix: '/api/v1/cart-milestones',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {

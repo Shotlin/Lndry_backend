@@ -24,6 +24,11 @@ export class CartMilestonesController {
     return reply.code(200).send(success(milestones, 'Cart milestones fetched'))
   }
 
+  async activeForCustomer(request, reply) {
+    const tiers = await this.service.listActiveTiersForCustomer(request.user.id)
+    return reply.code(200).send(success({ tiers }, 'Active cart milestone tiers fetched'))
+  }
+
   async create(request, reply) {
     const actor = this._actorCtx(request)
     const result = await this.service.create(request.body, actor)
