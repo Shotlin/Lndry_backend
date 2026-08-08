@@ -104,6 +104,19 @@ export class CouponsRepository {
     return rows.length > 0
   }
 
+  /**
+   * Non-destructive single-user grant — used when a coupon is unlocked as a
+   * reward (first-time-offer / cart-milestone COUPON_UNLOCK, or a recovery
+   * coupon), as opposed to setTargetUsers' wholesale admin-editor replace.
+   */
+  async addTargetUser(couponId, userId) {
+    await query(
+      `INSERT INTO coupon_target_users (coupon_id, user_id) VALUES ($1, $2)
+       ON CONFLICT (coupon_id, user_id) DO NOTHING`,
+      [couponId, userId]
+    )
+  }
+
   /** Replace a coupon's individual-target user list wholesale. */
   async setTargetUsers(couponId, userIds) {
     await query(`DELETE FROM coupon_target_users WHERE coupon_id = $1`, [couponId])

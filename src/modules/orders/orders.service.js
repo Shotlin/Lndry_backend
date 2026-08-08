@@ -20,6 +20,8 @@ import { CouponsRepository } from '../coupons/coupons.repository.js'
 import { CouponsService } from '../coupons/coupons.service.js'
 import { FirstTimeOffersRepository } from '../admin/first-time-offers/first-time-offers.repository.js'
 import { FirstTimeOffersService } from '../admin/first-time-offers/first-time-offers.service.js'
+import { CartMilestonesRepository } from '../admin/cart-milestones/cart-milestones.repository.js'
+import { CartMilestonesService } from '../admin/cart-milestones/cart-milestones.service.js'
 import { ShopProductsRepository } from '../shop-garment_rates/shop-garment_rates.repository.js'
 import { ShopProductsService } from '../shop-garment_rates/shop-garment_rates.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
@@ -52,6 +54,10 @@ export class OrdersService {
       options.firstTimeOffersRepository || new FirstTimeOffersRepository()
     this.firstTimeOffersService =
       options.firstTimeOffersService || new FirstTimeOffersService(this.firstTimeOffersRepo, this.couponsRepo)
+    this.cartMilestonesRepo =
+      options.cartMilestonesRepository || new CartMilestonesRepository()
+    this.cartMilestonesService =
+      options.cartMilestonesService || new CartMilestonesService(this.cartMilestonesRepo, undefined, this.couponsRepo)
     this.shopProductsRepo =
       options.shopProductsRepository || new ShopProductsRepository()
     // Build a ShopProductsService for stock-transition side effects so that
@@ -1538,6 +1544,32 @@ export class OrdersService {
       }
     }
 
+    // 4d. Cart milestone — the highest order-value tier this user is
+    // eligible for and has already reached with this order (applies to
+    // every order, not just a customer's first, unlike the first-time
+    // offer above). `stackableWithCoupon` is a hard admin toggle: false
+    // means the milestone is skipped outright whenever a coupon code was
+    // applied to this order. When it does apply, a FLAT_DISCOUNT reward
+    // still yields to a discount already occupying the bill's single
+    // discount slot (coupon or first-time-offer FLAT/PERCENTAGE_DISCOUNT —
+    // not FREE_DELIVERY, which doesn't touch that slot). COUPON_UNLOCK
+    // never contends for the slot; its effect is deferred to
+    // placeOrderFromDraft's post-commit step, same as the first-time-offer
+    // COUPON_UNLOCK handling above, so an abandoned draft never grants it.
+    let cartMilestone = null
+    let cartMilestoneReward = null
+    const resolvedMilestone = await this.cartMilestonesService.resolveForCheckout(userId, subtotalRupeesForOffer)
+    if (resolvedMilestone && !(appliedCouponCode && !resolvedMilestone.stackableWithCoupon)) {
+      const reward = this.cartMilestonesService.computeReward(resolvedMilestone, subtotalRupeesForOffer)
+      if (reward.discount && (appliedCouponCode || firstTimeReward?.discount)) {
+        // Discount slot already taken by a coupon or first-time offer.
+      } else {
+        cartMilestone = resolvedMilestone
+        cartMilestoneReward = reward
+        extraDiscount += reward.discount || 0
+      }
+    }
+
     // 5. Canonical backend pricing. Quote owns item pricing; TotalsEngine owns
     // fees/taxes/discount math so draft and final order use the same snapshot.
     const feeBreakdown = await this._buildDraftFeeBreakdown({
@@ -1556,6 +1588,9 @@ export class OrdersService {
       fee_breakdown: feeBreakdown,
       first_time_offer: firstTimeOffer
         ? { id: firstTimeOffer.id, rewardType: firstTimeOffer.rewardType, unlockCouponId: firstTimeReward?.unlockCouponId ?? null }
+        : null,
+      cart_milestone: cartMilestone
+        ? { id: cartMilestone.id, rewardType: cartMilestone.rewardType, unlockCouponId: cartMilestoneReward?.unlockCouponId ?? null }
         : null,
       coupon_code: appliedCouponCode
     }
@@ -1776,6 +1811,21 @@ export class OrdersService {
           await this.couponsRepo.addTargetUser(unlockCouponId, userId)
         } catch (err) {
           logger.warn({ err: err.message, orderId: order.id }, 'First-time-offer coupon unlock failed')
+        }
+      }
+
+      // Cart milestone follow-through — same deferred-until-confirmed
+      // pattern as the first-time-offer block above, plus a usage record
+      // (a milestone can be earned repeatedly, unlike a first-time offer).
+      if (snapshot.cart_milestone) {
+        try {
+          const milestoneUnlockCouponId = snapshot.cart_milestone.unlockCouponId
+          if (milestoneUnlockCouponId) {
+            await this.couponsRepo.addTargetUser(milestoneUnlockCouponId, userId)
+          }
+          await this.cartMilestonesService.recordUsage(snapshot.cart_milestone.id, userId, order.id)
+        } catch (err) {
+          logger.warn({ err: err.message, orderId: order.id }, 'Cart milestone follow-through failed')
         }
       }
 

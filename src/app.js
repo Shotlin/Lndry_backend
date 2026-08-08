@@ -502,6 +502,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/coupons',
   })
 
+  // First-Time Offers — customer-facing active tiers (admin CRUD is under /api/v1/admin/first-time-offers)
+  const { customerFirstTimeOffersRoutes } = await import('./modules/admin/first-time-offers/first-time-offers.routes.js')
+  await app.register(customerFirstTimeOffersRoutes, {
+    prefix: '/api/v1/first-time-offers',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {

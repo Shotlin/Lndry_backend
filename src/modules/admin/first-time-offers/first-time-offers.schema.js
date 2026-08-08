@@ -43,6 +43,40 @@ export const listFirstTimeOffersSchema = {
   },
 }
 
+export const activeFirstTimeOffersSchema = {
+  tags: ['First-Time Offers'],
+  summary: 'Active first-time offer tiers for the current customer',
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            eligible: { type: 'boolean' },
+            tiers: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  id: { type: 'string' },
+                  name: { type: 'string' },
+                  minOrderAmount: { type: 'number' },
+                  rewardType: { type: 'string' },
+                  rewardValue: { type: ['number', 'null'] },
+                  maxDiscount: { type: ['number', 'null'] },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 export const createFirstTimeOfferSchema = {
   tags: ['First-Time Offers'],
   summary: 'Create first-time offer [ADMIN]',

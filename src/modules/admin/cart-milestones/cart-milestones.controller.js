@@ -2,9 +2,9 @@ import { success, error } from '../../../utils/apiResponse.js'
 import { httpStatusFor } from '../../../constants/errors.js'
 
 /**
- * First-Time Offers controller — thin HTTP layer
+ * Cart Milestones controller — thin HTTP layer
  */
-export class FirstTimeOffersController {
+export class CartMilestonesController {
   constructor(service) {
     this.service = service
   }
@@ -20,13 +20,8 @@ export class FirstTimeOffersController {
   }
 
   async listAll(request, reply) {
-    const offers = await this.service.listAll()
-    return reply.code(200).send(success(offers, 'First-time offers fetched'))
-  }
-
-  async activeForCustomer(request, reply) {
-    const result = await this.service.listActiveTiersForCustomer(request.user.id)
-    return reply.code(200).send(success(result, 'Active first-time offer tiers fetched'))
+    const milestones = await this.service.listAll()
+    return reply.code(200).send(success(milestones, 'Cart milestones fetched'))
   }
 
   async create(request, reply) {
@@ -36,17 +31,17 @@ export class FirstTimeOffersController {
       const code = result.code || 'VALIDATION_ERROR'
       return reply.code(httpStatusFor(code)).send(error(result.message, code))
     }
-    return reply.code(201).send(success(result.offer, 'First-time offer created'))
+    return reply.code(201).send(success(result.milestone, 'Cart milestone created'))
   }
 
   async update(request, reply) {
     const actor = this._actorCtx(request)
     const result = await this.service.update(request.params.id, request.body, actor)
     if (!result.success) {
-      const code = result.message === 'Offer not found' ? 404 : 400
+      const code = result.message === 'Milestone not found' ? 404 : 400
       return reply.code(code).send(error(result.message, code === 404 ? 'NOT_FOUND' : 'VALIDATION_ERROR'))
     }
-    return reply.code(200).send(success(result.offer, 'First-time offer updated'))
+    return reply.code(200).send(success(result.milestone, 'Cart milestone updated'))
   }
 
   async delete(request, reply) {
@@ -55,6 +50,6 @@ export class FirstTimeOffersController {
     if (!result.success) {
       return reply.code(404).send(error(result.message, 'NOT_FOUND'))
     }
-    return reply.code(200).send(success(null, 'First-time offer deleted'))
+    return reply.code(200).send(success(null, 'Cart milestone deleted'))
   }
 }

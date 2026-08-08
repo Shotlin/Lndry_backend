@@ -25,6 +25,21 @@ export class FirstTimeOffersService {
   }
 
   /**
+   * All active, date-valid tiers for the customer-facing "milestone perks"
+   * widget (cart/checkout screen) — every candidate, not just the best-fit
+   * one, so the UI can show "you're this far from the next tier". Returns
+   * an empty tier list once the customer has a prior order; the mobile
+   * app should hide the widget entirely in that case rather than show an
+   * empty state.
+   */
+  async listActiveTiersForCustomer(userId) {
+    const hasPriorOrder = await this.repo.hasPriorOrder(userId)
+    if (hasPriorOrder) return { eligible: false, tiers: [] }
+    const tiers = await this.repo.findAllActiveCandidates()
+    return { eligible: true, tiers }
+  }
+
+  /**
    * Resolve the best-fit first-time offer for an order, or null if the user
    * isn't first-time or no offer currently qualifies. Single source of
    * truth for orders.service.js#prepareOrder — never re-derive first-order
