@@ -1587,10 +1587,10 @@ export class OrdersService {
       booking_date: bookingDate,
       fee_breakdown: feeBreakdown,
       first_time_offer: firstTimeOffer
-        ? { id: firstTimeOffer.id, rewardType: firstTimeOffer.rewardType, unlockCouponId: firstTimeReward?.unlockCouponId ?? null }
+        ? { id: firstTimeOffer.id, name: firstTimeOffer.name, rewardType: firstTimeOffer.rewardType, unlockCouponId: firstTimeReward?.unlockCouponId ?? null }
         : null,
       cart_milestone: cartMilestone
-        ? { id: cartMilestone.id, rewardType: cartMilestone.rewardType, unlockCouponId: cartMilestoneReward?.unlockCouponId ?? null }
+        ? { id: cartMilestone.id, name: cartMilestone.name, rewardType: cartMilestone.rewardType, unlockCouponId: cartMilestoneReward?.unlockCouponId ?? null }
         : null,
       coupon_code: appliedCouponCode
     }

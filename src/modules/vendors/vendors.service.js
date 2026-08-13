@@ -1341,7 +1341,26 @@ export class VendorsService {
     return rows
   }
 
+  // vendor_slots.start_time/end_time are plain TIME columns (no date, no
+  // wraparound) — a slot straddling midnight isn't representable, so
+  // end must simply be later than start within the same day.
+  _assertValidTimeRange(start, end) {
+    const toMinutes = (t) => {
+      const [h, m] = String(t).split(':').map(Number)
+      return Number.isFinite(h) && Number.isFinite(m) ? h * 60 + m : null
+    }
+    const startMin = toMinutes(start)
+    const endMin = toMinutes(end)
+    if (startMin === null || endMin === null) {
+      throw { statusCode: 400, message: 'Invalid slot time format', code: 'INVALID_SLOT_TIME' }
+    }
+    if (endMin <= startMin) {
+      throw { statusCode: 400, message: 'Slot end time must be after start time', code: 'INVALID_SLOT_RANGE' }
+    }
+  }
+
   async _createPickupSlotForVendor(vendorId, data) {
+    this._assertValidTimeRange(data.start, data.end)
     const { rows } = await query(
       `INSERT INTO vendor_slots (vendor_id, day_of_week, start_time, end_time, max_orders, is_active)
        VALUES ($1, $2, $3, $4, $5, true)
@@ -1355,6 +1374,17 @@ export class VendorsService {
     const updates = []
     const params = []
     let idx = 1
+
+    if (data.start !== undefined || data.end !== undefined) {
+      const { rows: existingRows } = await query(
+        'SELECT start_time, end_time FROM vendor_slots WHERE vendor_id = $1 AND id = $2',
+        [vendorId, slotId]
+      )
+      if (existingRows.length === 0) return null
+      const nextStart = data.start !== undefined ? data.start : existingRows[0].start_time
+      const nextEnd = data.end !== undefined ? data.end : existingRows[0].end_time
+      this._assertValidTimeRange(nextStart, nextEnd)
+    }
 
     if (data.max_orders !== undefined) {
       updates.push(`max_orders = $${idx++}`)
