@@ -2,10 +2,19 @@ import { v2 as cloudinary } from 'cloudinary'
 import { env } from './env.js'
 import { logger } from './logger.js'
 
+// Cloudinary's f_auto negotiates a delivery format per-client, and Flutter's
+// HTTP client doesn't send browser-style `Accept: image/webp` headers — so
+// f_auto falls back to a non-transparent format (JPEG) for the app, and
+// silently flattens any transparent PNG onto Cloudinary's default matte
+// color: black. Explicit `background: 'white'` makes that flatten target
+// white instead, which reads as "transparent" against this app's white
+// card surfaces. This is a delivery-URL parameter, so it takes effect for
+// every already-uploaded image immediately — no re-upload required.
 const DEFAULT_DELIVERY_TRANSFORM = {
   fetch_format: 'auto',
   quality: 'auto',
   dpr: 'auto',
+  background: 'white',
 }
 
 export const CLOUDINARY_DELIVERY_PROFILES = {
