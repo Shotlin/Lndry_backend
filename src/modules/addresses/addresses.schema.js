@@ -46,10 +46,14 @@ export const createAddressSchema = {
   summary: 'Add new address',
   body: {
     type: 'object',
-    required: ['addressLine1', 'city', 'pincode', 'lat', 'lng'],
+    // addressLine1 (flat/house/building number) is intentionally NOT required
+    // here — signup/location-capture must be able to save an address before
+    // the customer has typed it in. It's enforced only at order-placement
+    // time (checkout), not on address creation.
+    required: ['city', 'pincode', 'lat', 'lng'],
     properties: {
       label:        { type: 'string', maxLength: 50, default: 'Home' },
-      addressLine1: { type: 'string', minLength: 3, maxLength: 255 },
+      addressLine1: { type: 'string', maxLength: 255 },
       addressLine2: { type: 'string', maxLength: 255 },
       landmark:     { type: 'string', maxLength: 255 },
       city:         { type: 'string', minLength: 2, maxLength: 100 },
@@ -75,7 +79,7 @@ export const updateAddressSchema = {
     type: 'object',
     properties: {
       label:        { type: 'string', maxLength: 50 },
-      addressLine1: { type: 'string', minLength: 3, maxLength: 255 },
+      addressLine1: { type: 'string', maxLength: 255 },
       addressLine2: { type: 'string', maxLength: 255 },
       landmark:     { type: 'string', maxLength: 255 },
       city:         { type: 'string', minLength: 2, maxLength: 100 },
