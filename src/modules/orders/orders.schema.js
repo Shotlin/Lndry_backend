@@ -393,13 +393,17 @@ export const prepareOrderSchema = {
   tags: ['Orders'],
   summary: 'Prepare an order draft before payment',
   body: {
+    // slot_id is required unless is_express_pickup is true — express
+    // pickup bypasses the vendor_slots system entirely (validated in
+    // orders.service.js#prepareOrder, not expressible in JSON Schema).
     type: 'object',
-    required: ['quote_id', 'address_id', 'slot_id'],
+    required: ['quote_id', 'address_id'],
     properties: {
       quote_id: { type: 'string', format: 'uuid' },
       address_id: { type: 'string', format: 'uuid' },
       slot_id: { type: 'string', format: 'uuid' },
-      coupon_code: { type: 'string', minLength: 1, maxLength: 50 }
+      coupon_code: { type: 'string', minLength: 1, maxLength: 50 },
+      is_express_pickup: { type: 'boolean' }
     }
   },
   response: {

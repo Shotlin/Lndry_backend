@@ -272,6 +272,24 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.adminSetDailyCapacity.bind(controller))
 
+  fastify.put('/admin/:id/express-pickup', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Turn 60-min express pickup on/off for a vendor [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        required: ['available'],
+        properties: { available: { type: 'boolean' } }
+      }
+    }
+  }, controller.adminSetExpressPickup.bind(controller))
+
   fastify.post('/admin/:id/slots', {
     preHandler: adminPreHandlers,
     schema: {

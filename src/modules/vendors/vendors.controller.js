@@ -535,6 +535,18 @@ export class VendorsController {
     }
   }
 
+  async adminSetExpressPickup(request, reply) {
+    const { id } = request.params
+    const { available } = request.body || {}
+    if (available === undefined) return reply.code(400).send(error('available is required'))
+    try {
+      const res = await this.service.adminSetExpressPickupAvailable(id, available)
+      return reply.send(success(res, 'Express pickup availability updated'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update express pickup availability'))
+    }
+  }
+
   async adminCreatePickupSlot(request, reply) {
     const { id } = request.params
     try {

@@ -68,6 +68,11 @@ export const updateFeeSettingsSchema = z
     gst_enabled: z.boolean(),
     gst_rate: z.number().min(0).max(100),
     gst_label: label,
+
+    // Express pickup — platform-wide flat surcharge (paise) added to a
+    // checkout when the customer opts into 60-min express pickup. Per-vendor
+    // *availability* lives on vendors.express_pickup_available, not here.
+    express_pickup_fee_paise: z.number().int().min(0).max(10000000),
   })
   .partial()
   .superRefine((data, ctx) => {

@@ -1501,6 +1501,16 @@ export class VendorsService {
     return { daily_limit: maxOrdersPerDay }
   }
 
+  // Admin-only toggle for whether this vendor offers 60-min express pickup
+  // (bypasses the vendor_slots capacity system entirely — see
+  // orders.service.js#prepareOrder). No vendor approval needed, same
+  // superpower pattern as capacity/slots/services above.
+  async adminSetExpressPickupAvailable(id, available) {
+    const vendorId = await this._requireAdminVendorId(id)
+    const vendor = await this.repo.update(vendorId, { express_pickup_available: available })
+    return { express_pickup_available: vendor.express_pickup_available }
+  }
+
   async createCapacityException(userId, data) {
     const vendor = await this.repo.findByUserId(userId)
     if (!vendor) throw { statusCode: 404, message: 'Vendor profile not found' }

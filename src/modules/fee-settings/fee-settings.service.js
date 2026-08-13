@@ -92,6 +92,7 @@ export class FeeSettingsService {
       gst_enabled: false,
       gst_rate: 18,
       gst_label: 'GST',
+      express_pickup_fee_paise: 4900,
     }
   }
 }

@@ -23,6 +23,7 @@ const COLUMNS = `
   packaging_fee_description,
   delivery_eta_minutes,
   gst_enabled, gst_rate, gst_label,
+  express_pickup_fee_paise,
   created_at, updated_at, updated_by
 `
 
@@ -63,6 +64,7 @@ const UPDATABLE_COLUMNS = [
   'gst_enabled',
   'gst_rate',
   'gst_label',
+  'express_pickup_fee_paise',
 ]
 
 const NUMERIC_COLUMNS = new Set([

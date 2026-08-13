@@ -12,7 +12,8 @@ export class VendorsRepository {
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, created_by, status,
         vendor_approved, account_enabled, marketplace_published,
-        requested_service_radius_km, approved_service_radius_km
+        requested_service_radius_km, approved_service_radius_km,
+        express_pickup_available
       ) VALUES (
         $1, $2, $3, $4, $5, $6,
         $7, $8, $9, $10, $11, $12, $13, $14,
@@ -21,7 +22,8 @@ export class VendorsRepository {
         $21, $22, $23, $24,
         $25, $26, $27, $28,
         $29, $30, $31,
-        $32, $33
+        $32, $33,
+        $34
       )
       RETURNING id, name, slug, branch_code, description, logo_url, banner_url,
         phone, email, owner_name, address_line1, address_line2, city, state, pincode,
@@ -30,7 +32,8 @@ export class VendorsRepository {
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
-        requested_service_radius_km, approved_service_radius_km`,
+        requested_service_radius_km, approved_service_radius_km,
+        express_pickup_available`,
       [
         data.name, data.slug, data.branch_code,
         data.description || null, data.logo_url || null, data.banner_url || null,
@@ -47,7 +50,8 @@ export class VendorsRepository {
         data.gst_number || null, data.pan_number || null,
         data.created_by, data.status || 'DRAFT',
         data.vendor_approved || false, data.account_enabled !== false, data.marketplace_published || false,
-        data.requested_service_radius_km || 5.00, data.approved_service_radius_km || 5.00
+        data.requested_service_radius_km || 5.00, data.approved_service_radius_km || 5.00,
+        data.express_pickup_available || false
       ]
     )
     return rows[0]
@@ -62,7 +66,8 @@ export class VendorsRepository {
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
-        requested_service_radius_km, approved_service_radius_km
+        requested_service_radius_km, approved_service_radius_km,
+        express_pickup_available
       FROM vendors
       WHERE id = $1 AND deleted_at IS NULL`,
       [id]
@@ -79,7 +84,8 @@ export class VendorsRepository {
         v.bank_account_number, v.bank_ifsc, v.bank_name, v.bank_holder_name,
         v.gst_number, v.pan_number, v.created_by, v.created_at, v.updated_at,
         v.vendor_approved, v.account_enabled, v.marketplace_published,
-        v.requested_service_radius_km, v.approved_service_radius_km
+        v.requested_service_radius_km, v.approved_service_radius_km,
+        v.express_pickup_available
       FROM vendors v
       LEFT JOIN vendor_employees ve ON ve.vendor_id = v.id
       WHERE (v.created_by = $1 OR ve.user_id = $1) AND v.deleted_at IS NULL
@@ -121,7 +127,8 @@ export class VendorsRepository {
       account_enabled: 'account_enabled',
       marketplace_published: 'marketplace_published',
       requested_service_radius_km: 'requested_service_radius_km',
-      approved_service_radius_km: 'approved_service_radius_km'
+      approved_service_radius_km: 'approved_service_radius_km',
+      express_pickup_available: 'express_pickup_available'
     }
 
     const fields = []
@@ -155,7 +162,8 @@ export class VendorsRepository {
         bank_account_number, bank_ifsc, bank_name, bank_holder_name,
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
-        requested_service_radius_km, approved_service_radius_km`,
+        requested_service_radius_km, approved_service_radius_km,
+        express_pickup_available`,
       params
     )
     return rows[0] || null

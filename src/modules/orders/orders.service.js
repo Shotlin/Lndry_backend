@@ -1332,9 +1332,10 @@ export class OrdersService {
     const deliveryFee = Number(feeBreakdown.delivery_fee_paise || 0)
     const platformFee = Number(feeBreakdown.platform_fee_paise || 0)
     const tax = Number(feeBreakdown.tax_paise || 0)
+    const expressFee = Number(feeBreakdown.express_fee_paise || 0)
     const discount = Number(feeBreakdown.discount_paise || 0)
     const totalPayable = Number(feeBreakdown.total_payable_paise || 0)
-    const expected = subtotal + deliveryFee + platformFee + tax - discount
+    const expected = subtotal + deliveryFee + platformFee + tax + expressFee - discount
 
     if (expected !== totalPayable) {
       throw {
@@ -1345,7 +1346,7 @@ export class OrdersService {
     }
   }
 
-  async _buildDraftFeeBreakdown({ quote, vendor, distanceKm, couponDiscount = 0 }) {
+  async _buildDraftFeeBreakdown({ quote, vendor, distanceKm, couponDiscount = 0, isExpressPickup = false }) {
     const subtotalPaise = Number(quote.estimate_paise || 0)
     const subtotalRupees = this._paiseToRupees(subtotalPaise)
     const { config, source } = await this.feeSettingsService.resolveForShop(quote.vendor_id)
@@ -1369,14 +1370,16 @@ export class OrdersService {
     )
     const taxPaise = this._rupeesToPaise(canonical.tax)
     const discountPaise = this._rupeesToPaise(canonical.couponDiscount)
+    const expressFeePaise = isExpressPickup ? Number(config.express_pickup_fee_paise || 0) : 0
     const totalPayablePaise =
-      subtotalPaise + deliveryFeePaise + platformFeePaise + taxPaise - discountPaise
+      subtotalPaise + deliveryFeePaise + platformFeePaise + taxPaise + expressFeePaise - discountPaise
 
     const feeBreakdown = {
       subtotal_paise: subtotalPaise,
       delivery_fee_paise: deliveryFeePaise,
       platform_fee_paise: platformFeePaise,
       tax_paise: taxPaise,
+      express_fee_paise: expressFeePaise,
       discount_paise: discountPaise,
       total_payable_paise: totalPayablePaise,
       pricing_source: source,
@@ -1405,6 +1408,7 @@ export class OrdersService {
       delivery_fee_paise: Number(parsed.delivery_fee_paise || 0),
       platform_fee_paise: Number(parsed.platform_fee_paise || 0),
       tax_paise: Number(parsed.tax_paise || 0),
+      express_fee_paise: Number(parsed.express_fee_paise || 0),
       discount_paise: Number(parsed.discount_paise || 0),
       total_payable_paise: Number(parsed.total_payable_paise || 0),
     }
@@ -1417,6 +1421,11 @@ export class OrdersService {
     const addressId = body.addressId || body.address_id
     const slotId = body.slotId || body.slot_id
     const couponCode = body.couponCode || body.coupon_code
+    const isExpressPickup = !!(body.isExpressPickup || body.is_express_pickup)
+
+    if (!isExpressPickup && !slotId) {
+      return { success: false, message: 'slot_id is required unless this is an express pickup', code: 'SLOT_REQUIRED' }
+    }
 
     // 1. Fetch quote from Postgres and verify ownership
     const quoteRes = await query(
@@ -1450,7 +1459,7 @@ export class OrdersService {
 
     // 3. Verify vendor status & approved service radius eligibility (Haversine check)
     const vendorRes = await query(
-      `SELECT id, is_active, status, lat, lng, approved_service_radius_km, vendor_approved, account_enabled, marketplace_published
+      `SELECT id, is_active, status, lat, lng, approved_service_radius_km, vendor_approved, account_enabled, marketplace_published, express_pickup_available
        FROM vendors
        WHERE id = $1 AND deleted_at IS NULL`,
       [quote.vendor_id]
@@ -1458,6 +1467,9 @@ export class OrdersService {
     const vendor = vendorRes.rows[0]
     if (!vendor || !vendor.is_active || vendor.status !== 'APPROVED' || !vendor.vendor_approved || !vendor.account_enabled || !vendor.marketplace_published) {
       return { success: false, message: 'Vendor is not available for service', code: 'VENDOR_UNAVAILABLE' }
+    }
+    if (isExpressPickup && !vendor.express_pickup_available) {
+      return { success: false, message: 'Express pickup is not available for this vendor', code: 'EXPRESS_PICKUP_UNAVAILABLE' }
     }
 
     // Check Haversine distance
@@ -1477,17 +1489,25 @@ export class OrdersService {
       return { success: false, message: 'Address falls outside this vendor\'s service area', code: 'OUT_OF_RADIUS' }
     }
 
-    // 4. Verify slot hold ownership (must match the user and the quote)
-    const holdRes = await query(
-      `SELECT booking_date FROM slot_holds
-       WHERE customer_id = $1 AND slot_id = $2 AND vendor_id = $3 AND quote_id = $4 AND expires_at > NOW()
-       LIMIT 1`,
-      [userId, slotId, quote.vendor_id, quoteId]
-    )
-    if (holdRes.rows.length === 0) {
-      return { success: false, message: 'No active slot hold found. Please hold a pickup slot before checkout.', code: 'NO_SLOT_HOLD' }
+    // 4. Verify slot hold ownership (must match the user and the quote).
+    // Express pickup bypasses the vendor_slots capacity system entirely —
+    // a rider is dispatched within the hour regardless of scheduled slots —
+    // so there's no hold to verify; booking_date is simply today.
+    let bookingDate
+    if (isExpressPickup) {
+      bookingDate = new Date().toISOString().slice(0, 10)
+    } else {
+      const holdRes = await query(
+        `SELECT booking_date FROM slot_holds
+         WHERE customer_id = $1 AND slot_id = $2 AND vendor_id = $3 AND quote_id = $4 AND expires_at > NOW()
+         LIMIT 1`,
+        [userId, slotId, quote.vendor_id, quoteId]
+      )
+      if (holdRes.rows.length === 0) {
+        return { success: false, message: 'No active slot hold found. Please hold a pickup slot before checkout.', code: 'NO_SLOT_HOLD' }
+      }
+      bookingDate = holdRes.rows[0].booking_date
     }
-    const bookingDate = holdRes.rows[0].booking_date
 
     // 4b. Validate coupon (if provided) against this quote's subtotal —
     // single-vendor drafts only, so no multi-shop redistribution needed here.
@@ -1577,14 +1597,16 @@ export class OrdersService {
       vendor,
       distanceKm: distance,
       couponDiscount: appliedCouponDiscount + extraDiscount,
+      isExpressPickup,
     })
     const payableAmount = feeBreakdown.total_payable_paise
 
     const snapshot = {
       quote,
       address,
-      slot_id: slotId,
+      slot_id: isExpressPickup ? null : slotId,
       booking_date: bookingDate,
+      is_express_pickup: isExpressPickup,
       fee_breakdown: feeBreakdown,
       first_time_offer: firstTimeOffer
         ? { id: firstTimeOffer.id, name: firstTimeOffer.name, rewardType: firstTimeOffer.rewardType, unlockCouponId: firstTimeReward?.unlockCouponId ?? null }
@@ -1603,7 +1625,7 @@ export class OrdersService {
       [
         userId,
         quote.vendor_id,
-        slotId,
+        isExpressPickup ? null : slotId,
         addressId,
         JSON.stringify(quote.garment_lines),
         quote.estimated_weight_kg ? Number(quote.estimated_weight_kg) : null,
@@ -1662,41 +1684,49 @@ export class OrdersService {
       const snapshot = typeof draft.snapshot === 'string' ? JSON.parse(draft.snapshot) : draft.snapshot
       const quoteId = snapshot.quote?.quote_id || snapshot.quote?.id
 
-      // 3. Lock slot hold FOR UPDATE
-      const holdRes = await client.query(
-        'SELECT * FROM slot_holds WHERE customer_id = $1 AND slot_id = $2 AND vendor_id = $3 AND quote_id = $4 AND status = \'ACTIVE\' AND expires_at > NOW() FOR UPDATE',
-        [userId, draft.slot_id, draft.vendor_id, quoteId]
-      )
-      const hold = holdRes.rows[0]
-      if (!hold) {
-        throw { statusCode: 400, message: 'Pickup slot hold has expired or is invalid. Please request a new slot.', code: 'HOLD_EXPIRED' }
-      }
+      // 3-5. Slot hold lock + vendor slot capacity lock/enforcement — skipped
+      // entirely for express pickup, which bypasses the vendor_slots capacity
+      // system by design (see prepareOrder above): there's no hold and no
+      // slot row to lock against.
+      const isExpressPickup = !!snapshot.is_express_pickup
+      let hold = null
+      if (!isExpressPickup) {
+        // 3. Lock slot hold FOR UPDATE
+        const holdRes = await client.query(
+          'SELECT * FROM slot_holds WHERE customer_id = $1 AND slot_id = $2 AND vendor_id = $3 AND quote_id = $4 AND status = \'ACTIVE\' AND expires_at > NOW() FOR UPDATE',
+          [userId, draft.slot_id, draft.vendor_id, quoteId]
+        )
+        hold = holdRes.rows[0]
+        if (!hold) {
+          throw { statusCode: 400, message: 'Pickup slot hold has expired or is invalid. Please request a new slot.', code: 'HOLD_EXPIRED' }
+        }
 
-      // 4. Lock vendor slot FOR UPDATE
-      const slotRes = await client.query(
-        'SELECT id, max_orders FROM vendor_slots WHERE id = $1 FOR UPDATE',
-        [draft.slot_id]
-      )
-      if (slotRes.rows.length === 0) {
-        throw { statusCode: 404, message: 'Vendor slot not found' }
-      }
-      const slot = slotRes.rows[0]
+        // 4. Lock vendor slot FOR UPDATE
+        const slotRes = await client.query(
+          'SELECT id, max_orders FROM vendor_slots WHERE id = $1 FOR UPDATE',
+          [draft.slot_id]
+        )
+        if (slotRes.rows.length === 0) {
+          throw { statusCode: 404, message: 'Vendor slot not found' }
+        }
+        const slot = slotRes.rows[0]
 
-      // 5. Enforce slot capacity under lock (exclude our locked hold)
-      const committedOrdersRes = await client.query(
-        `SELECT COUNT(*)::int AS count FROM orders 
-         WHERE vendor_slot_id = $1 AND pickup_date = $2 AND status NOT IN ('PAYMENT_FAILED', 'VENDOR_REJECTED', 'AUTO_REJECTED', 'CUSTOMER_CANCELLED', 'ADMIN_CANCELLED', 'REFUNDED')`,
-        [draft.slot_id, snapshot.booking_date]
-      )
-      const activeHoldsRes = await client.query(
-        `SELECT COUNT(*)::int AS count FROM slot_holds 
-         WHERE slot_id = $1 AND booking_date = $2 AND expires_at > NOW() AND status = 'ACTIVE' AND id != $3`,
-        [draft.slot_id, snapshot.booking_date, hold.id]
-      )
-      
-      const totalBooked = (committedOrdersRes.rows[0]?.count || 0) + (activeHoldsRes.rows[0]?.count || 0)
-      if (totalBooked >= slot.max_orders) {
-        throw { statusCode: 409, message: 'Selected pickup slot is fully booked', code: 'SLOT_FULL' }
+        // 5. Enforce slot capacity under lock (exclude our locked hold)
+        const committedOrdersRes = await client.query(
+          `SELECT COUNT(*)::int AS count FROM orders
+           WHERE vendor_slot_id = $1 AND pickup_date = $2 AND status NOT IN ('PAYMENT_FAILED', 'VENDOR_REJECTED', 'AUTO_REJECTED', 'CUSTOMER_CANCELLED', 'ADMIN_CANCELLED', 'REFUNDED')`,
+          [draft.slot_id, snapshot.booking_date]
+        )
+        const activeHoldsRes = await client.query(
+          `SELECT COUNT(*)::int AS count FROM slot_holds
+           WHERE slot_id = $1 AND booking_date = $2 AND expires_at > NOW() AND status = 'ACTIVE' AND id != $3`,
+          [draft.slot_id, snapshot.booking_date, hold.id]
+        )
+
+        const totalBooked = (committedOrdersRes.rows[0]?.count || 0) + (activeHoldsRes.rows[0]?.count || 0)
+        if (totalBooked >= slot.max_orders) {
+          throw { statusCode: 409, message: 'Selected pickup slot is fully booked', code: 'SLOT_FULL' }
+        }
       }
 
       // 6. Generate collision-free order number LNDR-YYYYMMDD-RAND
@@ -1722,8 +1752,8 @@ export class OrdersService {
            payment_method, payment_status, delivery_address,
            vendor_slot_id, pickup_date,
            estimated_amount_paise, payable_amount_paise,
-           fee_breakdown, coupon_code
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+           fee_breakdown, coupon_code, is_express_pickup
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
          RETURNING id, order_number, user_id, vendor_id, status, created_at`,
         [
           orderDraftId,
@@ -1741,12 +1771,13 @@ export class OrdersService {
           isCod ? 'COD' : 'ONLINE',
           'ADVANCE_PAID',
           JSON.stringify(snapshot.address),
-          draft.slot_id,
+          isExpressPickup ? null : draft.slot_id,
           snapshot.booking_date,
           feeBreakdown.subtotal_paise,
           feeBreakdown.total_payable_paise,
           JSON.stringify(feeBreakdown),
-          appliedCouponCode
+          appliedCouponCode,
+          isExpressPickup
         ]
       )
       const order = orderInsertRes.rows[0]
@@ -1790,7 +1821,9 @@ export class OrdersService {
       if (payment) {
         await client.query('UPDATE payments SET order_id = $1 WHERE id = $2', [order.id, payment.id])
       }
-      await client.query('UPDATE slot_holds SET status = \'CONSUMED\' WHERE id = $1', [hold.id])
+      if (hold) {
+        await client.query('UPDATE slot_holds SET status = \'CONSUMED\' WHERE id = $1', [hold.id])
+      }
 
       await client.query('COMMIT')
 
