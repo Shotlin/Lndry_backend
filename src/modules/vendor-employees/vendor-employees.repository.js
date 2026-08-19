@@ -205,6 +205,66 @@ export class VendorEmployeesRepository {
   }
 
   /**
+   * Find a vendor_employees row for (userId, shopId) INCLUDING soft-deleted
+   * rows, bound to the caller's transaction client. Used by the new-user
+   * create path to detect "this phone/email belongs to a user who was
+   * previously removed from THIS shop" so the create can reactivate the
+   * existing assignment instead of failing on the `users.phone` unique
+   * constraint (which the soft-delete never clears — see 030_shop_staff.sql,
+   * `uq_shop_staff_user_shop` is not a partial index).
+   *
+   * @param {import('pg').PoolClient} client
+   * @param {string} userId
+   * @param {string} shopId
+   * @returns {Promise<{id: string, deleted_at: string|null, is_active: boolean}|null>}
+   */
+  async findAssignmentByUserAndShopAnyStatus(client, userId, shopId) {
+    if (!client || typeof client.query !== 'function') {
+      throw new Error(
+        'vendor-employees.repository.findAssignmentByUserAndShopAnyStatus: `client` (pg PoolClient) is required'
+      )
+    }
+    const { rows } = await client.query(
+      `SELECT id, user_id, vendor_id, role, permissions,
+        is_active, invited_by, deleted_at, created_at, updated_at
+      FROM vendor_employees
+      WHERE user_id = $1 AND vendor_id = $2
+      LIMIT 1`,
+      [userId, shopId]
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Reactivate a previously soft-deleted vendor_employees row: clears
+   * `deleted_at`, sets `is_active = true`, and refreshes role/permissions/
+   * invited_by to the values of this re-add request. Bound to the caller's
+   * transaction client.
+   *
+   * @param {import('pg').PoolClient} client
+   * @param {string} id
+   * @param {{ role: string, permissions: string[], invited_by: string|null }} data
+   * @returns {Promise<object>} the reactivated row
+   */
+  async reactivateWithClient(client, id, { role, permissions, invited_by }) {
+    if (!client || typeof client.query !== 'function') {
+      throw new Error(
+        'vendor-employees.repository.reactivateWithClient: `client` (pg PoolClient) is required'
+      )
+    }
+    const { rows } = await client.query(
+      `UPDATE vendor_employees
+       SET deleted_at = NULL, is_active = true, role = $1,
+           permissions = $2::jsonb, invited_by = $3, updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, user_id, vendor_id, role, permissions,
+         is_active, invited_by, created_at, updated_at`,
+      [role, JSON.stringify(permissions || []), invited_by || null, id]
+    )
+    return rows[0]
+  }
+
+  /**
    * Provision a brand-new `users` row inside the caller's
    * transaction.
    *

@@ -529,70 +529,127 @@ export class VendorEmployeesService {
           phone: phone || null,
         })
         if (dup) {
-          await client.query('ROLLBACK')
-          // `findUserByEmailOrPhone` matches on email OR phone — report
-          // whichever field actually collided instead of always blaming
-          // email. This matters for rider creation, which never sends an
-          // email at all, so a match there can only ever be the phone.
-          const phoneCollided =
-            phone && dup.phone === phone && (!email || dup.email !== email)
-          if (phoneCollided) {
+          // The matched account might be someone this exact shop
+          // previously removed (soft-deleted) — re-adding the same
+          // phone/email should reactivate that assignment rather than
+          // fail, since the `users.phone`/`users.email` unique
+          // constraints are never freed by a soft-delete (see
+          // 030_shop_staff.sql). We only auto-reuse the account when it
+          // already has SOME history with this shop — an unrelated
+          // account (a customer, or staff at a different shop) that
+          // happens to share this phone/email still hard-conflicts, so
+          // this can't be used to silently attach a stranger's account
+          // to a shop's roster.
+          const existingAssignment =
+            await this.repo.findAssignmentByUserAndShopAnyStatus(
+              client,
+              dup.id,
+              shopId,
+            )
+
+          if (existingAssignment && !existingAssignment.deleted_at) {
+            await client.query('ROLLBACK')
+            return {
+              success: false,
+              message: 'User is already assigned to this shop',
+              code: 'STAFF_ALREADY_ASSIGNED',
+            }
+          }
+
+          if (!existingAssignment) {
+            await client.query('ROLLBACK')
+            // `findUserByEmailOrPhone` matches on email OR phone — report
+            // whichever field actually collided instead of always blaming
+            // email. This matters for rider creation, which never sends
+            // an email at all, so a match there can only ever be the
+            // phone.
+            const phoneCollided =
+              phone && dup.phone === phone && (!email || dup.email !== email)
+            if (phoneCollided) {
+              throw makeServiceError(
+                409,
+                ERROR_CODES.PHONE_TAKEN,
+                'A user with this phone number already exists',
+              )
+            }
             throw makeServiceError(
               409,
-              ERROR_CODES.PHONE_TAKEN,
-              'A user with this phone number already exists',
+              ERROR_CODES.EMAIL_TAKEN,
+              'A user with this email already exists',
             )
           }
-          throw makeServiceError(
-            409,
-            ERROR_CODES.EMAIL_TAKEN,
-            'A user with this email already exists',
+
+          // Reactivate the existing (soft-deleted) assignment. No new
+          // `users` row and no password mutation — the account already
+          // exists and we must never reset a stranger's credentials just
+          // because someone typed a matching phone/email into this form.
+          const reactivated = await this.repo.reactivateWithClient(
+            client,
+            existingAssignment.id,
+            { role, permissions, invited_by: ctx.actorUserId },
           )
-        }
 
-        const newUser = await this.repo.createUserWithPassword(client, {
-          email: email || null,
-          full_name: name,
-          phone: phone || null,
-          password_hash: passwordHash,
-          force_password_change: forcePasswordChange,
-        })
+          await emitAuditInTx(client, 'staff_reactivated', {
+            actor_user_id: ctx.actorUserId,
+            actor_role: ctx.actorPlatformRole || ctx.actorRole || null,
+            actor_shop_id: shopId,
+            target_type: 'vendor_employees',
+            target_id: reactivated.id,
+            before: existingAssignment,
+            after: reactivated,
+            ip_address: ctx.ip,
+            user_agent: ctx.userAgent,
+          })
 
-        const newStaff = await this.repo.createWithClient(client, {
-          user_id: newUser.id,
-          vendor_id: shopId,
-          role,
-          permissions,
-          invited_by: ctx.actorUserId,
-        })
+          await client.query('COMMIT')
+          createdStaff = reactivated
+          createdUserId = dup.id
+          tempPassword = null
+        } else {
+          const newUser = await this.repo.createUserWithPassword(client, {
+            email: email || null,
+            full_name: name,
+            phone: phone || null,
+            password_hash: passwordHash,
+            force_password_change: forcePasswordChange,
+          })
 
-        // R20 AC#10 / R28 AC#4 — emit `staff_created` inside the same
-        // tx so the audit row commits atomically with the inserts.
-        // The `password_hash` field is automatically redacted by
-        // `audit-log.js` even though we do not include it here —
-        // belt-and-braces.
-        await emitAuditInTx(client, 'staff_created', {
-          actor_user_id: ctx.actorUserId,
-          actor_role: ctx.actorPlatformRole || ctx.actorRole || null,
-          actor_shop_id: shopId,
-          target_type: 'vendor_employees',
-          target_id: newStaff.id,
-          before: null,
-          after: {
-            id: newStaff.id,
-            vendor_id: shopId,
+          const newStaff = await this.repo.createWithClient(client, {
             user_id: newUser.id,
+            vendor_id: shopId,
             role,
             permissions,
-            generate_temp_password: wantsTempPassword,
-          },
-          ip_address: ctx.ip,
-          user_agent: ctx.userAgent,
-        })
+            invited_by: ctx.actorUserId,
+          })
 
-        await client.query('COMMIT')
-        createdStaff = newStaff
-        createdUserId = newUser.id
+          // R20 AC#10 / R28 AC#4 — emit `staff_created` inside the same
+          // tx so the audit row commits atomically with the inserts.
+          // The `password_hash` field is automatically redacted by
+          // `audit-log.js` even though we do not include it here —
+          // belt-and-braces.
+          await emitAuditInTx(client, 'staff_created', {
+            actor_user_id: ctx.actorUserId,
+            actor_role: ctx.actorPlatformRole || ctx.actorRole || null,
+            actor_shop_id: shopId,
+            target_type: 'vendor_employees',
+            target_id: newStaff.id,
+            before: null,
+            after: {
+              id: newStaff.id,
+              vendor_id: shopId,
+              user_id: newUser.id,
+              role,
+              permissions,
+              generate_temp_password: wantsTempPassword,
+            },
+            ip_address: ctx.ip,
+            user_agent: ctx.userAgent,
+          })
+
+          await client.query('COMMIT')
+          createdStaff = newStaff
+          createdUserId = newUser.id
+        }
       } catch (err) {
         try {
           await client.query('ROLLBACK')
