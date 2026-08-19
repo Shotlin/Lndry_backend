@@ -530,6 +530,19 @@ export class VendorEmployeesService {
         })
         if (dup) {
           await client.query('ROLLBACK')
+          // `findUserByEmailOrPhone` matches on email OR phone — report
+          // whichever field actually collided instead of always blaming
+          // email. This matters for rider creation, which never sends an
+          // email at all, so a match there can only ever be the phone.
+          const phoneCollided =
+            phone && dup.phone === phone && (!email || dup.email !== email)
+          if (phoneCollided) {
+            throw makeServiceError(
+              409,
+              ERROR_CODES.PHONE_TAKEN,
+              'A user with this phone number already exists',
+            )
+          }
           throw makeServiceError(
             409,
             ERROR_CODES.EMAIL_TAKEN,

@@ -44,6 +44,7 @@ export const ERRORS = {
   USER_NOT_FOUND: 'User not found',
   USER_BLOCKED: 'Your account has been blocked. Contact support.',
   EMAIL_TAKEN: 'Email is already in use',
+  PHONE_TAKEN: 'Phone number is already in use',
 
   // General
   NOT_FOUND: 'Resource not found',
@@ -112,6 +113,7 @@ export const ERROR_CODES = Object.freeze({
 
   // ── Conflicts (409) ───────────────────────────────────────────────
   EMAIL_TAKEN: 'EMAIL_TAKEN',                         // R20.5
+  PHONE_TAKEN: 'PHONE_TAKEN',
   MASTER_PRODUCT_EXISTS: 'MASTER_PRODUCT_EXISTS',     // R23.16
   STOCK_NEGATIVE_FORBIDDEN: 'STOCK_NEGATIVE_FORBIDDEN', // R23.9
   ORDER_STATE_INVALID: 'ORDER_STATE_INVALID',         // R22.13
@@ -186,6 +188,7 @@ export const HTTP_STATUS = Object.freeze({
 
   // 409 — Conflict
   [ERROR_CODES.EMAIL_TAKEN]: 409,
+  [ERROR_CODES.PHONE_TAKEN]: 409,
   [ERROR_CODES.MASTER_PRODUCT_EXISTS]: 409,
   [ERROR_CODES.STOCK_NEGATIVE_FORBIDDEN]: 409,
   [ERROR_CODES.ORDER_STATE_INVALID]: 409,
