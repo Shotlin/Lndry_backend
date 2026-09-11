@@ -750,6 +750,38 @@ export class VendorOrdersService {
   }
 
   /**
+   * Retry pickup auto-assignment for this vendor's orders stuck at
+   * VENDOR_ACCEPTED with nobody assigned — this happens when the vendor
+   * accepts an order before adding any rider/staff, since acceptOrder's
+   * call to _autoAssignEmployee silently no-ops when the employee query
+   * comes back empty (see the 'No available employees for auto-assignment'
+   * log line above) and nothing ever retries it. Without this, such an
+   * order stays invisible to every rider forever, even ones added later.
+   * Called from vendor-employees.service.js whenever a rider becomes
+   * available (created, attached from an existing account, or
+   * reactivated) so the backlog clears itself instead of needing a
+   * manual fix.
+   */
+  async backfillPickupAssignments(vendorId) {
+    const { rows } = await query(
+      `SELECT id FROM orders WHERE vendor_id = $1 AND status = 'VENDOR_ACCEPTED' ORDER BY created_at ASC`,
+      [vendorId]
+    )
+
+    const assignedOrderIds = []
+    for (const row of rows) {
+      try {
+        const employee = await this._autoAssignEmployee(row.id, vendorId, 'PICKUP')
+        if (employee) assignedOrderIds.push(row.id)
+        else break // no employee available (or became unavailable mid-loop) — stop trying the rest
+      } catch (err) {
+        logger.warn({ err: err.message, orderId: row.id, vendorId }, 'Backfill pickup auto-assign failed (non-critical)')
+      }
+    }
+    return assignedOrderIds
+  }
+
+  /**
    * Get vendor dashboard stats
    */
   async getDashboardStats(userId) {
