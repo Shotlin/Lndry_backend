@@ -228,6 +228,22 @@ async function socketioPlugin(fastify) {
     io.to(`user:${riderId}`).emit('order:expired', data)
   })
 
+  // Phase 3 of the rider-assignment initiative (CLAUDE.md) — broadcasts a
+  // job offer to every active rider at once via each rider's personal
+  // `user:{id}` room (joined by every authenticated socket regardless of
+  // role, so this works for a VENDOR_RIDER session same as any other).
+  // First rider to call the accept endpoint wins; everyone else's copy of
+  // the prompt just goes stale (the client finds out via a 409 if they
+  // try to accept after someone else already claimed it).
+  fastify.decorate('emitJobOffered', (riderIds, payload) => {
+    if (!Array.isArray(riderIds) || riderIds.length === 0) return
+    const data = { timestamp: new Date().toISOString(), ...payload }
+    for (const riderId of riderIds) {
+      if (riderId) io.to(`user:${riderId}`).emit('job:offered', data)
+    }
+    logger.info({ riderCount: riderIds.length, orderId: payload?.orderId }, 'Job offer broadcast to riders')
+  })
+
   // Helper: send personal notification to user
   fastify.decorate('emitNotification', (userId, notification) => {
     io.to(`user:${userId}`).emit('notification', notification)

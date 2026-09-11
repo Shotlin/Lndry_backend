@@ -1143,6 +1143,117 @@ export class VendorOrdersService {
   }
 
   /**
+   * Broadcast this order to every active rider/staff at the vendor at
+   * once — first to call the accept endpoint wins. Phase 3 of the
+   * rider-assignment initiative (see CLAUDE.md).
+   *
+   * Still creates exactly one order_assignments row (the (order_id,
+   * assignment_type) unique constraint doesn't allow more), with
+   * employee_id/rider_id set to a placeholder (whoever's least busy right
+   * now, reusing _pickLeastBusyEmployee) purely to satisfy the NOT NULL
+   * rider_id column — is_broadcast_offer=true is what actually tells
+   * VendorRiderService#acceptOffer to let ANY active rider at this
+   * vendor claim it, not just the placeholder.
+   *
+   * Vendor-triggered for now (an explicit button in the app) — this is
+   * NOT yet wired into the automatic acceptOrder/backfillPickupAssignments
+   * paths, which still call _autoAssignEmployee and silently pick one
+   * person directly. Flipping those over to broadcast is a deliberately
+   * separate, later step once the rider-app accept/decline experience
+   * (this phase's minimal prompt, and Phase 6's fuller screen) has been
+   * proven out for real.
+   */
+  async broadcastToRiders(userId, orderId) {
+    const vendor = await this._resolveVendorId(userId)
+    if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
+
+    const PICKUP_STAGE_STATUSES = ['VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED']
+    const DELIVERY_STAGE_STATUSES = ['PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY']
+
+    const { rows: orderRows } = await query(
+      `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2`,
+      [orderId, vendor.vendorId]
+    )
+    const order = orderRows[0]
+    if (!order) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+
+    let purpose
+    if (PICKUP_STAGE_STATUSES.includes(order.status)) purpose = 'PICKUP'
+    else if (DELIVERY_STAGE_STATUSES.includes(order.status)) purpose = 'DELIVERY'
+    else {
+      throw {
+        statusCode: 400,
+        message: `Order is not at a stage that can be broadcast right now (currently ${order.status})`,
+        code: 'INVALID_TRANSITION',
+      }
+    }
+
+    const { rows: activeRiders } = await query(
+      `SELECT ve.user_id FROM vendor_employees ve
+       WHERE ve.vendor_id = $1 AND ve.is_active = true AND ve.role = 'VENDOR_RIDER'`,
+      [vendor.vendorId]
+    )
+    if (activeRiders.length === 0) {
+      throw { statusCode: 400, message: 'No active riders to broadcast to', code: 'NO_RIDERS_AVAILABLE' }
+    }
+
+    const placeholder = await this._pickLeastBusyEmployee(vendor.vendorId)
+    // placeholder can only be null here if _pickLeastBusyEmployee's
+    // VENDOR_STAFF fallback also came up empty, but we already confirmed
+    // at least one active VENDOR_RIDER exists above, so this is just
+    // defense-in-depth, not a real-world path.
+    if (!placeholder) {
+      throw { statusCode: 400, message: 'No active riders to broadcast to', code: 'NO_RIDERS_AVAILABLE' }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      await client.query(
+        `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id, is_broadcast_offer)
+         VALUES ($1, $2, $2, $3, 'OFFERED', $4, true)
+         ON CONFLICT (order_id, assignment_type) DO UPDATE SET
+           employee_id = EXCLUDED.employee_id,
+           rider_id = EXCLUDED.rider_id,
+           status = 'OFFERED',
+           is_broadcast_offer = true,
+           assigned_at = NOW()`,
+        [orderId, placeholder.user_id, purpose, vendor.vendorId]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: userId,
+        actorRole: vendor.role,
+        note: `Broadcast ${purpose.toLowerCase()} offer to ${activeRiders.length} active rider(s)`,
+      })
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+
+    if (this.fastify?.emitJobOffered) {
+      const { rows: orderInfo } = await query(
+        `SELECT order_number FROM orders WHERE id = $1`,
+        [orderId]
+      )
+      this.fastify.emitJobOffered(
+        activeRiders.map((r) => r.user_id),
+        { orderId, orderNumber: orderInfo[0]?.order_number || null, purpose }
+      )
+    }
+
+    return { orderId, purpose, riderCount: activeRiders.length, status: 'OFFERED' }
+  }
+
+  /**
    * Get vendor dashboard stats
    */
   async getDashboardStats(userId) {

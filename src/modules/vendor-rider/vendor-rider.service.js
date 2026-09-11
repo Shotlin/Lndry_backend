@@ -157,8 +157,12 @@ export class VendorRiderService {
       throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
     }
 
+    // A targeted offer (Phase 2's offerToEmployee) only shows to the
+    // specific person it names; a broadcast offer (Phase 3) shows to
+    // every active rider at the vendor, since any of them can claim it.
     const { rows } = await query(
       `SELECT oa.id AS assignment_id, oa.order_id, oa.assignment_type, oa.assigned_at,
+              oa.is_broadcast_offer,
               o.order_number, o.status AS order_status, o.delivery_address,
               o.scheduled_slot_label, o.vendor_delivery_slot_label, o.vendor_delivery_slot_at,
               o.payment_method, o.total_amount,
@@ -167,11 +171,15 @@ export class VendorRiderService {
        FROM order_assignments oa
        JOIN orders o ON o.id = oa.order_id
        LEFT JOIN users u ON u.id = o.user_id
-       WHERE oa.employee_id = $1 AND oa.status = 'OFFERED'
+       WHERE oa.status = 'OFFERED'
+         AND (
+           (oa.is_broadcast_offer = false AND oa.employee_id = $1)
+           OR (oa.is_broadcast_offer = true AND oa.vendor_id = $2)
+         )
        ORDER BY oa.assigned_at ASC`,
-      [userId]
+      [userId, rider.vendorId]
     )
-    return rows.map((r) => this._mapJobRow(r))
+    return rows.map((r) => ({ ...this._mapJobRow(r), is_broadcast_offer: r.is_broadcast_offer }))
   }
 
   /**
@@ -193,11 +201,19 @@ export class VendorRiderService {
     try {
       await client.query('BEGIN')
 
+      // A targeted offer can only be claimed by the person it names; a
+      // broadcast offer can be claimed by any active rider at the same
+      // vendor — first successful UPDATE wins, since a second concurrent
+      // claim's WHERE no longer matches once status flips to 'ASSIGNED'.
       const claimRes = await client.query(
-        `UPDATE order_assignments SET status = 'ASSIGNED', assigned_at = NOW(), updated_at = NOW()
-         WHERE order_id = $1 AND employee_id = $2 AND status = 'OFFERED'
+        `UPDATE order_assignments SET employee_id = $1, rider_id = $1, status = 'ASSIGNED', assigned_at = NOW(), updated_at = NOW()
+         WHERE order_id = $2 AND status = 'OFFERED'
+           AND (
+             (is_broadcast_offer = false AND employee_id = $1)
+             OR (is_broadcast_offer = true AND vendor_id = $3)
+           )
          RETURNING assignment_type`,
-        [orderId, userId]
+        [userId, orderId, rider.vendorId]
       )
       if (claimRes.rows.length === 0) {
         await client.query('ROLLBACK')
@@ -251,11 +267,20 @@ export class VendorRiderService {
   }
 
   /**
-   * Decline an OFFERED assignment — the order goes back to needing an
-   * assignee (a vendor can offer/assign someone else; a later phase's
-   * timeout worker will do this automatically). Uses the existing
+   * Decline a TARGETED OFFERED assignment — the order goes back to
+   * needing an assignee (a vendor can offer/assign someone else; a later
+   * phase's timeout worker will do this automatically). Uses the existing
    * 'CANCELLED' status value already in the CHECK constraint from the
    * legacy scaffold.
+   *
+   * Deliberately excludes broadcast offers (is_broadcast_offer = true) —
+   * there's only one shared row for a broadcast, so "declining" it here
+   * would cancel the opportunity for every other rider it was offered to,
+   * not just the caller. A rider ignoring/dismissing a broadcast offer is
+   * a client-side-only action (just close the prompt); nothing to call
+   * here for that case. This WHERE simply won't match a broadcast row, so
+   * the caller gets a clear OFFER_UNAVAILABLE rather than silently
+   * cancelling something they don't have the right to cancel.
    */
   async declineOffer(userId, orderId) {
     const rider = await this._resolveRider(userId)
@@ -265,7 +290,7 @@ export class VendorRiderService {
 
     const { rows } = await query(
       `UPDATE order_assignments SET status = 'CANCELLED', updated_at = NOW()
-       WHERE order_id = $1 AND employee_id = $2 AND status = 'OFFERED'
+       WHERE order_id = $1 AND employee_id = $2 AND status = 'OFFERED' AND is_broadcast_offer = false
        RETURNING id`,
       [orderId, userId]
     )

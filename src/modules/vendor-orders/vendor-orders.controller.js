@@ -107,6 +107,15 @@ export class VendorOrdersController {
     }
   }
 
+  async broadcastRider(request, reply) {
+    try {
+      const result = await this.service.broadcastToRiders(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Job broadcast to active riders'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async getDashboardStats(request, reply) {
     try {
       const stats = await this.service.getDashboardStats(request.user.id)
