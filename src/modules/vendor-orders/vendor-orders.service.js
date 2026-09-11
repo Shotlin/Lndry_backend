@@ -8,12 +8,7 @@ import { NotificationsRepository } from '../notifications/notifications.reposito
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { emitJobOfferedToRiders } from '../../plugins/socketio.plugin.js'
-
-// Phase 4 of the rider-assignment initiative (CLAUDE.md) — how long a
-// broadcast offer stays open before the timeout worker re-broadcasts it.
-// Not yet dashboard-configurable (Phase 5); a single hardcoded default
-// for now.
-const BROADCAST_TIMEOUT_MS = 15 * 60 * 1000
+import { RiderAssignmentSettingsService } from '../rider-assignment-settings/rider-assignment-settings.service.js'
 
 function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100
@@ -37,6 +32,7 @@ export class VendorOrdersService {
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
     this.feeSettingsService = new FeeSettingsService()
+    this.riderAssignmentSettingsService = new RiderAssignmentSettingsService()
   }
 
   /**
@@ -1337,12 +1333,13 @@ export class VendorOrdersService {
    */
   async _scheduleBroadcastTimeout(orderId, purpose, vendorId) {
     try {
+      const { broadcast_timeout_minutes: timeoutMinutes } = await this.riderAssignmentSettingsService.get()
       await orderQueue.add(
         'rider-broadcast-timeout',
         { type: 'rider-broadcast-timeout', orderId, purpose, vendorId },
         {
           jobId: `rider-broadcast-timeout-${orderId}-${purpose}`,
-          delay: BROADCAST_TIMEOUT_MS,
+          delay: timeoutMinutes * 60 * 1000,
           removeOnComplete: true,
         }
       )

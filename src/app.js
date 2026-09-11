@@ -497,6 +497,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/admin/fee-settings',
   })
 
+  // Rider Assignment Settings (admin) — Phase 5 of the rider-assignment
+  // initiative (see CLAUDE.md); the broadcast-timeout duration
+  await app.register(import('./modules/rider-assignment-settings/rider-assignment-settings.routes.js'), {
+    prefix: '/api/v1/admin/rider-assignment-settings',
+  })
+
   // Coupons — customer validate/available + HQ/shop-staff CRUD (scope-enforced in service layer)
   await app.register(import('./modules/coupons/coupons.routes.js'), {
     prefix: '/api/v1/coupons',
