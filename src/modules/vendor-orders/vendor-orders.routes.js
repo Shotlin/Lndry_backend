@@ -138,6 +138,25 @@ export default async function vendorOrdersRoutes(fastify) {
     }
   }, controller.assignRider.bind(controller))
 
+  // POST /:orderId/offer-rider — Offer (not directly assign) a specific
+  // rider/staff — they must accept before it's confirmed theirs (Phase 2
+  // of the rider-assignment initiative)
+  fastify.post('/:orderId/offer-rider', {
+    schema: {
+      tags: ['Vendor Orders'],
+      summary: 'Offer this order to a specific rider/staff, pending their acceptance',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+      body: {
+        type: 'object',
+        required: ['employee_id'],
+        properties: {
+          employee_id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, controller.offerRider.bind(controller))
+
   // POST /:orderId/processing-stage — Update processing stage
   fastify.post('/:orderId/processing-stage', {
     schema: {

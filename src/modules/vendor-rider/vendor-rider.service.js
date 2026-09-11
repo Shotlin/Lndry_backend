@@ -143,6 +143,138 @@ export class VendorRiderService {
     }
   }
 
+  /**
+   * List jobs OFFERED to this rider, pending accept/decline — distinct
+   * from listJobs (confirmed jobs, status ASSIGNED/IN_TRANSIT). Phase 2
+   * of the rider-assignment initiative (see CLAUDE.md) — no broadcast
+   * yet, so there is at most one relevant offer per assignment slot, but
+   * the row shape is the same one Phase 3's multi-rider broadcast will
+   * reuse.
+   */
+  async listOffers(userId) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+
+    const { rows } = await query(
+      `SELECT oa.id AS assignment_id, oa.order_id, oa.assignment_type, oa.assigned_at,
+              o.order_number, o.status AS order_status, o.delivery_address,
+              o.scheduled_slot_label, o.vendor_delivery_slot_label, o.vendor_delivery_slot_at,
+              o.payment_method, o.total_amount,
+              (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE order_id = o.id AND status = 'PAID') AS amount_paid,
+              u.name AS customer_name, u.phone AS customer_phone
+       FROM order_assignments oa
+       JOIN orders o ON o.id = oa.order_id
+       LEFT JOIN users u ON u.id = o.user_id
+       WHERE oa.employee_id = $1 AND oa.status = 'OFFERED'
+       ORDER BY oa.assigned_at ASC`,
+      [userId]
+    )
+    return rows.map((r) => this._mapJobRow(r))
+  }
+
+  /**
+   * Atomically claim an OFFERED assignment — the race-safe "first to
+   * accept wins" primitive Phase 3's broadcast will rely on. In today's
+   * single-target scope (no broadcast yet, and the (order_id,
+   * assignment_type) unique constraint means only one OFFERED row can
+   * exist per slot anyway) this mainly guards against the same rider
+   * double-tapping accept, or accept and decline racing each other.
+   * Phase 3's true multi-candidate design is separate, not-yet-built work.
+   */
+  async acceptOffer(userId, orderId) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const claimRes = await client.query(
+        `UPDATE order_assignments SET status = 'ASSIGNED', assigned_at = NOW(), updated_at = NOW()
+         WHERE order_id = $1 AND employee_id = $2 AND status = 'OFFERED'
+         RETURNING assignment_type`,
+        [orderId, userId]
+      )
+      if (claimRes.rows.length === 0) {
+        await client.query('ROLLBACK')
+        throw { statusCode: 409, message: 'This offer is no longer available', code: 'OFFER_UNAVAILABLE' }
+      }
+      const assignmentType = claimRes.rows[0].assignment_type
+      const targetStatus = assignmentType === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
+
+      const { rows } = await client.query(`SELECT status FROM orders WHERE id = $1 FOR UPDATE`, [orderId])
+      const order = rows[0]
+      if (!order) {
+        await client.query('ROLLBACK')
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      const transition = validateTransition(order.status, targetStatus, 'VENDOR_RIDER')
+      if (transition.valid) {
+        await client.query(
+          `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [targetStatus, orderId]
+        )
+        await recordOrderEvent(client, {
+          orderId,
+          oldStatus: order.status,
+          newStatus: targetStatus,
+          actorId: userId,
+          actorRole: 'VENDOR_RIDER',
+          note: 'Rider accepted the offer',
+        })
+      } else {
+        // Order already moved on for some other reason (e.g. cancelled)
+        // — the claim itself still stands (this rider now owns the
+        // assignment row), but there's no valid order-status transition
+        // to apply. Logged, not thrown: the accept succeeded at the
+        // assignment level even though the order-level stage couldn't
+        // advance.
+        logger.warn(
+          { orderId, currentStatus: order.status, target: targetStatus },
+          'Offer accepted but order status transition was not valid'
+        )
+      }
+
+      await client.query('COMMIT')
+      return { orderId, assignmentType, status: transition.valid ? targetStatus : order.status }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Decline an OFFERED assignment — the order goes back to needing an
+   * assignee (a vendor can offer/assign someone else; a later phase's
+   * timeout worker will do this automatically). Uses the existing
+   * 'CANCELLED' status value already in the CHECK constraint from the
+   * legacy scaffold.
+   */
+  async declineOffer(userId, orderId) {
+    const rider = await this._resolveRider(userId)
+    if (!rider) {
+      throw { statusCode: 403, message: 'Not an active rider', code: 'NOT_RIDER' }
+    }
+
+    const { rows } = await query(
+      `UPDATE order_assignments SET status = 'CANCELLED', updated_at = NOW()
+       WHERE order_id = $1 AND employee_id = $2 AND status = 'OFFERED'
+       RETURNING id`,
+      [orderId, userId]
+    )
+    if (rows.length === 0) {
+      throw { statusCode: 409, message: 'This offer is no longer available', code: 'OFFER_UNAVAILABLE' }
+    }
+    return { orderId, status: 'DECLINED' }
+  }
+
   async _assertOwnsAssignment(userId, orderId, assignmentType) {
     const { rows } = await query(
       `SELECT id FROM order_assignments

@@ -26,6 +26,33 @@ export class VendorRiderController {
     }
   }
 
+  async listOffers(request, reply) {
+    try {
+      const result = await this.service.listOffers(request.user.id)
+      return reply.send(success(result, 'Offers fetched'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async acceptOffer(request, reply) {
+    try {
+      const result = await this.service.acceptOffer(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Offer accepted'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async declineOffer(request, reply) {
+    try {
+      const result = await this.service.declineOffer(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Offer declined'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async startPickup(request, reply) {
     try {
       const result = await this.service.startPickup(request.user.id, request.params.orderId)

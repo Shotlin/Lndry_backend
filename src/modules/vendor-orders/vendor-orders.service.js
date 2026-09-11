@@ -1043,6 +1043,106 @@ export class VendorOrdersService {
   }
 
   /**
+   * Offer (rather than directly assign) a specific rider/staff — creates
+   * an OFFERED order_assignments row the rider must explicitly accept
+   * (VendorRiderService#acceptOffer) before it becomes their confirmed
+   * job. Phase 2 of the rider-assignment initiative (see CLAUDE.md) — the
+   * single-target counterpart to what Phase 3's broadcast will do for
+   * multiple riders at once.
+   *
+   * Unlike assignSpecificEmployee (Phase 1, direct + final), offering
+   * does NOT change the order's own status — that only happens on
+   * accept, so an unaccepted offer never falsely claims a pipeline stage
+   * nobody is actually working on.
+   *
+   * @param {string} userId - authenticated caller (vendor owner/staff)
+   * @param {string} orderId
+   * @param {string} vendorEmployeeId - vendor_employees.id
+   */
+  async offerToEmployee(userId, orderId, vendorEmployeeId) {
+    const vendor = await this._resolveVendorId(userId)
+    if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
+
+    const empRes = await query(
+      `SELECT ve.user_id, ve.id AS employee_id, u.name AS full_name
+       FROM vendor_employees ve
+       JOIN users u ON ve.user_id = u.id
+       WHERE ve.id = $1 AND ve.vendor_id = $2 AND ve.is_active = true
+         AND ve.role IN ('VENDOR_RIDER', 'VENDOR_STAFF')`,
+      [vendorEmployeeId, vendor.vendorId]
+    )
+    const employee = empRes.rows[0]
+    if (!employee) {
+      throw { statusCode: 404, message: 'Rider/staff not found or inactive', code: 'EMPLOYEE_NOT_FOUND' }
+    }
+
+    const PICKUP_STAGE_STATUSES = ['VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED']
+    const DELIVERY_STAGE_STATUSES = ['PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY']
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows } = await client.query(
+        `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
+        [orderId, vendor.vendorId]
+      )
+      const order = rows[0]
+      if (!order) {
+        await client.query('ROLLBACK')
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      let purpose
+      if (PICKUP_STAGE_STATUSES.includes(order.status)) purpose = 'PICKUP'
+      else if (DELIVERY_STAGE_STATUSES.includes(order.status)) purpose = 'DELIVERY'
+      else {
+        await client.query('ROLLBACK')
+        throw {
+          statusCode: 400,
+          message: `Order is not at a stage that can be offered right now (currently ${order.status})`,
+          code: 'INVALID_TRANSITION',
+        }
+      }
+
+      await client.query(
+        `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id)
+         VALUES ($1, $2, $2, $3, 'OFFERED', $4)
+         ON CONFLICT (order_id, assignment_type) DO UPDATE SET
+           employee_id = EXCLUDED.employee_id,
+           rider_id = EXCLUDED.rider_id,
+           status = 'OFFERED',
+           assigned_at = NOW()`,
+        [orderId, employee.user_id, purpose, vendor.vendorId]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: userId,
+        actorRole: vendor.role,
+        note: `Offered ${purpose.toLowerCase()} to ${employee.full_name}, pending their acceptance`,
+      })
+
+      await client.query('COMMIT')
+
+      return {
+        orderId,
+        employeeId: employee.employee_id,
+        employeeName: employee.full_name,
+        purpose,
+        status: 'OFFERED',
+      }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
    * Get vendor dashboard stats
    */
   async getDashboardStats(userId) {
