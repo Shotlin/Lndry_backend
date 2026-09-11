@@ -159,6 +159,23 @@ export class VendorOrdersService {
       order.latestReconciliation = null
     }
 
+    // Full evidence history for this order, across all three photo contexts
+    // (RIDER_PICKUP, VENDOR_RECONCILIATION, DELIVERY_PROOF) and every
+    // reconciliation attempt ever made — not just the latest one above.
+    // Already vendor-scoped: `orderId` was resolved against this vendor via
+    // the `o.vendor_id = $2` check at the top of this method, so no
+    // additional ownership filter is needed here.
+    const evidenceRes = await query(
+      `SELECT opp.photo_url, opp.context, opp.order_line_id, opp.is_grouped,
+              opp.created_at, opp.uploaded_by, u.name AS uploaded_by_name
+       FROM order_pickup_photos opp
+       LEFT JOIN users u ON u.id = opp.uploaded_by
+       WHERE opp.order_id = $1
+       ORDER BY opp.created_at ASC`,
+      [orderId]
+    )
+    order.evidence = evidenceRes.rows
+
     return order
   }
 
