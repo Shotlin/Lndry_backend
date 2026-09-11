@@ -6,6 +6,45 @@ import { OlaMapsSettingsRepository } from '../admin/ola-maps-settings/ola-maps-s
 const OLA_MAPS_BASE_URL = 'https://api.olamaps.io'
 const olaMapsSettingsRepository = new OlaMapsSettingsRepository()
 
+/**
+ * Forward-geocodes a free-text query via Ola Maps and shapes each result
+ * into a self-contained suggestion — the full address/coordinates are
+ * base64-encoded into `place_id` itself, so "select this suggestion"
+ * never needs a second Ola API call (unlike Google Places, Ola's geocode
+ * response already includes everything a details lookup would give).
+ * Returns null when Ola isn't configured/enabled or the call fails, so
+ * callers can fall back to Google/mock.
+ */
+async function _geocodeViaOla(queryText) {
+  const settings = await olaMapsSettingsRepository.getCached()
+  if (!settings?.isEnabled || !settings?.apiKey) return null
+
+  try {
+    const response = await axios.get(`${OLA_MAPS_BASE_URL}/places/v1/geocode`, {
+      params: { address: queryText, api_key: settings.apiKey },
+      timeout: 8000,
+    })
+    const results = response.data.geocodingResults || []
+    return results.map((r) => {
+      const components = r.address_components || []
+      const findComponent = (type) =>
+        components.find((c) => (c.types || []).includes(type))?.long_name || null
+      const detail = {
+        formatted_address: r.formatted_address || null,
+        lat: r.geometry?.location?.lat ?? null,
+        lng: r.geometry?.location?.lng ?? null,
+        postal_code: findComponent('postal_code'),
+      }
+      return {
+        description: r.formatted_address || '',
+        place_id: `ola:${Buffer.from(JSON.stringify(detail)).toString('base64url')}`,
+      }
+    })
+  } catch (err) {
+    return null
+  }
+}
+
 export default async function mapsRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate)
 
@@ -83,6 +122,16 @@ export default async function mapsRoutes(fastify) {
     }
   }, async (request, reply) => {
     const { query: input, session_token, location_bias } = request.query
+
+    // Ola Maps first — Google's key here is a known-broken placeholder in
+    // production, and Ola's geocode response already carries everything
+    // a suggestion needs (see _geocodeViaOla), so no place-details round
+    // trip is needed for Ola-sourced results either.
+    const olaSuggestions = await _geocodeViaOla(input)
+    if (olaSuggestions !== null) {
+      return reply.code(200).send(success(olaSuggestions, 'Autocomplete suggestions fetched'))
+    }
+
     const apiKey = process.env.GOOGLE_MAPS_API_KEY || env.GOOGLE_MAPS_API_KEY
 
     if (!apiKey) {
@@ -143,6 +192,18 @@ export default async function mapsRoutes(fastify) {
     }
   }, async (request, reply) => {
     const { placeId } = request.params
+
+    // Ola-sourced suggestion — the details are already encoded in the id
+    // itself (see _geocodeViaOla), no API call needed to resolve it.
+    if (placeId.startsWith('ola:')) {
+      try {
+        const detail = JSON.parse(Buffer.from(placeId.slice(4), 'base64url').toString('utf8'))
+        return reply.code(200).send(success(detail, 'Place details fetched'))
+      } catch (err) {
+        return reply.code(400).send(error('Invalid place id', 'INVALID_PLACE_ID'))
+      }
+    }
+
     const apiKey = process.env.GOOGLE_MAPS_API_KEY || env.GOOGLE_MAPS_API_KEY
 
     if (placeId.startsWith('mock_place_') && env.NODE_ENV === 'production') {
