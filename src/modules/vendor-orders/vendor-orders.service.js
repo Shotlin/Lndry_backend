@@ -6,6 +6,11 @@ import { orderQueue } from '../../config/bullmq.js'
 import { computeRecalculatedTotals } from '../../utils/order-recalculation.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
+import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
+
+function round2(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100
+}
 
 /**
  * Vendor Orders Service — handles vendor-side order lifecycle
@@ -24,6 +29,59 @@ export class VendorOrdersService {
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
+    this.feeSettingsService = new FeeSettingsService()
+  }
+
+  /**
+   * Compute what the vendor actually earns from an order: their service
+   * subtotal plus the delivery fee (the vendor runs their own delivery, so
+   * they keep all of it — unlike platform fee/GST/handling fee, which are
+   * LNDRY/customer-side charges the vendor never sees), minus LNDRY's
+   * commission and, if enabled, GST on that commission — mirroring how
+   * Zomato/Swiggy show restaurant-partner earnings (commission computed on
+   * order value only, GST charged on top of the commission itself).
+   *
+   * This is a LIVE estimate computed from the vendor's current effective
+   * fee_settings (global or a per-shop override) — not a locked settlement
+   * snapshot. `vendor_commission_*` is a reference-only config (see the
+   * Fees admin page); it is not yet wired into shop-financials/
+   * settlement.service.js, so this figure is informational for the vendor,
+   * not an authoritative payout record.
+   *
+   * @private
+   * @param {object|object[]} orders - order row(s) with subtotal/delivery_fee
+   * @param {string} vendorId
+   */
+  async _attachVendorEarnings(orders, vendorId) {
+    const { config } = await this.feeSettingsService.resolveForShop(vendorId)
+    const list = Array.isArray(orders) ? orders : [orders]
+
+    for (const order of list) {
+      const subtotal = Number(order.subtotal) || 0
+      const deliveryFee = Number(order.delivery_fee) || 0
+
+      let commissionAmount = 0
+      if (config.vendor_commission_enabled) {
+        commissionAmount =
+          config.vendor_commission_type === 'PERCENT'
+            ? (subtotal * Number(config.vendor_commission_value)) / 100
+            : Number(config.vendor_commission_value)
+      }
+      const gstOnCommission = config.gst_enabled
+        ? (commissionAmount * Number(config.gst_rate)) / 100
+        : 0
+
+      order.vendor_commission_enabled = !!config.vendor_commission_enabled
+      order.vendor_commission_type = config.vendor_commission_type
+      order.vendor_commission_rate = Number(config.vendor_commission_value)
+      order.vendor_commission_amount = round2(commissionAmount)
+      order.vendor_gst_on_commission_enabled = !!config.gst_enabled
+      order.vendor_gst_rate = Number(config.gst_rate)
+      order.vendor_gst_on_commission_amount = round2(gstOnCommission)
+      order.vendor_payout_amount = round2(subtotal + deliveryFee - commissionAmount - gstOnCommission)
+    }
+
+    return orders
   }
 
   /**
@@ -82,6 +140,8 @@ export class VendorOrdersService {
       [...params, limit, offset]
     )
     const countRes = await query(`SELECT COUNT(*)::int AS total FROM orders o WHERE ${whereClause}`, params)
+
+    await this._attachVendorEarnings(listRes.rows, vendor.vendorId)
 
     return {
       orders: listRes.rows,
@@ -158,6 +218,8 @@ export class VendorOrdersService {
     } else {
       order.latestReconciliation = null
     }
+
+    await this._attachVendorEarnings(order, vendor.vendorId)
 
     return order
   }
