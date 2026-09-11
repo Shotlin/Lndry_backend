@@ -338,9 +338,13 @@ export class VendorEmployeesService {
     // A newly-added (or re-attached) rider might be the first one this
     // shop has ever had — retry any order stuck at VENDOR_ACCEPTED with
     // nobody assigned (see backfillPickupAssignments for why this can
-    // happen). Never let this affect the create response either way.
-    if (result.success && role === 'VENDOR_RIDER') {
+    // happen). They might also be the first one available again since a
+    // previous rider was deactivated/removed while still holding jobs
+    // (see reassignOrphanedAssignments). Never let either affect the
+    // create response either way.
+    if (result.success && (role === 'VENDOR_RIDER' || role === 'VENDOR_STAFF')) {
       this._backfillPickupAssignments(shopId)
+      this._reassignOrphanedAssignments(shopId)
     }
 
     return result
@@ -357,6 +361,26 @@ export class VendorEmployeesService {
       .backfillPickupAssignments(shopId)
       .catch((err) =>
         logger.warn({ err: err.message, shopId }, 'Backfill pickup assignment failed (non-critical)'),
+      )
+  }
+
+  /**
+   * Fire-and-forget reassignment of any order still pointing at a rider/
+   * staff who is no longer active at this shop (deactivated, removed, or
+   * swapped for a different phone number) to whoever IS active now, if
+   * anyone. Complements backfillPickupAssignments, which only covers
+   * orders that never got an assignment at all — this covers the mirror
+   * case where an assignment was made and then its assignee went away,
+   * leaving the order invisible to every rider (the old one can no
+   * longer log in to see it; a new one's job list only ever matches
+   * their own employee_id). Never throws into the caller.
+   * @private
+   */
+  _reassignOrphanedAssignments(shopId) {
+    new VendorOrdersService()
+      .reassignOrphanedAssignments(shopId)
+      .catch((err) =>
+        logger.warn({ err: err.message, shopId }, 'Reassign orphaned assignment failed (non-critical)'),
       )
   }
 
@@ -958,12 +982,23 @@ export class VendorEmployeesService {
     // any of those can change here.
     await invalidateStaffActiveCache(updated.user_id, updated.vendor_id)
 
-    // A rider going active → true (e.g. re-enabled after being toggled
-    // off) might be the shop's only available rider again — retry any
-    // order stuck at VENDOR_ACCEPTED with nobody assigned. See
-    // backfillPickupAssignments / the same hook in create() above.
-    if (data.is_active === true && updated.role === 'VENDOR_RIDER') {
-      this._backfillPickupAssignments(shopId)
+    // Either direction of an active-state flip can strand jobs. Going
+    // active → true (e.g. re-enabled after being toggled off) might be
+    // the shop's only available rider again — retry any order stuck at
+    // VENDOR_ACCEPTED with nobody assigned, and pick up anything left
+    // orphaned by someone else's deactivation in the meantime. Going
+    // active → false immediately orphans whatever this employee was
+    // still holding, so hand it off now instead of leaving it invisible
+    // until the next roster change. See backfillPickupAssignments /
+    // reassignOrphanedAssignments and the same hooks in create() above.
+    if (
+      data.is_active !== undefined &&
+      (updated.role === 'VENDOR_RIDER' || updated.role === 'VENDOR_STAFF')
+    ) {
+      if (data.is_active === true) {
+        this._backfillPickupAssignments(shopId)
+      }
+      this._reassignOrphanedAssignments(shopId)
     }
 
     // ── 5. Audit (fire-and-forget) ─────────────────────────────────
@@ -1129,6 +1164,15 @@ export class VendorEmployeesService {
     // back we would have re-thrown above and skipped this line, leaving
     // the cache untouched — coherent with the unchanged DB state.
     await invalidateStaffActiveCache(existing.user_id, existing.vendor_id)
+
+    // This employee may have been actively holding pickup/delivery jobs
+    // (order_assignments rows) at the moment they were deactivated — hand
+    // those off to whoever's still active now, if anyone, instead of
+    // leaving them invisible until the next roster change happens to
+    // trigger a resync. See reassignOrphanedAssignments.
+    if (existing.role === 'VENDOR_RIDER' || existing.role === 'VENDOR_STAFF') {
+      this._reassignOrphanedAssignments(shopId)
+    }
 
     logger.info(
       {

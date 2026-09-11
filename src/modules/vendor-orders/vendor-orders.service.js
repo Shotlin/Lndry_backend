@@ -639,15 +639,16 @@ export class VendorOrdersService {
   }
 
   /**
-   * Auto-assign an employee from the same vendor with the lowest active jobs count.
-   * Purpose: 'PICKUP' or 'DELIVERY'
+   * Find the vendor employee with the fewest active (ASSIGNED/IN_TRANSIT)
+   * assignments right now. Prefers a dedicated VENDOR_RIDER; falls back to
+   * any VENDOR_STAFF so vendors who haven't configured a rider yet keep
+   * today's assignment behavior. Shared by _autoAssignEmployee (new order
+   * needs a first assignee) and reassignOrphanedAssignments (an existing
+   * assignment's assignee went inactive and needs a replacement) so both
+   * always agree on who's "next up".
+   * @private
    */
-  async _autoAssignEmployee(orderId, vendorId, purpose) {
-    const assignmentType = purpose === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
-
-    // Find the vendor employee with the fewest active assignments. Prefer
-    // a dedicated VENDOR_RIDER; fall back to any VENDOR_STAFF so vendors
-    // who haven't configured a rider yet keep today's assignment behavior.
+  async _pickLeastBusyEmployee(vendorId) {
     const employeeQuery = (role) => query(
       `SELECT ve.user_id, ve.id AS employee_id, u.name AS full_name,
               COALESCE((
@@ -670,12 +671,21 @@ export class VendorOrdersService {
       empRes = await employeeQuery('VENDOR_STAFF')
     }
 
-    if (empRes.rows.length === 0) {
+    return empRes.rows[0] || null
+  }
+
+  /**
+   * Auto-assign an employee from the same vendor with the lowest active jobs count.
+   * Purpose: 'PICKUP' or 'DELIVERY'
+   */
+  async _autoAssignEmployee(orderId, vendorId, purpose) {
+    const assignmentType = purpose === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
+
+    const employee = await this._pickLeastBusyEmployee(vendorId)
+    if (!employee) {
       logger.info({ orderId, vendorId, purpose }, 'No available employees for auto-assignment')
       return null
     }
-
-    const employee = empRes.rows[0]
 
     const client = await getClient()
     try {
@@ -779,6 +789,68 @@ export class VendorOrdersService {
       }
     }
     return assignedOrderIds
+  }
+
+  /**
+   * Reassign any order_assignments row still pointing at a rider/staff who
+   * is no longer active at this vendor (deactivated, removed, or replaced
+   * by a different phone number) to whoever has the fewest active jobs
+   * among the vendor's currently-active riders/staff, if anyone.
+   *
+   * This is the mirror case to backfillPickupAssignments: that one covers
+   * an order that never got assigned in the first place (still sitting at
+   * VENDOR_ACCEPTED); this one covers an order that WAS assigned and then
+   * its assignee went inactive — the order_assignments row itself never
+   * changes on deactivation, so it silently keeps pointing at someone who
+   * can no longer even list their own jobs (VendorRiderService#listJobs
+   * requires is_active = true just to log in), while every other rider's
+   * job list only ever matches rows where employee_id is their own
+   * user_id. Without this, such an order is invisible to everyone forever,
+   * even a brand-new rider added specifically to replace the old one.
+   *
+   * Only the assignee (employee_id/rider_id) changes — the order's own
+   * status is left untouched, since the pickup/delivery stage itself
+   * hasn't changed, only who is doing it.
+   *
+   * Called from vendor-employees.service.js whenever a rider/staff's
+   * active state changes in either direction: someone going inactive
+   * hands off whatever they were holding right now (instead of leaving it
+   * stranded until some future roster change happens to trigger a
+   * resync), and someone becoming active picks up anything still left
+   * orphaned from an earlier deactivation.
+   */
+  async reassignOrphanedAssignments(vendorId) {
+    const { rows: orphaned } = await query(
+      `SELECT oa.id, oa.order_id
+       FROM order_assignments oa
+       WHERE oa.vendor_id = $1
+         AND oa.status IN ('ASSIGNED', 'IN_TRANSIT')
+         AND NOT EXISTS (
+           SELECT 1 FROM vendor_employees ve
+           WHERE ve.user_id = oa.employee_id
+             AND ve.vendor_id = $1
+             AND ve.is_active = true
+         )
+       ORDER BY oa.assigned_at ASC`,
+      [vendorId]
+    )
+
+    const reassignedOrderIds = []
+    for (const row of orphaned) {
+      try {
+        const employee = await this._pickLeastBusyEmployee(vendorId)
+        if (!employee) break // nobody active at all — stop, nothing else will succeed either
+
+        await query(
+          `UPDATE order_assignments SET employee_id = $1, rider_id = $1, updated_at = NOW() WHERE id = $2`,
+          [employee.user_id, row.id]
+        )
+        reassignedOrderIds.push(row.order_id)
+      } catch (err) {
+        logger.warn({ err: err.message, assignmentId: row.id, vendorId }, 'Reassign orphaned assignment failed (non-critical)')
+      }
+    }
+    return reassignedOrderIds
   }
 
   /**
