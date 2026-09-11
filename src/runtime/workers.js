@@ -32,13 +32,13 @@ export async function startWorkerRuntime() {
   //   '../workers/allocation.worker.js'
   // )
 
-  // const { createSettlementProcessor, scheduleSettlementCron } = await import(
-  //   '../workers/settlement.worker.js'
-  // )
+  const { createSettlementProcessor, scheduleSettlementCron } = await import(
+    '../workers/settlement.worker.js'
+  )
 
-  // const { createPayoutProcessor, schedulePayoutCron } = await import(
-  //   '../workers/payout.worker.js'
-  // )
+  const { createPayoutProcessor, schedulePayoutCron } = await import(
+    '../workers/payout.worker.js'
+  )
 
   // const { createScheduledOrderProcessor } = await import(
   //   '../workers/scheduled-orders.worker.js'
@@ -61,10 +61,10 @@ export async function startWorkerRuntime() {
   startSmsWorker(processSmsJob)
   startThemeWorker(processThemeJob)
   // startAllocationWorker(createAllocationProcessor())
-  // startSettlementWorker(
-  //   createSettlementProcessor({ queue: settlementQueue })
-  // )
-  // startPayoutWorker(createPayoutProcessor({ queue: payoutQueue }))
+  startSettlementWorker(
+    createSettlementProcessor({ queue: settlementQueue })
+  )
+  startPayoutWorker(createPayoutProcessor({ queue: payoutQueue }))
   // Scheduled-orders worker (task 10.3) — fires customer scheduled orders
   // at their scheduled_for time, places real orders, marks FAILED on
   // stock issues, and creates the next recurrence row when applicable.
@@ -90,23 +90,23 @@ export async function startWorkerRuntime() {
   // the event loop is blocked for >100ms.
   startEventLoopMonitor()
 
-  // try {
-  //   await scheduleSettlementCron(settlementQueue)
-  // } catch (err) {
-  //   logger.warn(
-  //     { err: err.message },
-  //     'Settlement daily cron registration failed'
-  //   )
-  // }
+  try {
+    await scheduleSettlementCron(settlementQueue)
+  } catch (err) {
+    logger.warn(
+      { err: err.message },
+      'Settlement daily cron registration failed'
+    )
+  }
 
-  // try {
-  //   await schedulePayoutCron(payoutQueue)
-  // } catch (err) {
-  //   logger.warn(
-  //     { err: err.message },
-  //     'Payout weekly cron registration failed'
-  //   )
-  // }
+  try {
+    await schedulePayoutCron(payoutQueue)
+  } catch (err) {
+    logger.warn(
+      { err: err.message },
+      'Payout weekly cron registration failed'
+    )
+  }
 
   try {
     const removedTimeoutJobs = await clearLegacyAssignmentTimeoutJobs()

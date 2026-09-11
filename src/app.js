@@ -384,12 +384,12 @@ export const buildApp = async () => {
 
   // Shop Transactions — read-only append-only ledger
   // (write side is exposed as LedgerWriteService for orders/refunds/payouts)
-  // await app.register(
-  //   import('./modules/shop-transactions/shop-transactions.routes.js'),
-  //   {
-  //     prefix: '/api/v1/shop-transactions',
-  //   }
-  // )
+  await app.register(
+    import('./modules/shop-transactions/shop-transactions.routes.js'),
+    {
+      prefix: '/api/v1/shop-transactions',
+    }
+  )
 
   // Product Families — option grouping for multi-option garment_rates
   // await app.register(import('./modules/product-families/product-families.routes.js'), {
@@ -402,12 +402,12 @@ export const buildApp = async () => {
   // })
 
   // Shop Financials — read-only paginated financials per period
-  // await app.register(
-  //   import('./modules/shop-financials/shop-financials.routes.js'),
-  //   {
-  //     prefix: '/api/v1/shop-financials',
-  //   }
-  // )
+  await app.register(
+    import('./modules/shop-financials/shop-financials.routes.js'),
+    {
+      prefix: '/api/v1/shop-financials',
+    }
+  )
 
   // Shop Finance — store-scoped finance endpoints (task 8.8)
   // await app.register(
