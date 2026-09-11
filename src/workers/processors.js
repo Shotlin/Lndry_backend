@@ -8,6 +8,7 @@ import { getSocketIo } from '../plugins/socketio.plugin.js'
 import { cacheDeletePattern } from '../utils/cache.js'
 import { ACTIVE_THEME_CACHE_KEY, LEGACY_TAB_CACHE_KEY } from '../modules/themes/theme-cache.js'
 import { emit as emitAudit } from '../utils/audit-log.js'
+import { VendorOrdersService } from '../modules/vendor-orders/vendor-orders.service.js'
 
 const DEFAULT_RIDER_EARNING = 25
 const ASSIGNABLE_ORDER_STATUSES = ['CONFIRMED', 'PREPARING', 'PACKED', 'VENDOR_ACCEPTED']
@@ -451,6 +452,19 @@ async function handleAutoReject({ orderId }) {
   }
 }
 
+/**
+ * Phase 4 of the rider-assignment initiative (CLAUDE.md) — fires when a
+ * broadcast offer's timeout (VendorOrdersService#_scheduleBroadcastTimeout,
+ * default 15 min) elapses. If nobody accepted, re-broadcasts to whoever's
+ * active now and reschedules the next check, repeating until someone
+ * accepts or the vendor steps in manually. A no-op if the assignment
+ * already moved on (accepted, cancelled, reassigned) since it was queued.
+ */
+async function handleRiderBroadcastTimeout({ orderId, purpose, vendorId }) {
+  const service = new VendorOrdersService()
+  return service.rebroadcastIfStillOffered(orderId, purpose, vendorId)
+}
+
 async function handleAssignmentTimeout({ assignmentId, orderId }) {
   logger.info(
     { assignmentId, orderId },
@@ -513,6 +527,9 @@ export async function processOrderJob(job) {
 
     case 'auto-reject':
       return handleAutoReject(job.data)
+
+    case 'rider-broadcast-timeout':
+      return handleRiderBroadcastTimeout(job.data)
 
     default:
       logger.warn({ type, jobId: job.id }, 'Unknown order job type')

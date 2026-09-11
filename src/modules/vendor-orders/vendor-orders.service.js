@@ -7,6 +7,13 @@ import { computeRecalculatedTotals } from '../../utils/order-recalculation.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
+import { emitJobOfferedToRiders } from '../../plugins/socketio.plugin.js'
+
+// Phase 4 of the rider-assignment initiative (CLAUDE.md) — how long a
+// broadcast offer stays open before the timeout worker re-broadcasts it.
+// Not yet dashboard-configurable (Phase 5); a single hardcoded default
+// for now.
+const BROADCAST_TIMEOUT_MS = 15 * 60 * 1000
 
 function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100
@@ -1145,22 +1152,15 @@ export class VendorOrdersService {
   /**
    * Broadcast this order to every active rider/staff at the vendor at
    * once — first to call the accept endpoint wins. Phase 3 of the
-   * rider-assignment initiative (see CLAUDE.md).
-   *
-   * Still creates exactly one order_assignments row (the (order_id,
-   * assignment_type) unique constraint doesn't allow more), with
-   * employee_id/rider_id set to a placeholder (whoever's least busy right
-   * now, reusing _pickLeastBusyEmployee) purely to satisfy the NOT NULL
-   * rider_id column — is_broadcast_offer=true is what actually tells
-   * VendorRiderService#acceptOffer to let ANY active rider at this
-   * vendor claim it, not just the placeholder.
+   * rider-assignment initiative (see CLAUDE.md). Also schedules the
+   * Phase 4 timeout job that re-broadcasts automatically if nobody
+   * accepts in time.
    *
    * Vendor-triggered for now (an explicit button in the app) — this is
    * NOT yet wired into the automatic acceptOrder/backfillPickupAssignments
    * paths, which still call _autoAssignEmployee and silently pick one
    * person directly. Flipping those over to broadcast is a deliberately
-   * separate, later step once the rider-app accept/decline experience
-   * (this phase's minimal prompt, and Phase 6's fuller screen) has been
+   * separate, later step once the rider-app accept experience has been
    * proven out for real.
    */
   async broadcastToRiders(userId, orderId) {
@@ -1188,23 +1188,85 @@ export class VendorOrdersService {
       }
     }
 
+    const result = await this._broadcastOffer({
+      orderId,
+      vendorId: vendor.vendorId,
+      purpose,
+      orderStatus: order.status,
+      actorId: userId,
+      actorRole: vendor.role,
+    })
+    if (!result) {
+      throw { statusCode: 400, message: 'No active riders to broadcast to', code: 'NO_RIDERS_AVAILABLE' }
+    }
+    return result
+  }
+
+  /**
+   * Re-broadcast an order that's still OFFERED after the Phase 4 timeout
+   * — called by the BullMQ `rider-broadcast-timeout` job
+   * (src/workers/processors.js), not by any HTTP route. A no-op if the
+   * assignment already moved on (accepted, cancelled, or reassigned some
+   * other way) since it was last checked. If there are simply no active
+   * riders right now, the timeout is rescheduled anyway rather than
+   * giving up — someone may become active before the next check.
+   */
+  async rebroadcastIfStillOffered(orderId, purpose, vendorId) {
+    const { rows } = await query(
+      `SELECT status FROM order_assignments WHERE order_id = $1 AND assignment_type = $2 AND vendor_id = $3`,
+      [orderId, purpose, vendorId]
+    )
+    const assignment = rows[0]
+    if (!assignment || assignment.status !== 'OFFERED') {
+      return { skipped: true, reason: 'no_longer_offered' }
+    }
+
+    // order_events.new_status is NOT NULL — unlike the initial broadcast
+    // (which already has the order row in hand from broadcastToRiders'
+    // own lookup), a retry needs its own fetch to pass a real value.
+    const { rows: orderRows } = await query(`SELECT status FROM orders WHERE id = $1`, [orderId])
+    const currentOrderStatus = orderRows[0]?.status ?? null
+
+    const result = await this._broadcastOffer({
+      orderId,
+      vendorId,
+      purpose,
+      orderStatus: currentOrderStatus,
+      actorId: null,
+      actorRole: 'SYSTEM',
+      note: 'still unaccepted after the broadcast timeout',
+    })
+    if (!result) {
+      logger.info({ orderId, vendorId, purpose }, 'Rider broadcast timeout: no active riders — rescheduling anyway')
+      await this._scheduleBroadcastTimeout(orderId, purpose, vendorId)
+      return { skipped: true, reason: 'no_active_riders' }
+    }
+    return { rebroadcast: true, ...result }
+  }
+
+  /**
+   * Shared core for both the initial broadcast and every timeout-driven
+   * retry: creates/updates the single OFFERED row (placeholder assignee,
+   * is_broadcast_offer=true — see the Phase 3 note in CLAUDE.md for why),
+   * records an audit event, emits the socket push, and schedules the next
+   * timeout check. Returns null (no throw) when there are no active
+   * riders, so callers can decide what that means for them.
+   * @private
+   */
+  async _broadcastOffer({ orderId, vendorId, purpose, orderStatus, actorId, actorRole, note }) {
     const { rows: activeRiders } = await query(
       `SELECT ve.user_id FROM vendor_employees ve
        WHERE ve.vendor_id = $1 AND ve.is_active = true AND ve.role = 'VENDOR_RIDER'`,
-      [vendor.vendorId]
+      [vendorId]
     )
-    if (activeRiders.length === 0) {
-      throw { statusCode: 400, message: 'No active riders to broadcast to', code: 'NO_RIDERS_AVAILABLE' }
-    }
+    if (activeRiders.length === 0) return null
 
-    const placeholder = await this._pickLeastBusyEmployee(vendor.vendorId)
+    const placeholder = await this._pickLeastBusyEmployee(vendorId)
     // placeholder can only be null here if _pickLeastBusyEmployee's
     // VENDOR_STAFF fallback also came up empty, but we already confirmed
     // at least one active VENDOR_RIDER exists above, so this is just
     // defense-in-depth, not a real-world path.
-    if (!placeholder) {
-      throw { statusCode: 400, message: 'No active riders to broadcast to', code: 'NO_RIDERS_AVAILABLE' }
-    }
+    if (!placeholder) return null
 
     const client = await getClient()
     try {
@@ -1219,16 +1281,18 @@ export class VendorOrdersService {
            status = 'OFFERED',
            is_broadcast_offer = true,
            assigned_at = NOW()`,
-        [orderId, placeholder.user_id, purpose, vendor.vendorId]
+        [orderId, placeholder.user_id, purpose, vendorId]
       )
 
       await recordOrderEvent(client, {
         orderId,
-        oldStatus: order.status,
-        newStatus: order.status,
-        actorId: userId,
-        actorRole: vendor.role,
-        note: `Broadcast ${purpose.toLowerCase()} offer to ${activeRiders.length} active rider(s)`,
+        oldStatus: orderStatus ?? null,
+        newStatus: orderStatus ?? null,
+        actorId,
+        actorRole,
+        note: note
+          ? `Re-broadcast ${purpose.toLowerCase()} offer to ${activeRiders.length} active rider(s) — ${note}`
+          : `Broadcast ${purpose.toLowerCase()} offer to ${activeRiders.length} active rider(s)`,
       })
 
       await client.query('COMMIT')
@@ -1239,18 +1303,52 @@ export class VendorOrdersService {
       client.release()
     }
 
-    if (this.fastify?.emitJobOffered) {
-      const { rows: orderInfo } = await query(
-        `SELECT order_number FROM orders WHERE id = $1`,
-        [orderId]
-      )
-      this.fastify.emitJobOffered(
-        activeRiders.map((r) => r.user_id),
-        { orderId, orderNumber: orderInfo[0]?.order_number || null, purpose }
-      )
-    }
+    const { rows: orderInfo } = await query(`SELECT order_number FROM orders WHERE id = $1`, [orderId])
+    emitJobOfferedToRiders(
+      activeRiders.map((r) => r.user_id),
+      { orderId, orderNumber: orderInfo[0]?.order_number || null, purpose }
+    )
+
+    await this._scheduleBroadcastTimeout(orderId, purpose, vendorId)
 
     return { orderId, purpose, riderCount: activeRiders.length, status: 'OFFERED' }
+  }
+
+  /**
+   * Schedules the Phase 4 timeout check under a deterministic jobId
+   * (`rider-broadcast-timeout-{orderId}-{purpose}`).
+   *
+   * Known edge case: BullMQ ignores a second `add()` under a jobId that's
+   * still queued rather than resetting its delay. If the vendor
+   * broadcasts the same order twice in quick succession (before the
+   * first timeout fires), the second call's timeout silently keeps the
+   * first call's original deadline rather than restarting the clock —
+   * harmless (the eventual check still fires and re-broadcasts if
+   * needed), just not perfectly precise. The normal sequence (initial
+   * broadcast, then each retry from rebroadcastIfStillOffered right after
+   * its own timeout job has already fired and been removed via
+   * `removeOnComplete: true`) never hits this, since there's nothing
+   * still queued at that point.
+   *
+   * VendorRiderService#acceptOffer removes this job on a successful
+   * claim; if it fires anyway, rebroadcastIfStillOffered finds the
+   * assignment no longer OFFERED and no-ops.
+   * @private
+   */
+  async _scheduleBroadcastTimeout(orderId, purpose, vendorId) {
+    try {
+      await orderQueue.add(
+        'rider-broadcast-timeout',
+        { type: 'rider-broadcast-timeout', orderId, purpose, vendorId },
+        {
+          jobId: `rider-broadcast-timeout-${orderId}-${purpose}`,
+          delay: BROADCAST_TIMEOUT_MS,
+          removeOnComplete: true,
+        }
+      )
+    } catch (err) {
+      logger.warn({ err: err.message, orderId, purpose }, 'Failed to schedule rider-broadcast-timeout job')
+    }
   }
 
   /**

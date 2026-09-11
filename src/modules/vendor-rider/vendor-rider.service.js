@@ -6,6 +6,7 @@ import { computeRecalculatedTotals, applyRecalculatedTotals } from '../../utils/
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { getOrderBalanceDuePaise } from '../../utils/order-balance.js'
+import { orderQueue } from '../../config/bullmq.js'
 
 /**
  * Vendor Rider service — the restricted job-fulfillment surface for a
@@ -257,6 +258,17 @@ export class VendorRiderService {
       }
 
       await client.query('COMMIT')
+
+      // Best-effort cancel of the Phase 4 re-broadcast timeout — if this
+      // fails or the job already fired, rebroadcastIfStillOffered's own
+      // "still OFFERED?" check makes a stray re-broadcast harmless anyway.
+      try {
+        const job = await orderQueue.getJob(`rider-broadcast-timeout-${orderId}-${assignmentType}`)
+        if (job) await job.remove()
+      } catch (err) {
+        logger.warn({ err: err.message, orderId, assignmentType }, 'Failed to cancel rider-broadcast-timeout job (non-critical)')
+      }
+
       return { orderId, assignmentType, status: transition.valid ? targetStatus : order.status }
     } catch (err) {
       await client.query('ROLLBACK')

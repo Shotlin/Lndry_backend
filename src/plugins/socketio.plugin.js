@@ -40,6 +40,34 @@ export function getSocketIo() {
   return activeIo
 }
 
+/**
+ * Broadcast a job offer to every rider in `riderIds` at once, via each
+ * rider's personal `user:{id}` room (joined by every authenticated socket
+ * regardless of role, so this works for a VENDOR_RIDER session same as
+ * any other). First rider to call the accept endpoint wins; everyone
+ * else's copy of the prompt just goes stale (the client finds out via a
+ * 409 if they try to accept after someone else already claimed it).
+ *
+ * A plain exported function (not a fastify decorator) so it works
+ * identically whether called from an HTTP route (the `api` container,
+ * which has a live `io` via `getSocketIo()`) or from a BullMQ job handler
+ * (`src/workers/processors.js`'s `rider-broadcast-timeout`, which may run
+ * in the separate `worker` container with no live socket server at all —
+ * `getSocketIo()` returns null there and this silently no-ops, the same
+ * accepted limitation `processors.js` already has for its other
+ * `io`-emitting job types).
+ */
+export function emitJobOfferedToRiders(riderIds, payload) {
+  const io = getSocketIo()
+  if (!io) return
+  if (!Array.isArray(riderIds) || riderIds.length === 0) return
+  const data = { timestamp: new Date().toISOString(), ...payload }
+  for (const riderId of riderIds) {
+    if (riderId) io.to(`user:${riderId}`).emit('job:offered', data)
+  }
+  logger.info({ riderCount: riderIds.length, orderId: payload?.orderId }, 'Job offer broadcast to riders')
+}
+
 export function emitSectionUpdate(io, tabKey, action) {
   if (!io) return
 
@@ -228,21 +256,6 @@ async function socketioPlugin(fastify) {
     io.to(`user:${riderId}`).emit('order:expired', data)
   })
 
-  // Phase 3 of the rider-assignment initiative (CLAUDE.md) — broadcasts a
-  // job offer to every active rider at once via each rider's personal
-  // `user:{id}` room (joined by every authenticated socket regardless of
-  // role, so this works for a VENDOR_RIDER session same as any other).
-  // First rider to call the accept endpoint wins; everyone else's copy of
-  // the prompt just goes stale (the client finds out via a 409 if they
-  // try to accept after someone else already claimed it).
-  fastify.decorate('emitJobOffered', (riderIds, payload) => {
-    if (!Array.isArray(riderIds) || riderIds.length === 0) return
-    const data = { timestamp: new Date().toISOString(), ...payload }
-    for (const riderId of riderIds) {
-      if (riderId) io.to(`user:${riderId}`).emit('job:offered', data)
-    }
-    logger.info({ riderCount: riderIds.length, orderId: payload?.orderId }, 'Job offer broadcast to riders')
-  })
 
   // Helper: send personal notification to user
   fastify.decorate('emitNotification', (userId, notification) => {
