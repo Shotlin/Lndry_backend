@@ -916,6 +916,133 @@ export class VendorOrdersService {
   }
 
   /**
+   * Manually assign (or reassign) a specific rider/staff to an order — the
+   * vendor picking someone by name, instead of the system auto-picking
+   * whoever is least busy. Phase 1 of the rider-assignment initiative (see
+   * CLAUDE.md "Rider Assignment: Broadcast + Timeout Reassignment System").
+   *
+   * Two cases, matched by the order's current status:
+   *   - No assignment yet (VENDOR_ACCEPTED for pickup, PACKED for delivery)
+   *     → creates the assignment AND advances the order status, exactly
+   *     like _autoAssignEmployee.
+   *   - Already assigned, work not yet done (PICKUP_ASSIGNED/
+   *     GOING_FOR_PICKUP/PICKUP_OTP_VERIFIED, or DELIVERY_ASSIGNED/
+   *     OUT_FOR_DELIVERY) → swaps just the assignee, order status
+   *     untouched — mirrors reassignOrphanedAssignments (the stage hasn't
+   *     changed, only who's doing it).
+   *
+   * @param {string} userId - authenticated caller (vendor owner/staff)
+   * @param {string} orderId
+   * @param {string} vendorEmployeeId - vendor_employees.id (the staff
+   *        record id the vendor app's roster list exposes as `id` — NOT
+   *        users.id, which is what order_assignments.employee_id actually
+   *        stores; resolved below).
+   */
+  async assignSpecificEmployee(userId, orderId, vendorEmployeeId) {
+    const vendor = await this._resolveVendorId(userId)
+    if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
+
+    const empRes = await query(
+      `SELECT ve.user_id, ve.id AS employee_id, u.name AS full_name
+       FROM vendor_employees ve
+       JOIN users u ON ve.user_id = u.id
+       WHERE ve.id = $1 AND ve.vendor_id = $2 AND ve.is_active = true
+         AND ve.role IN ('VENDOR_RIDER', 'VENDOR_STAFF')`,
+      [vendorEmployeeId, vendor.vendorId]
+    )
+    const employee = empRes.rows[0]
+    if (!employee) {
+      throw { statusCode: 404, message: 'Rider/staff not found or inactive', code: 'EMPLOYEE_NOT_FOUND' }
+    }
+
+    const PICKUP_STAGE_STATUSES = ['VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED']
+    const DELIVERY_STAGE_STATUSES = ['PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY']
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows } = await client.query(
+        `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
+        [orderId, vendor.vendorId]
+      )
+      const order = rows[0]
+      if (!order) {
+        await client.query('ROLLBACK')
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      let purpose
+      if (PICKUP_STAGE_STATUSES.includes(order.status)) purpose = 'PICKUP'
+      else if (DELIVERY_STAGE_STATUSES.includes(order.status)) purpose = 'DELIVERY'
+      else {
+        await client.query('ROLLBACK')
+        throw {
+          statusCode: 400,
+          message: `Order is not at a stage that can be assigned right now (currently ${order.status})`,
+          code: 'INVALID_TRANSITION',
+        }
+      }
+
+      const needsFirstAssignment = order.status === 'VENDOR_ACCEPTED' || order.status === 'PACKED'
+      const assignmentType = purpose === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
+
+      if (needsFirstAssignment) {
+        const transition = validateTransition(order.status, assignmentType, vendor.role)
+        if (!transition.valid) {
+          await client.query('ROLLBACK')
+          throw { statusCode: 400, message: transition.message, code: 'INVALID_TRANSITION' }
+        }
+
+        await client.query(
+          `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id)
+           VALUES ($1, $2, $2, $3, 'ASSIGNED', $4)
+           ON CONFLICT (order_id, assignment_type) DO UPDATE SET
+             employee_id = EXCLUDED.employee_id,
+             rider_id = EXCLUDED.rider_id,
+             status = 'ASSIGNED',
+             assigned_at = NOW()`,
+          [orderId, employee.user_id, purpose, vendor.vendorId]
+        )
+        await client.query(
+          `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [assignmentType, orderId]
+        )
+      } else {
+        await client.query(
+          `UPDATE order_assignments SET employee_id = $1, rider_id = $1, updated_at = NOW()
+           WHERE order_id = $2 AND assignment_type = $3`,
+          [employee.user_id, orderId, purpose]
+        )
+      }
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: needsFirstAssignment ? assignmentType : order.status,
+        actorId: userId,
+        actorRole: vendor.role,
+        note: `Manually ${needsFirstAssignment ? 'assigned' : 'reassigned'} ${purpose.toLowerCase()} to ${employee.full_name}`,
+      })
+
+      await client.query('COMMIT')
+
+      return {
+        orderId,
+        employeeId: employee.employee_id,
+        employeeName: employee.full_name,
+        purpose,
+        status: needsFirstAssignment ? assignmentType : order.status,
+      }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
    * Get vendor dashboard stats
    */
   async getDashboardStats(userId) {
