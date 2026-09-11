@@ -350,10 +350,16 @@ export const buildApp = async () => {
     prefix: '/api/v1/vendors/:shopId/staff',
   })
 
-  // Shop Products — per-shop inventory and pricing
-  // await app.register(import('./modules/shop-garment_rates/shop-garment_rates.routes.js'), {
-  //   prefix: '/api/v1/shop-garment_rates',
-  // })
+  // Shop Products — per-shop inventory and pricing (catalogue/pricing/
+  // availability/capacity). Built but never mounted since the initial
+  // commit; its repository still joined the pre-migration-062 table names
+  // (garment_rates/categories) and manual-create still tried to write
+  // price/description columns that only ever lived on the per-vendor
+  // vendor_services row — both fixed against the live schema before
+  // mounting (see shop-garment_rates.repository.js / manual-create.service.js).
+  await app.register(import('./modules/shop-garment_rates/shop-garment_rates.routes.js'), {
+    prefix: '/api/v1/shop-garment_rates',
+  })
 
   // Shop Products — nested per-shop write surface (R23.8, R23.12)
   // adjust-stock + bulk-price-update mounted at /api/v1/vendors/:shopId/garment_rates
@@ -361,21 +367,22 @@ export const buildApp = async () => {
   // separate URL rewrite layer (design §6.4). Same controller and service
   // as the /api/v1/shop-garment_rates mount; permission gating lives on each
   // route via requirePermission().
-  // {
-  //   const { shopProductsNestedRoutes, shopStockMovementsRoutes, shopProductsAdminRoutes } =
-  //     await import('./modules/shop-garment_rates/shop-garment_rates.routes.js')
-  //   await app.register(shopProductsNestedRoutes, {
-  //     prefix: '/api/v1/vendors/:shopId/garment_rates',
-  //   })
-  //   // Stock-movements ledger reader (R23.5)
-  //   // await app.register(shopStockMovementsRoutes, {
-  //   //   prefix: '/api/v1/vendors/:shopId/stock-movements',
-  //   // })
-  //   // HQ-only admin approve/reject (R23.10, R23.11) — feature-flagged
-  //   await app.register(shopProductsAdminRoutes, {
-  //     prefix: '/api/v1/admin/shop-garment_rates',
-  //   })
-  // }
+  {
+    const { shopProductsNestedRoutes, shopStockMovementsRoutes, shopProductsAdminRoutes } =
+      await import('./modules/shop-garment_rates/shop-garment_rates.routes.js')
+    await app.register(shopProductsNestedRoutes, {
+      prefix: '/api/v1/vendors/:shopId/garment_rates',
+    })
+    // Stock-movements ledger reader (R23.5)
+    await app.register(shopStockMovementsRoutes, {
+      prefix: '/api/v1/vendors/:shopId/stock-movements',
+    })
+    // HQ-only admin approve/reject (R23.10, R23.11) — feature-flagged;
+    // replies 503 FEATURE_DISABLED while MULTI_VENDOR_PRODUCT_APPROVAL=false.
+    await app.register(shopProductsAdminRoutes, {
+      prefix: '/api/v1/admin/shop-garment_rates',
+    })
+  }
 
   // Shop Orders — store-scoped order operations (multi-vendor R22)
   // await app.register(import('./modules/shop-orders/routes.js'), {

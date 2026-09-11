@@ -219,7 +219,7 @@ export class ShopProductsRepository {
 
   /**
    * List vendor_services for a shop with filters and pagination.
-   * Joins garment_rates (name, sku, thumbnail_url, category) and vendors (name) so
+   * Joins garment_types (name, sku, images, category) and vendors (name) so
    * the dashboard can display product identity and store context without
    * extra round-trips.
    *
@@ -298,14 +298,13 @@ export class ShopProductsRepository {
           sp.updated_at,
           p.name          AS product_name,
           p.sku           AS product_sku,
-          COALESCE(p.thumbnail_url, p.images->>0)
-                          AS product_image_url,
+          p.images->>0    AS product_image_url,
           p.category_id   AS product_category_id,
           c.name          AS product_category_name,
           s.name          AS shop_name
         FROM vendor_services sp
-        LEFT JOIN garment_rates p ON p.id = sp.garment_rate_id
-        LEFT JOIN categories c ON c.id = p.category_id
+        LEFT JOIN garment_types p ON p.id = sp.garment_rate_id
+        LEFT JOIN service_categories c ON c.id = p.category_id
         LEFT JOIN vendors s ON s.id = sp.vendor_id
         WHERE ${where}
         ORDER BY sp.created_at DESC
@@ -315,7 +314,7 @@ export class ShopProductsRepository {
       query(
         `SELECT COUNT(*)::int AS total
         FROM vendor_services sp
-        LEFT JOIN garment_rates p ON p.id = sp.garment_rate_id
+        LEFT JOIN garment_types p ON p.id = sp.garment_rate_id
         WHERE ${where}`,
         params
       ),
@@ -430,10 +429,10 @@ export class ShopProductsRepository {
    * caller.
    *
    * Returns null when the row is missing, soft-deleted, or has no joined
-   * product (defensive — garment_rates are FK NOT NULL today, but we don't want
-   * the side-effect path to crash when the catalog row was archived).
+   * product (defensive — garment_rate_id is FK NOT NULL today, but we don't
+   * want the side-effect path to crash when the catalog row was archived).
    *
-   * Uses the vendor_services PK and the garment_rates PK — no full scan.
+   * Uses the vendor_services PK and the garment_types PK — no full scan.
    *
    * @param {string} id - shop_product UUID
    * @param {string} shopId - Shop UUID for scope enforcement
@@ -443,7 +442,7 @@ export class ShopProductsRepository {
     const { rows } = await query(
       `SELECT sp.garment_rate_id, p.name AS product_name
         FROM vendor_services sp
-        LEFT JOIN garment_rates p ON p.id = sp.garment_rate_id
+        LEFT JOIN garment_types p ON p.id = sp.garment_rate_id
         WHERE sp.id = $1 AND sp.vendor_id = $2 AND sp.deleted_at IS NULL`,
       [id, shopId]
     )
@@ -841,8 +840,8 @@ export class ShopProductsRepository {
    * `idx_stock_movements_type` (when type is present) — see migration
    * 042.
    *
-   * Joined with `garment_rates` (LEFT JOIN — garment_rates are FK NOT NULL but the
-   * left join avoids a hard failure if a master row is ever archived) so
+   * Joined with `garment_types` (LEFT JOIN — garment_rate_id is FK NOT NULL
+   * but the left join avoids a hard failure if a master row is ever archived) so
    * the response includes `product_name` for the dashboard without an
    * N+1 lookup.
    *
@@ -908,7 +907,7 @@ export class ShopProductsRepository {
             sm.source, sm.metadata, sm.created_at,
             p.name AS product_name
            FROM stock_movements sm
-           LEFT JOIN garment_rates p ON p.id = sm.garment_rate_id
+           LEFT JOIN garment_types p ON p.id = sm.garment_rate_id
           WHERE ${where}
           ORDER BY sm.created_at DESC
           LIMIT $${idx} OFFSET $${idx + 1}`,

@@ -12,8 +12,9 @@ import { ShopProductsRepository } from './shop-garment_rates.repository.js'
  *
  * Transaction steps:
  *   1. Case-insensitive uniqueness check on (name, brand, unit) in the
- *      master `garment_rates` table → 409 MASTER_PRODUCT_EXISTS on collision.
- *   2. INSERT into `garment_rates` (master catalog row).
+ *      master `garment_types` table → 409 MASTER_PRODUCT_EXISTS on collision.
+ *   2. INSERT into `garment_types` (master catalog row — no price/
+ *      description column there; those live on step 3's vendor_services row).
  *   3. INSERT into `vendor_services` (shop-scoped listing with
  *      approval_status from MULTI_VENDOR_PRODUCT_APPROVAL flag).
  *   4. INSERT into `stock_movements` via repo.applyStockChange
@@ -27,7 +28,7 @@ import { ShopProductsRepository } from './shop-garment_rates.repository.js'
  *   fire-and-forget Cloudinary upload model (no DB uploads table),
  *   image_ids are treated as Cloudinary public_ids that the Dashboard
  *   obtained from the upload endpoint. Validation confirms UUID format
- *   (Zod) and count (0–8). The IDs are stored in `garment_rates.images`
+ *   (Zod) and count (0–8). The IDs are stored in `garment_types.images`
  *   JSONB array.
  *
  * Requirements: R23.15, R23.16, R23.17, R23.18, R23.19, R23.20,
@@ -146,24 +147,26 @@ export class ManualCreateService {
         }
       }
 
-      // ── Step 2: INSERT into garment_rates (master catalog) ───────
+      // ── Step 2: INSERT into garment_types (master catalog) ───────
+      // Migration 062 renamed garment_rates -> garment_types AND split
+      // pricing out to the per-vendor vendor_services row inserted in step 3
+      // below — the master catalog row itself carries no price/sale_price/
+      // description column today (confirmed against the live schema).
+      // `description` stays accepted on the request body (unchanged
+      // contract) but has nowhere to persist yet; not silently faked here.
       const slug = generateSlug(body.name)
       const imagesJson = JSON.stringify(body.image_ids || [])
 
       const productResult = await client.query(
-        `INSERT INTO garment_rates (
-           name, slug, description, price, sale_price, cost_price,
+        `INSERT INTO garment_types (
+           name, slug, cost_price,
            category_id, stock_quantity, unit, images, brand, is_active
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, true)
-         RETURNING id, name, slug, description, price, sale_price,
-                   cost_price, category_id, stock_quantity, unit,
-                   images, brand, is_active, created_at, updated_at`,
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, $8, true)
+         RETURNING id, name, slug, cost_price, category_id, stock_quantity,
+                   unit, images, brand, is_active, created_at, updated_at`,
         [
           body.name.trim(),
           slug,
-          body.description || null,
-          body.price,
-          body.sale_price || null,
           body.cost_price || null,
           body.category_id || null,
           body.stock_quantity,

@@ -75,7 +75,7 @@ import { ShopProductsRepository } from '../../src/modules/shop-garment_rates/sho
 //   - UPDATE vendor_services SET deleted_at = NOW() …  (softDelete)
 //   - SELECT … FROM vendor_services WHERE id … AND deleted_at IS NULL
 //                                                    (findById)
-//   - SELECT … FROM vendor_services sp LEFT JOIN garment_rates p …
+//   - SELECT … FROM vendor_services sp LEFT JOIN garment_types p …
 //                                                    (findMany data)
 //   - SELECT COUNT(*)::int AS total FROM vendor_services sp …
 //                                                    (findMany count)
@@ -162,7 +162,7 @@ function makeFakeStore() {
 
     // findMany count:
     //   SELECT COUNT(*)::int AS total FROM vendor_services sp
-    //   LEFT JOIN garment_rates p … WHERE …
+    //   LEFT JOIN garment_types p … WHERE …
     if (
       /^\s*SELECT\s+COUNT\(\*\)::int\s+AS\s+total\s+FROM\s+vendor_services\s+sp/i.test(
         text
@@ -179,10 +179,10 @@ function makeFakeStore() {
 
     // findMany data:
     //   SELECT sp.…, p.name AS product_name, …
-    //   FROM vendor_services sp LEFT JOIN garment_rates p …
+    //   FROM vendor_services sp LEFT JOIN garment_types p …
     //   WHERE … ORDER BY sp.created_at DESC LIMIT $N OFFSET $N+1
     if (
-      /^\s*SELECT[\s\S]+FROM\s+vendor_services\s+sp\s+LEFT\s+JOIN\s+garment_rates\s+p/i.test(
+      /^\s*SELECT[\s\S]+FROM\s+vendor_services\s+sp\s+LEFT\s+JOIN\s+garment_types\s+p/i.test(
         text
       )
     ) {
