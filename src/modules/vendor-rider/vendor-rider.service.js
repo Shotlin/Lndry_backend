@@ -163,7 +163,7 @@ export class VendorRiderService {
     // every active rider at the vendor, since any of them can claim it.
     const { rows } = await query(
       `SELECT oa.id AS assignment_id, oa.order_id, oa.assignment_type, oa.assigned_at,
-              oa.is_broadcast_offer,
+              oa.is_broadcast_offer, oa.offer_expires_at,
               o.order_number, o.status AS order_status, o.delivery_address,
               o.scheduled_slot_label, o.vendor_delivery_slot_label, o.vendor_delivery_slot_at,
               o.payment_method, o.total_amount,
@@ -180,7 +180,11 @@ export class VendorRiderService {
        ORDER BY oa.assigned_at ASC`,
       [userId, rider.vendorId]
     )
-    return rows.map((r) => ({ ...this._mapJobRow(r), is_broadcast_offer: r.is_broadcast_offer }))
+    return rows.map((r) => ({
+      ...this._mapJobRow(r),
+      is_broadcast_offer: r.is_broadcast_offer,
+      offer_expires_at: r.offer_expires_at,
+    }))
   }
 
   /**

@@ -1264,20 +1264,28 @@ export class VendorOrdersService {
     // defense-in-depth, not a real-world path.
     if (!placeholder) return null
 
+    // Fetched once up front (not inside _scheduleBroadcastTimeout, which
+    // would otherwise re-fetch the same setting a moment later) so the
+    // persisted offer_expires_at and the actual BullMQ delay always agree
+    // — Phase 6's rider-app countdown reads the former.
+    const { broadcast_timeout_minutes: timeoutMinutes } = await this.riderAssignmentSettingsService.get()
+    const offerExpiresAt = new Date(Date.now() + timeoutMinutes * 60 * 1000)
+
     const client = await getClient()
     try {
       await client.query('BEGIN')
 
       await client.query(
-        `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id, is_broadcast_offer)
-         VALUES ($1, $2, $2, $3, 'OFFERED', $4, true)
+        `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id, is_broadcast_offer, offer_expires_at)
+         VALUES ($1, $2, $2, $3, 'OFFERED', $4, true, $5)
          ON CONFLICT (order_id, assignment_type) DO UPDATE SET
            employee_id = EXCLUDED.employee_id,
            rider_id = EXCLUDED.rider_id,
            status = 'OFFERED',
            is_broadcast_offer = true,
+           offer_expires_at = EXCLUDED.offer_expires_at,
            assigned_at = NOW()`,
-        [orderId, placeholder.user_id, purpose, vendorId]
+        [orderId, placeholder.user_id, purpose, vendorId, offerExpiresAt]
       )
 
       await recordOrderEvent(client, {
@@ -1302,12 +1310,17 @@ export class VendorOrdersService {
     const { rows: orderInfo } = await query(`SELECT order_number FROM orders WHERE id = $1`, [orderId])
     emitJobOfferedToRiders(
       activeRiders.map((r) => r.user_id),
-      { orderId, orderNumber: orderInfo[0]?.order_number || null, purpose }
+      {
+        orderId,
+        orderNumber: orderInfo[0]?.order_number || null,
+        purpose,
+        expiresAt: offerExpiresAt.toISOString(),
+      }
     )
 
-    await this._scheduleBroadcastTimeout(orderId, purpose, vendorId)
+    await this._scheduleBroadcastTimeout(orderId, purpose, vendorId, timeoutMinutes)
 
-    return { orderId, purpose, riderCount: activeRiders.length, status: 'OFFERED' }
+    return { orderId, purpose, riderCount: activeRiders.length, status: 'OFFERED', expiresAt: offerExpiresAt.toISOString() }
   }
 
   /**
@@ -1331,15 +1344,15 @@ export class VendorOrdersService {
    * assignment no longer OFFERED and no-ops.
    * @private
    */
-  async _scheduleBroadcastTimeout(orderId, purpose, vendorId) {
+  async _scheduleBroadcastTimeout(orderId, purpose, vendorId, timeoutMinutes = null) {
     try {
-      const { broadcast_timeout_minutes: timeoutMinutes } = await this.riderAssignmentSettingsService.get()
+      const minutes = timeoutMinutes ?? (await this.riderAssignmentSettingsService.get()).broadcast_timeout_minutes
       await orderQueue.add(
         'rider-broadcast-timeout',
         { type: 'rider-broadcast-timeout', orderId, purpose, vendorId },
         {
           jobId: `rider-broadcast-timeout-${orderId}-${purpose}`,
-          delay: timeoutMinutes * 60 * 1000,
+          delay: minutes * 60 * 1000,
           removeOnComplete: true,
         }
       )
