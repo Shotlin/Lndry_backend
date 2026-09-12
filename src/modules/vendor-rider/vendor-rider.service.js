@@ -515,10 +515,22 @@ export class VendorRiderService {
       if (!t2.valid) {
         throw { statusCode: 400, message: t2.message, code: 'INVALID_TRANSITION' }
       }
-      await client.query(
-        `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
-        [finalStatus, orderId]
-      )
+      // orders.delivered_at is what settlement's aggregateDeliveredOrders()
+      // date-range filters on (shop-financials.write.repository.js) — leaving
+      // it null here means a genuinely delivered order silently never
+      // qualifies for any settlement period, forever. order_assignments has
+      // its own delivered_at (set below) but that isn't what settlement reads.
+      if (finalStatus === 'DELIVERED') {
+        await client.query(
+          `UPDATE orders SET status = $1, delivered_at = NOW(), updated_at = NOW() WHERE id = $2`,
+          [finalStatus, orderId]
+        )
+      } else {
+        await client.query(
+          `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [finalStatus, orderId]
+        )
+      }
       await recordOrderEvent(client, {
         orderId,
         oldStatus: intermediateStatus,

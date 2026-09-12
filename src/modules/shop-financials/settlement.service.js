@@ -474,15 +474,31 @@ export class SettlementService {
     try {
       await client.query('BEGIN')
 
-      // Fetch delivered orders for this shop in the period (bounded by 500)
+      // Fetch delivered orders for this shop in the period (bounded by 500),
+      // excluding any order that already has an ORDER_REVENUE ledger entry.
+      // recordSettlementEntries() below has no dedup guard of its own, so
+      // without this filter a retried/re-run settlement job (BullMQ retries
+      // on any transient failure, and a manual re-run does the same) would
+      // silently re-append every per-order entry — the aggregate
+      // shop_financials row stays correct via its UPSERT, but the detailed
+      // shop_transactions ledger would permanently diverge from it (each
+      // order's revenue/commission/delivery-fee/rider-cost duplicated once
+      // per re-run). Reproduced live: two calls to settleShopForPeriod for
+      // the same shop+day left the correct ₹148 gross_revenue in
+      // shop_financials but 12 ledger rows (2x the correct 6) in
+      // shop_transactions.
       const { rows: orders } = await client.query(
-        `SELECT id, subtotal, delivery_fee, rider_id
-           FROM orders
-          WHERE vendor_id = $1
-            AND status = 'DELIVERED'
-            AND delivered_at >= $2
-            AND delivered_at < $3
-          ORDER BY delivered_at ASC
+        `SELECT o.id, o.subtotal, o.delivery_fee, o.rider_id
+           FROM orders o
+          WHERE o.vendor_id = $1
+            AND o.status = 'DELIVERED'
+            AND o.delivered_at >= $2
+            AND o.delivered_at < $3
+            AND NOT EXISTS (
+              SELECT 1 FROM shop_transactions st
+               WHERE st.reference_id = o.id AND st.type = 'ORDER_REVENUE'
+            )
+          ORDER BY o.delivered_at ASC
           LIMIT 500`,
         [shopId, startUtc, endUtc]
       )
