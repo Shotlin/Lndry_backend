@@ -67,7 +67,12 @@ export class AdminCustomersRepository {
               COALESCE(o_stats.order_count, 0)::int AS order_count,
               COALESCE(o_stats.total_spent, 0) AS total_spent,
               COALESCE(o_stats.avg_order, 0) AS avg_order_value,
-              o_stats.last_order_at
+              o_stats.last_order_at,
+              COALESCE(c_stats.cancelled_count, 0)::int AS cancelled_count,
+              dev.platform AS device_platform,
+              dev.device_model,
+              dev.app_version AS device_app_version,
+              dev.updated_at AS device_last_active_at
        FROM users u
        LEFT JOIN wallets w ON w.user_id = u.id
        LEFT JOIN (
@@ -75,15 +80,63 @@ export class AdminCustomersRepository {
                 AVG(total_amount) AS avg_order, MAX(created_at) AS last_order_at
          FROM orders WHERE status != 'CANCELLED' GROUP BY user_id
        ) o_stats ON o_stats.user_id = u.id
+       LEFT JOIN (
+         SELECT user_id, COUNT(*)::int AS cancelled_count
+         FROM orders WHERE status = 'CANCELLED' GROUP BY user_id
+       ) c_stats ON c_stats.user_id = u.id
+       LEFT JOIN LATERAL (
+         SELECT platform, device_model, app_version, updated_at
+         FROM devices WHERE devices.user_id = u.id
+         ORDER BY updated_at DESC LIMIT 1
+       ) dev ON true
        WHERE u.id = $1 AND u.role = 'CUSTOMER'`,
       [id]
     )
     if (!customer) return null
+    const {
+      device_platform, device_model, device_app_version, device_last_active_at,
+      ...rest
+    } = customer
     return {
-      ...customer,
+      ...rest,
       wallet_balance: parseFloat(customer.wallet_balance || 0),
       total_spent: parseFloat(customer.total_spent || 0),
       avg_order_value: parseFloat(customer.avg_order_value || 0),
+      last_device: device_last_active_at
+        ? {
+            platform: device_platform,
+            device_model,
+            app_version: device_app_version,
+            last_active_at: device_last_active_at,
+          }
+        : null,
+    }
+  }
+
+  /** Mirrors the customer-authenticated `/addresses/:id/default` logic
+   * (addresses.repository.js#setDefault), invoked here on the customer's
+   * behalf by an admin. */
+  async setDefaultAddress(customerId, addressId) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      await client.query(
+        `UPDATE addresses SET is_default = false, updated_at = NOW() WHERE user_id = $1`,
+        [customerId]
+      )
+      const { rows } = await client.query(
+        `UPDATE addresses SET is_default = true, updated_at = NOW()
+         WHERE id = $1 AND user_id = $2
+         RETURNING id, label, address_line1, address_line2, landmark, city, state, pincode, lat, lng, is_default, created_at, updated_at`,
+        [addressId, customerId]
+      )
+      await client.query('COMMIT')
+      return rows[0] || null
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
     }
   }
 

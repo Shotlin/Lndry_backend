@@ -49,7 +49,8 @@ export const verifyOtpSchema = {
           device_id: { type: 'string' },
           platform: { type: 'string' },
           fcm_token: { type: 'string' },
-          app_version: { type: 'string' }
+          app_version: { type: 'string' },
+          device_model: { type: 'string', maxLength: 150 }
         }
       }
     },

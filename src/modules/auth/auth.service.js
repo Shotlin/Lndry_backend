@@ -268,7 +268,8 @@ export class AuthService {
         deviceId: device.device_id,
         platform: device.platform || 'UNKNOWN',
         fcmToken: device.fcm_token || '',
-        appVersion: device.app_version || ''
+        appVersion: device.app_version || '',
+        deviceModel: device.device_model || null
       })
     }
 

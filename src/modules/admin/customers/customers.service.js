@@ -1,5 +1,7 @@
 import { AdminCustomersRepository } from './customers.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
+import { NotificationsRepository } from '../../notifications/notifications.repository.js'
+import { NotificationsService } from '../../notifications/notifications.service.js'
 import ExcelJS from 'exceljs'
 
 const repo = new AdminCustomersRepository()
@@ -68,9 +70,29 @@ export class AdminCustomersService {
     return { buffer, filename: `customers-${Date.now()}.csv` }
   }
 
+  /**
+   * Previously only called `fastify.emitNotification` directly — a raw
+   * Socket.IO emit with no in-app notification row and no FCM push, so a
+   * customer who wasn't live-connected right then never actually received
+   * anything. Routes through the real NotificationsService so this behaves
+   * like every other "send a notification" path in the app (persist +
+   * socket + push).
+   */
   async sendPersonalNotification(userId, title, body, fastify) {
-    if (!fastify) return false
-    fastify.emitNotification(userId, { title, body, type: 'ADMIN_MESSAGE' })
+    const notificationsService = new NotificationsService(new NotificationsRepository(), fastify)
+    await notificationsService.sendNotification(userId, {
+      title,
+      body,
+      type: 'ADMIN_MESSAGE',
+    })
     return true
+  }
+
+  async setDefaultAddress(customerId, addressId, adminId, ip) {
+    const address = await repo.setDefaultAddress(customerId, addressId)
+    if (address) {
+      logAdminActivity(adminId, 'SET_CUSTOMER_DEFAULT_ADDRESS', 'user', customerId, null, { addressId }, ip)
+    }
+    return address
   }
 }

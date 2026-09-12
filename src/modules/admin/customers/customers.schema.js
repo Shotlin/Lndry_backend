@@ -87,6 +87,17 @@ export const sendNotificationSchema = {
   },
 }
 
+export const setDefaultAddressSchema = {
+  params: {
+    type: 'object',
+    required: ['id', 'addressId'],
+    properties: {
+      id: { type: 'string', pattern: uuidPattern },
+      addressId: { type: 'string', pattern: uuidPattern },
+    },
+  },
+}
+
 export const toggleBlockSchema = {
   params: {
     type: 'object',

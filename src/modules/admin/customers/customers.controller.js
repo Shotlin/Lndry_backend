@@ -56,6 +56,14 @@ export class AdminCustomersController {
     return success(null, 'Notification sent')
   }
 
+  async setDefaultAddress(request, reply) {
+    const address = await svc.setDefaultAddress(
+      request.params.id, request.params.addressId, request.user.id, request.ip
+    )
+    if (!address) return error('Address not found', 404)
+    return success(address, 'Default address updated')
+  }
+
   async toggleBlock(request, reply) {
     const { blocked } = request.body
     const user = await svc.toggleBlock(request.params.id, blocked, request.user.id, request.ip)
