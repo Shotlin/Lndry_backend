@@ -312,6 +312,31 @@ export class VendorOrdersService {
         logger.warn({ err: err.message, orderId }, 'Pickup OTP generation failed (non-critical)')
       }
 
+      // Realtime: let the customer's own app know right away instead of
+      // waiting for a manual refresh — `order:status` for any screen
+      // silently watching this order/list, plus an in-app notification
+      // (title/body + the same socket channel used by proposeReconciliation
+      // below) for a visible popup.
+      if (this.fastify?.emitOrderUpdate) {
+        try {
+          this.fastify.emitOrderUpdate(orderId, [order.user_id], { status: ORDER_STATUSES.VENDOR_ACCEPTED })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
+        }
+      }
+      if (this.notificationsService && order.user_id) {
+        try {
+          await this.notificationsService.sendNotification(order.user_id, {
+            title: 'Order accepted',
+            body: 'The vendor has accepted your order and will pick it up soon.',
+            type: 'order_vendor_accepted',
+            data: { orderId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of vendor acceptance (non-critical)')
+        }
+      }
+
       return { orderId, status: ORDER_STATUSES.VENDOR_ACCEPTED }
     } catch (err) {
       await client.query('ROLLBACK')
@@ -388,6 +413,29 @@ export class VendorOrdersService {
         })
       } catch (err) {
         logger.warn({ err: err.message, orderId }, 'Failed to queue auto-refund after vendor rejection')
+      }
+
+      // Realtime: same pattern as acceptOrder above — the customer needs to
+      // know immediately, not on their next manual refresh, since a
+      // rejection needs their attention (auto-refund is already in flight).
+      if (this.fastify?.emitOrderUpdate) {
+        try {
+          this.fastify.emitOrderUpdate(orderId, [order.user_id], { status: ORDER_STATUSES.VENDOR_REJECTED })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
+        }
+      }
+      if (this.notificationsService && order.user_id) {
+        try {
+          await this.notificationsService.sendNotification(order.user_id, {
+            title: 'Order rejected',
+            body: reason || 'The vendor was unable to accept your order. A refund is on the way.',
+            type: 'order_vendor_rejected',
+            data: { orderId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of vendor rejection (non-critical)')
+        }
       }
 
       return { orderId, status: ORDER_STATUSES.VENDOR_REJECTED }
@@ -697,6 +745,16 @@ export class VendorOrdersService {
 
       await client.query('COMMIT')
 
+      if (this.fastify?.emitOrderUpdate) {
+        try {
+          this.fastify.emitOrderUpdate(orderId, [order.user_id], {
+            status: ORDER_STATUSES.RECONCILIATION_PENDING,
+            reconciliationId,
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
+        }
+      }
       if (this.notificationsService && order.user_id) {
         try {
           await this.notificationsService.sendNotification(order.user_id, {
