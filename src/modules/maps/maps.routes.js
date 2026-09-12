@@ -8,10 +8,20 @@ const olaMapsSettingsRepository = new OlaMapsSettingsRepository()
 
 /**
  * Forward-geocodes a free-text query via Ola Maps and shapes each result
- * into a self-contained suggestion — the full address/coordinates are
- * base64-encoded into `place_id` itself, so "select this suggestion"
- * never needs a second Ola API call (unlike Google Places, Ola's geocode
- * response already includes everything a details lookup would give).
+ * into a self-contained suggestion with the resolved address/coordinates
+ * embedded directly (lat/lng/formattedAddress/city/state/postalCode) —
+ * "select this suggestion" never needs a second lookup call at all
+ * (unlike Google Places' autocomplete-then-details two-step), since
+ * Ola's geocode response already includes everything a details call
+ * would give. This also sidesteps a real bug hit while building this:
+ * encoding all of that into `place_id` itself (to reuse the existing
+ * two-step client contract) produced base64 blobs 100+ characters long,
+ * and *something* in this stack (nginx or find-my-way's own router —
+ * not narrowed down further since the fix here is simpler) silently
+ * 404s any :placeId path segment past roughly 100-120 characters, with
+ * no length-related error to point at the real cause. `place_id` here
+ * is just Ola's own short real one, kept for API shape compatibility;
+ * nothing calls /place-details for an Ola-sourced suggestion.
  * Returns null when Ola isn't configured/enabled or the call fails, so
  * callers can fall back to Google/mock.
  */
@@ -29,21 +39,15 @@ async function _geocodeViaOla(queryText) {
       const components = r.address_components || []
       const findComponent = (type) =>
         components.find((c) => (c.types || []).includes(type))?.long_name || null
-      const detail = {
+      return {
+        description: r.formatted_address || '',
+        place_id: r.place_id || '',
         formatted_address: r.formatted_address || null,
         lat: r.geometry?.location?.lat ?? null,
         lng: r.geometry?.location?.lng ?? null,
         postal_code: findComponent('postal_code'),
-      }
-      return {
-        description: r.formatted_address || '',
-        // No 'ola:' prefix — a literal ':' in a find-my-way path parameter
-        // value breaks route matching (404s), since colons are find-my-way's
-        // own parameter-syntax character. base64url's alphabet has no
-        // colons, slashes, or anything else path-unsafe, so the id is
-        // self-describing without needing a prefix — see the decode-first
-        // attempt in /place-details below.
-        place_id: Buffer.from(JSON.stringify(detail)).toString('base64url'),
+        city: findComponent('locality') || findComponent('administrative_area_level_2'),
+        state: findComponent('administrative_area_level_1'),
       }
     })
   } catch (err) {
@@ -198,21 +202,6 @@ export default async function mapsRoutes(fastify) {
     }
   }, async (request, reply) => {
     const { placeId } = request.params
-
-    // Ola-sourced suggestion — the details are already encoded in the id
-    // itself (see _geocodeViaOla), no API call needed to resolve it. No
-    // distinguishing prefix on the id (see the comment there), so just
-    // attempt the decode — a real Google place_id or a 'mock_place_N' id
-    // never happens to parse as base64url JSON with a numeric `lat`, so
-    // this can't misfire on those.
-    try {
-      const decoded = JSON.parse(Buffer.from(placeId, 'base64url').toString('utf8'))
-      if (decoded && typeof decoded.lat === 'number') {
-        return reply.code(200).send(success(decoded, 'Place details fetched'))
-      }
-    } catch (err) {
-      // Not an Ola-encoded id — fall through to Google/mock handling below.
-    }
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY || env.GOOGLE_MAPS_API_KEY
 
