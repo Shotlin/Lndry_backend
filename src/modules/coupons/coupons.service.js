@@ -2,7 +2,6 @@ import { logger } from '../../config/logger.js'
 import { ERROR_CODES } from '../../constants/errors.js'
 import { HQ_ROLES } from '../../utils/permissions.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
-import { findDemoCouponByCode, mergeDemoCoupons } from './demo-coupons.js'
 import { CustomerSegmentsRepository } from '../admin/customer-segments/customer-segments.repository.js'
 
 /** Returns true only for properly formatted UUIDs. */
@@ -545,7 +544,7 @@ export class CouponsService {
    * Validate a coupon code against a cart total (customer-facing)
    */
   async validate(userId, code, cartTotal) {
-    const coupon = (await this.repo.findByCode(code)) ?? findDemoCouponByCode(code)
+    const coupon = await this.repo.findByCode(code)
 
     const eligibility = await this.validateCouponEligibility(coupon, userId, cartTotal)
     if (!eligibility.valid) {
@@ -589,13 +588,11 @@ export class CouponsService {
    * coupons stay hidden from customers who can't use them).
    */
   async getAvailable(userId) {
-    const coupons = mergeDemoCoupons(await this.repo.findAvailable())
+    const coupons = await this.repo.findAvailable()
     const available = []
 
     for (const coupon of coupons) {
-      const usage = coupon.isDemo
-        ? 0
-        : await this.repo.getUserUsageCount(coupon.id, userId)
+      const usage = await this.repo.getUserUsageCount(coupon.id, userId)
       // See validateCouponEligibility() above — per_user_limit is the
       // column the admin dashboard actually controls, so it must win.
       const perUserLimit = coupon.perUserLimit ?? coupon.usageLimitPerUser ?? 1
