@@ -94,6 +94,10 @@ export class VendorRiderService {
        JOIN orders o ON o.id = oa.order_id
        LEFT JOIN users u ON u.id = o.user_id
        WHERE oa.employee_id = $1 AND oa.status IN ('ASSIGNED', 'IN_TRANSIT')
+         AND (
+           (oa.assignment_type = 'PICKUP' AND o.status IN ('VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED'))
+           OR (oa.assignment_type = 'DELIVERY' AND o.status IN ('PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY', 'DELIVERY_OTP_VERIFIED'))
+         )
        ORDER BY oa.assigned_at ASC`,
       [userId]
     )
@@ -116,7 +120,11 @@ export class VendorRiderService {
        FROM order_assignments oa
        JOIN orders o ON o.id = oa.order_id
        LEFT JOIN users u ON u.id = o.user_id
-       WHERE oa.employee_id = $1 AND oa.order_id = $2
+       WHERE oa.employee_id = $1 AND oa.order_id = $2 AND oa.status IN ('ASSIGNED', 'IN_TRANSIT')
+         AND (
+           (oa.assignment_type = 'PICKUP' AND o.status IN ('VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED'))
+           OR (oa.assignment_type = 'DELIVERY' AND o.status IN ('PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY', 'DELIVERY_OTP_VERIFIED'))
+         )
        LIMIT 1`,
       [userId, orderId]
     )
