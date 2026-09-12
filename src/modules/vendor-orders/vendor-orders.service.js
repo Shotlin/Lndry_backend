@@ -203,6 +203,28 @@ export class VendorOrdersService {
     )
     order.amountPaidPaise = Math.round(Number(paidRes.rows[0].amount_paid) * 100)
 
+    const assignmentsRes = await query(
+      `SELECT oa.assignment_type, oa.status, oa.is_broadcast_offer, oa.offer_expires_at,
+              u2.name AS rider_name, u2.phone AS rider_phone
+       FROM order_assignments oa
+       LEFT JOIN users u2 ON u2.id = oa.employee_id
+       WHERE oa.order_id = $1`,
+      [orderId]
+    )
+    order.pickupAssignment = null
+    order.deliveryAssignment = null
+    for (const row of assignmentsRes.rows) {
+      const value = {
+        riderName: row.rider_name,
+        riderPhone: row.rider_phone,
+        status: row.status,
+        isBroadcastOffer: row.is_broadcast_offer,
+        offerExpiresAt: row.offer_expires_at,
+      }
+      if (row.assignment_type === 'PICKUP') order.pickupAssignment = value
+      else if (row.assignment_type === 'DELIVERY') order.deliveryAssignment = value
+    }
+
     const reconRes = await query(
       `SELECT * FROM order_reconciliations WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [orderId]
@@ -998,12 +1020,14 @@ export class VendorOrdersService {
         }
 
         await client.query(
-          `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id)
-           VALUES ($1, $2, $2, $3, 'ASSIGNED', $4)
+          `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id, is_broadcast_offer, offer_expires_at)
+           VALUES ($1, $2, $2, $3, 'ASSIGNED', $4, false, NULL)
            ON CONFLICT (order_id, assignment_type) DO UPDATE SET
              employee_id = EXCLUDED.employee_id,
              rider_id = EXCLUDED.rider_id,
              status = 'ASSIGNED',
+             is_broadcast_offer = false,
+             offer_expires_at = NULL,
              assigned_at = NOW()`,
           [orderId, employee.user_id, purpose, vendor.vendorId]
         )
@@ -1012,8 +1036,17 @@ export class VendorOrdersService {
           [assignmentType, orderId]
         )
       } else {
+        // A direct assign always wins and always results in a clean,
+        // confirmed ASSIGNED state — regardless of whatever the row's
+        // prior status was (a previously assigned rider, or a pending
+        // broadcast/offer). Previously this only updated employee_id/
+        // rider_id and left `status` untouched, so reassigning over a
+        // still-OFFERED broadcast silently produced a row pointed at the
+        // right rider but still stuck OFFERED — invisible to that
+        // rider's job list, which only shows ASSIGNED/IN_TRANSIT.
         await client.query(
-          `UPDATE order_assignments SET employee_id = $1, rider_id = $1, updated_at = NOW()
+          `UPDATE order_assignments SET employee_id = $1, rider_id = $1, status = 'ASSIGNED',
+             is_broadcast_offer = false, offer_expires_at = NULL, updated_at = NOW()
            WHERE order_id = $2 AND assignment_type = $3`,
           [employee.user_id, orderId, purpose]
         )
@@ -1108,6 +1141,19 @@ export class VendorOrdersService {
         }
       }
 
+      const existing = await client.query(
+        `SELECT status FROM order_assignments WHERE order_id = $1 AND assignment_type = $2 FOR UPDATE`,
+        [orderId, purpose]
+      )
+      if (existing.rows[0] && ['ASSIGNED', 'IN_TRANSIT'].includes(existing.rows[0].status)) {
+        await client.query('ROLLBACK')
+        throw {
+          statusCode: 409,
+          message: 'This order already has a confirmed rider — reassign it directly instead of offering',
+          code: 'ALREADY_ASSIGNED',
+        }
+      }
+
       await client.query(
         `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id)
          VALUES ($1, $2, $2, $3, 'OFFERED', $4)
@@ -1181,6 +1227,24 @@ export class VendorOrdersService {
         statusCode: 400,
         message: `Order is not at a stage that can be broadcast right now (currently ${order.status})`,
         code: 'INVALID_TRANSITION',
+      }
+    }
+
+    // Broadcasting must never silently clobber a rider the vendor already
+    // confirmed (directly assigned, or who already accepted an earlier
+    // offer) — _broadcastOffer's INSERT ... ON CONFLICT unconditionally
+    // overwrites whatever row is there, which previously meant a stray
+    // "Broadcast" tap after a direct "Assign" would erase that assignment
+    // and replace it with a pending offer to an unrelated placeholder rider.
+    const { rows: existingRows } = await query(
+      `SELECT status FROM order_assignments WHERE order_id = $1 AND assignment_type = $2`,
+      [orderId, purpose]
+    )
+    if (existingRows[0] && ['ASSIGNED', 'IN_TRANSIT'].includes(existingRows[0].status)) {
+      throw {
+        statusCode: 409,
+        message: 'This order already has a confirmed rider — reassign it directly instead of broadcasting',
+        code: 'ALREADY_ASSIGNED',
       }
     }
 
