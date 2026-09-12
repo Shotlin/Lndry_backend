@@ -90,9 +90,9 @@ const ADMIN_ACTOR = {
   ip: '127.0.0.1',
   userAgent: 'test',
 }
-const SHOP_ADMIN_ACTOR = {
+const OWNER_ACTOR = {
   id: USER_ID,
-  shopRole: 'SHOP_ADMIN',
+  shopRole: 'VENDOR_OWNER',
   ip: '127.0.0.1',
   userAgent: 'test',
 }
@@ -147,7 +147,7 @@ describe('ShopProductsService.adjustStock', () => {
         type: 'MANUAL_ADJUSTMENT',
         reason: 'Restock from supplier',
       },
-      SHOP_ADMIN_ACTOR
+      OWNER_ACTOR
     )
 
     expect(result.success).toBe(true)
@@ -163,7 +163,7 @@ describe('ShopProductsService.adjustStock', () => {
         type: 'MANUAL_ADJUSTMENT',
         reason: 'Restock from supplier',
         source: 'DASHBOARD',
-        actor: { userId: USER_ID, shopRole: 'SHOP_ADMIN' },
+        actor: { userId: USER_ID, shopRole: 'VENDOR_OWNER' },
         orderId: null,
       })
     )
@@ -208,7 +208,7 @@ describe('ShopProductsService.adjustStock', () => {
       SHOP_ID,
       SHOP_PRODUCT_ID,
       { quantity_delta: -10, type: 'DAMAGED_STOCK', reason: 'Spoiled' },
-      SHOP_ADMIN_ACTOR
+      OWNER_ACTOR
     )
 
     expect(result.success).toBe(false)
@@ -235,7 +235,7 @@ describe('ShopProductsService.adjustStock', () => {
       SHOP_ID,
       SHOP_PRODUCT_ID,
       { quantity_delta: 5, type: 'MANUAL_ADJUSTMENT', reason: 'noop' },
-      SHOP_ADMIN_ACTOR
+      OWNER_ACTOR
     )
 
     expect(result.success).toBe(false)
@@ -308,7 +308,7 @@ describe('ShopProductsService.bulkPriceUpdate', () => {
           { garment_rate_id: 'p-2', sale_price: 170 },
         ],
       },
-      SHOP_ADMIN_ACTOR
+      OWNER_ACTOR
     )
 
     expect(result.success).toBe(true)
@@ -350,7 +350,7 @@ describe('ShopProductsService.bulkPriceUpdate', () => {
           { garment_rate_id: 'p-1', price: 20 }, // duplicate
         ],
       },
-      SHOP_ADMIN_ACTOR
+      OWNER_ACTOR
     )
 
     expect(result.success).toBe(false)
@@ -400,7 +400,7 @@ describe('ShopProductsService.bulkPriceUpdate', () => {
           { garment_rate_id: 'p-2', price: 20 },
         ],
       },
-      SHOP_ADMIN_ACTOR
+      OWNER_ACTOR
     )
 
     expect(result.success).toBe(false)

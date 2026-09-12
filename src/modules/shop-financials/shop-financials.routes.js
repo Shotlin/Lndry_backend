@@ -18,11 +18,17 @@ import { success, error } from '../../utils/apiResponse.js'
  *   - All routes require a valid JWT (fastify.authenticate)
  *   - Shop scope is derived by `requireShopScope({ requireShop: true })`
  *     (JWT vendor_id, or X-Shop-Id header for platform Super Admins).
- *   - Read access requires platform ADMIN OR shop staff with role
- *     SHOP_ADMIN | SHOP_MANAGER. Explicitly NOT SHOP_STAFF or SHOP_VIEWER —
- *     financial visibility maps to the `view_financials` permission, which
- *     in the design.md role table is granted only to Shop_Admin and
- *     Shop_Manager.
+ *   - Read access requires platform ADMIN OR the real vendor_employees.role
+ *     VENDOR_OWNER. Originally checked SHOP_ADMIN | SHOP_MANAGER — a
+ *     vocabulary no real account can ever carry (vendor_employees.role is
+ *     DB-CHECK-constrained to VENDOR_OWNER/VENDOR_STAFF/VENDOR_RIDER).
+ *     Deliberately owner-only, not owner+staff: the original intent was
+ *     that financial visibility is narrower than general shop access
+ *     (explicitly "NOT SHOP_STAFF or SHOP_VIEWER" — settlement/payout
+ *     figures are more sensitive than catalogue data), and VENDOR_STAFF is
+ *     the only non-owner role that exists in the real vocabulary, so
+ *     preserving that narrower intent means VENDOR_STAFF is excluded here
+ *     too.
  *   - Cross-shop access is blocked by `requireShopScope` (which checks the
  *     staff record is active for the JWT vendor_id) and by the
  *     `WHERE vendor_id = $1` filter on every query — non-matching JWT shop ids
@@ -39,11 +45,10 @@ export default async function shopFinancialsRoutes(fastify) {
     const role = request.user?.role
     const shopRole = request.user?.shopRole || request.user?.shop_role
     if (role === 'ADMIN') return
-    if (shopRole === 'SHOP_ADMIN' || shopRole === 'SHOP_MANAGER') return
+    if (shopRole === 'VENDOR_OWNER') return
     return reply.code(403).send({
       success: false,
-      message:
-        'Forbidden — Shop Admin, Shop Manager, or Super Admin access required',
+      message: 'Forbidden — Vendor Owner or Super Admin access required',
       code: 'FORBIDDEN',
     })
   }

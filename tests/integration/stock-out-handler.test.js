@@ -537,7 +537,7 @@ describe('Task 23.8 — Stock-out handler', () => {
       expect(result.code).toBe('FORBIDDEN')
     })
 
-    it('allows SHOP_ADMIN to update stock', async () => {
+    it('allows VENDOR_OWNER to update stock', async () => {
       const mockClient = createMockClient(5, 10)
       getClient.mockResolvedValue(mockClient)
 
@@ -564,7 +564,7 @@ describe('Task 23.8 — Stock-out handler', () => {
         SHOP_ID,
         SHOP_PRODUCT_ID,
         { stock_quantity: 10 },
-        { id: 'staff-001', role: 'STAFF', shopRole: 'SHOP_ADMIN' }
+        { id: 'staff-001', role: 'STAFF', shopRole: 'VENDOR_OWNER' }
       )
 
       expect(result.success).toBe(true)

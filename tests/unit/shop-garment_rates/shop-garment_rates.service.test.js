@@ -82,7 +82,7 @@ function makeTxClientMock() {
 }
 
 const ADMIN_ACTOR = { id: USER_ID, role: 'ADMIN' }
-const VIEWER_ACTOR = { id: USER_ID, shopRole: 'SHOP_VIEWER' }
+const UNAUTHORIZED_ACTOR = { id: USER_ID, shopRole: 'VENDOR_RIDER' }
 const CUSTOMER_ACTOR = { id: USER_ID, role: 'CUSTOMER' }
 
 beforeEach(() => {
@@ -279,10 +279,9 @@ describe('ShopProductsService.create', () => {
 
   it.each([
     ['ADMIN', { id: USER_ID, role: 'ADMIN' }, true],
-    ['SHOP_ADMIN', { id: USER_ID, shopRole: 'SHOP_ADMIN' }, true],
-    ['SHOP_MANAGER', { id: USER_ID, shopRole: 'SHOP_MANAGER' }, true],
-    ['SHOP_STAFF', { id: USER_ID, shopRole: 'SHOP_STAFF' }, true],
-    ['SHOP_VIEWER', { id: USER_ID, shopRole: 'SHOP_VIEWER' }, false],
+    ['VENDOR_OWNER', { id: USER_ID, shopRole: 'VENDOR_OWNER' }, true],
+    ['VENDOR_STAFF', { id: USER_ID, shopRole: 'VENDOR_STAFF' }, true],
+    ['VENDOR_RIDER', { id: USER_ID, shopRole: 'VENDOR_RIDER' }, false],
     ['CUSTOMER', { id: USER_ID, role: 'CUSTOMER' }, false],
     ['null actor', null, false],
   ])(
@@ -336,7 +335,7 @@ describe('ShopProductsService.create', () => {
     const result = await svc.create(
       SHOP_ID,
       { garment_rate_id: PRODUCT_ID, price: 50, stock_quantity: 5 },
-      VIEWER_ACTOR
+      UNAUTHORIZED_ACTOR
     )
 
     expect(result.success).toBe(false)
@@ -447,9 +446,9 @@ describe('ShopProductsService.update', () => {
 
   it.each([
     ['ADMIN', { id: USER_ID, role: 'ADMIN' }, true],
-    ['SHOP_MANAGER', { id: USER_ID, shopRole: 'SHOP_MANAGER' }, true],
-    ['SHOP_STAFF', { id: USER_ID, shopRole: 'SHOP_STAFF' }, true],
-    ['SHOP_VIEWER', { id: USER_ID, shopRole: 'SHOP_VIEWER' }, false],
+    ['VENDOR_OWNER', { id: USER_ID, shopRole: 'VENDOR_OWNER' }, true],
+    ['VENDOR_STAFF', { id: USER_ID, shopRole: 'VENDOR_STAFF' }, true],
+    ['VENDOR_RIDER', { id: USER_ID, shopRole: 'VENDOR_RIDER' }, false],
     ['CUSTOMER', { id: USER_ID, role: 'CUSTOMER' }, false],
   ])('authorizes update for %s correctly', async (_label, actor, allowed) => {
     const repo = makeRepoMock()
@@ -711,7 +710,7 @@ describe('ShopProductsService.updateStock', () => {
       SHOP_ID,
       SHOP_PRODUCT_ID,
       { delta: 1 },
-      VIEWER_ACTOR
+      UNAUTHORIZED_ACTOR
     )
 
     expect(result.success).toBe(false)

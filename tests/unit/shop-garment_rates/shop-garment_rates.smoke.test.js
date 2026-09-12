@@ -157,22 +157,23 @@ describe('shop-garment_rates schema validation', () => {
 })
 
 describe('ShopProductsService.authorizeMutation', () => {
-  // Requirement 3.10 — only Shop Admin/Manager/Staff or platform ADMIN
+  // Requirement 3.10 — only VENDOR_OWNER/VENDOR_STAFF or platform ADMIN
+  // (real vendor_employees.role vocabulary; see shop-garment_rates.service.js)
   it('allows platform ADMIN', () => {
     const svc = new ShopProductsService(new ShopProductsRepository())
     expect(svc.authorizeMutation({ role: 'ADMIN' }).ok).toBe(true)
   })
 
-  it('allows SHOP_ADMIN, SHOP_MANAGER, SHOP_STAFF', () => {
+  it('allows VENDOR_OWNER, VENDOR_STAFF', () => {
     const svc = new ShopProductsService(new ShopProductsRepository())
-    for (const shopRole of ['SHOP_ADMIN', 'SHOP_MANAGER', 'SHOP_STAFF']) {
+    for (const shopRole of ['VENDOR_OWNER', 'VENDOR_STAFF']) {
       expect(svc.authorizeMutation({ shopRole }).ok).toBe(true)
     }
   })
 
-  it('rejects SHOP_VIEWER and unrelated roles', () => {
+  it('rejects VENDOR_RIDER and unrelated roles', () => {
     const svc = new ShopProductsService(new ShopProductsRepository())
-    expect(svc.authorizeMutation({ shopRole: 'SHOP_VIEWER' }).ok).toBe(false)
+    expect(svc.authorizeMutation({ shopRole: 'VENDOR_RIDER' }).ok).toBe(false)
     expect(svc.authorizeMutation({ role: 'CUSTOMER' }).ok).toBe(false)
     expect(svc.authorizeMutation(null).ok).toBe(false)
   })

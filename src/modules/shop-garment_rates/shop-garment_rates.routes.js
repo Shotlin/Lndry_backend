@@ -13,10 +13,16 @@ import { requirePermission } from '../../middlewares/permission-check.js'
  *   - All routes require a valid JWT (fastify.authenticate)
  *   - Shop scope is derived by `requireShopScope` (JWT vendor_id, or X-Shop-Id
  *     header for platform Super Admins) — exposes `request.shopId`.
- *   - Read endpoints additionally require ANY of: platform ADMIN, or one of
- *     SHOP_ADMIN | SHOP_MANAGER | SHOP_STAFF | SHOP_VIEWER for the shop.
- *   - Write endpoints (POST/PATCH/DELETE/stock) require platform ADMIN or one
- *     of SHOP_ADMIN | SHOP_MANAGER | SHOP_STAFF (Requirement 3.10).
+ *   - Read endpoints additionally require ANY of: platform ADMIN, or
+ *     VENDOR_OWNER | VENDOR_STAFF for the shop.
+ *   - Write endpoints (POST/PATCH/DELETE/stock) require platform ADMIN or
+ *     VENDOR_OWNER | VENDOR_STAFF — the real vendor_employees.role vocabulary
+ *     (VENDOR_OWNER/VENDOR_STAFF/VENDOR_RIDER, enforced by a live DB CHECK
+ *     constraint). This module originally checked a SHOP_ADMIN/SHOP_MANAGER/
+ *     SHOP_STAFF/SHOP_VIEWER vocabulary that no real account can ever carry;
+ *     rewritten to match what shop-transactions.routes.js already does
+ *     correctly. There is no real-vocabulary equivalent of a view-only tier,
+ *     so read and write allow the same two roles.
  *
  * Rate limiting (per design.md Security Model):
  *   - Stock updates: 30/min — shields the FOR UPDATE path from abuse.
@@ -34,12 +40,7 @@ export default async function shopProductRoutes(fastify) {
     const role = request.user?.role
     const shopRole = request.user?.shopRole || request.user?.shop_role
     if (role === 'ADMIN') return
-    if (
-      shopRole === 'SHOP_ADMIN' ||
-      shopRole === 'SHOP_MANAGER' ||
-      shopRole === 'SHOP_STAFF' ||
-      shopRole === 'SHOP_VIEWER'
-    ) {
+    if (shopRole === 'VENDOR_OWNER' || shopRole === 'VENDOR_STAFF') {
       return
     }
     return reply.code(403).send({
@@ -53,17 +54,13 @@ export default async function shopProductRoutes(fastify) {
     const role = request.user?.role
     const shopRole = request.user?.shopRole || request.user?.shop_role
     if (role === 'ADMIN') return
-    if (
-      shopRole === 'SHOP_ADMIN' ||
-      shopRole === 'SHOP_MANAGER' ||
-      shopRole === 'SHOP_STAFF'
-    ) {
+    if (shopRole === 'VENDOR_OWNER' || shopRole === 'VENDOR_STAFF') {
       return
     }
     return reply.code(403).send({
       success: false,
       message:
-        'Forbidden — Shop Admin, Manager, Staff, or Super Admin access required',
+        'Forbidden — Vendor Owner, Vendor Staff, or Super Admin access required',
       code: 'FORBIDDEN',
     })
   }

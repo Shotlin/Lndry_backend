@@ -9,7 +9,10 @@ import { cacheGet, cacheSet, cacheDeletePattern } from '../../utils/cache.js'
  *   - This module exposes paginated listings and single-record reads only.
  *
  * Authorization (project-standards.md, design.md role table):
- *   Only platform ADMIN, SHOP_ADMIN, or SHOP_MANAGER may view financials.
+ *   Only platform ADMIN or VENDOR_OWNER may view financials (see the
+ *   real-vocabulary rationale in shop-financials.routes.js — the design.md
+ *   SHOP_ADMIN/SHOP_MANAGER vocabulary this originally checked can never
+ *   appear on a real account's JWT).
  *   Routes enforce this defensively before invoking the service; the service
  *   exposes `authorizeRead` so unit tests and the controller can share the
  *   same decision.
@@ -25,7 +28,7 @@ import { cacheGet, cacheSet, cacheDeletePattern } from '../../utils/cache.js'
 const CACHE_PREFIX = 'lndry:financials:v1'
 const CACHE_TTL_SECONDS = 900
 
-const STAFF_ROLES_ALLOWED_TO_READ = new Set(['SHOP_ADMIN', 'SHOP_MANAGER'])
+const STAFF_ROLES_ALLOWED_TO_READ = new Set(['VENDOR_OWNER'])
 
 export class ShopFinancialsService {
   /**
@@ -41,9 +44,10 @@ export class ShopFinancialsService {
 
   /**
    * Decide whether `actor` may read shop financials.
-   * Allowed: platform ADMIN OR shop staff with SHOP_ADMIN/MANAGER role.
-   * Explicitly NOT staff/viewer (Requirement 14.5/14.7 — only those with
-   * view_financials in the design.md role table).
+   * Allowed: platform ADMIN OR shop staff with the real VENDOR_OWNER role.
+   * Explicitly NOT VENDOR_STAFF (preserves the original intent that
+   * financial visibility is narrower than general shop access — see
+   * shop-financials.routes.js for the full real-vocabulary rationale).
    *
    * Pure function (no I/O) so the controller and unit tests share semantics.
    *
@@ -58,8 +62,7 @@ export class ShopFinancialsService {
     if (STAFF_ROLES_ALLOWED_TO_READ.has(actor.shopRole)) return { ok: true }
     return {
       ok: false,
-      message:
-        'Only Shop Admin, Shop Manager, or Super Admin can view financials',
+      message: 'Only Vendor Owner or Super Admin can view financials',
       code: 'FORBIDDEN',
     }
   }

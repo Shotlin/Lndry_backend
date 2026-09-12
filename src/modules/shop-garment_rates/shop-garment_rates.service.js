@@ -39,13 +39,13 @@ import { ERROR_CODES } from '../../constants/errors.js'
  *   - Stock 5 → 0:
  *       * invalidate Redis listing cache (also covered by every successful write)
  *       * emit Socket.IO `shop:product:stock_out` to channel `shop:{vendor_id}`
- *       * push notification to all SHOP_ADMIN/SHOP_MANAGER for this shop
+ *       * push notification to all VENDOR_OWNER/VENDOR_STAFF for this shop
  *   - Stock 0 → 5:
  *       * emit Socket.IO `shop:product:restocked` to channel `shop:{vendor_id}`
  *       * enqueue BullMQ `wishlist-restock` job (consumed in task 13.2) so the
  *         worker can fan out push notifications to wishlist customers
  *   - Stock 10 → 3 (threshold=5, still > 0):
- *       * push low-stock notification to all SHOP_ADMIN/SHOP_MANAGER
+ *       * push low-stock notification to all VENDOR_OWNER/VENDOR_STAFF
  *
  * Side effects fire AFTER COMMIT only — a rolled-back transaction never leaks
  * events. Socket.IO is best-effort (catch + log). Notifications go through
@@ -55,11 +55,12 @@ import { ERROR_CODES } from '../../constants/errors.js'
 
 const CACHE_PREFIX = 'lndry:shop-garment_rates:v1'
 const CACHE_TTL_SECONDS = 120
-const STAFF_ROLES_ALLOWED_TO_MUTATE = new Set([
-  'SHOP_ADMIN',
-  'SHOP_MANAGER',
-  'SHOP_STAFF',
-])
+// Real vendor_employees.role vocabulary (DB-CHECK-constrained to
+// VENDOR_OWNER/VENDOR_STAFF/VENDOR_RIDER) — this originally checked
+// SHOP_ADMIN/SHOP_MANAGER/SHOP_STAFF, a vocabulary no real account can ever
+// carry. There is no real-vocabulary equivalent of a view-only tier, so
+// this matches the route-layer canRead/canWrite in shop-garment_rates.routes.js.
+const STAFF_ROLES_ALLOWED_TO_MUTATE = new Set(['VENDOR_OWNER', 'VENDOR_STAFF'])
 
 export class ShopProductsService {
   /**
@@ -78,7 +79,7 @@ export class ShopProductsService {
    *   for the active Socket.IO server. Defaults to the plugin getter so we
    *   don't couple to import order during boot.
    * @param {object} [deps.shopStaffRepository] - Repository used to look up
-   *   SHOP_ADMIN/SHOP_MANAGER user_ids when notifying staff (Req 11.4, 11.9).
+   *   VENDOR_OWNER/VENDOR_STAFF user_ids when notifying staff (Req 11.4, 11.9).
    */
   constructor(repository, deps = {}) {
     this.repo = repository
@@ -164,7 +165,7 @@ export class ShopProductsService {
   }
 
   /**
-   * Push a notification to every active SHOP_ADMIN / SHOP_MANAGER on a
+   * Push a notification to every active VENDOR_OWNER / VENDOR_STAFF on a
    * shop. Centralises the fan-out so stock-out and low-stock notifiers
    * share the same delivery path (Req 11.4, 11.9).
    *
@@ -185,7 +186,7 @@ export class ShopProductsService {
     try {
       userIds = await this.shopStaffRepo.findActiveUserIdsByShopAndRoles(
         shopId,
-        ['SHOP_ADMIN', 'SHOP_MANAGER']
+        ['VENDOR_OWNER', 'VENDOR_STAFF']
       )
     } catch (err) {
       logger.error(
@@ -234,7 +235,7 @@ export class ShopProductsService {
   }
 
   /**
-   * Notify SHOP_ADMIN / SHOP_MANAGER that a product is out of stock
+   * Notify VENDOR_OWNER / VENDOR_STAFF that a product is out of stock
    * (Requirement 11.4).
    *
    * @param {string} shopId
@@ -256,7 +257,7 @@ export class ShopProductsService {
   }
 
   /**
-   * Notify SHOP_ADMIN / SHOP_MANAGER that a product crossed the low-stock
+   * Notify VENDOR_OWNER / VENDOR_STAFF that a product crossed the low-stock
    * threshold (Requirement 11.9). Caller is responsible for confirming
    * the threshold transition; this helper just builds and dispatches the
    * payload.
@@ -417,8 +418,9 @@ export class ShopProductsService {
 
   /**
    * Verify the caller can mutate inventory for the active shop.
-   * Allowed: platform ADMIN OR shop staff with SHOP_ADMIN/MANAGER/STAFF role
-   * for the same vendor_id (Requirement 3.10).
+   * Allowed: platform ADMIN OR VENDOR_OWNER/VENDOR_STAFF for the same
+   * vendor_id (Requirement 3.10) — see shop-garment_rates.routes.js for
+   * the real-vocabulary rationale.
    *
    * The shop-scope middleware already guarantees `request.shopId` matches the
    * staff JWT; this is a defence-in-depth check on role.
@@ -432,7 +434,7 @@ export class ShopProductsService {
     if (STAFF_ROLES_ALLOWED_TO_MUTATE.has(actor.shopRole)) return { ok: true }
     return {
       ok: false,
-      message: 'Only Shop Admin, Manager, or Staff can manage shop garment_rates',
+      message: 'Only Vendor Owner or Vendor Staff can manage shop garment_rates',
       code: 'FORBIDDEN',
     }
   }

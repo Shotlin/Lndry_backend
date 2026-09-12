@@ -214,7 +214,7 @@ describe('stock 5 → 0 transition (Req 11.1, 11.2, 11.3, 11.4)', () => {
     expect(emitOrder).toBeGreaterThan(commitOrder)
   })
 
-  it('pushes a stock-out notification to every active SHOP_ADMIN/SHOP_MANAGER for the shop (Req 11.4)', async () => {
+  it('pushes a stock-out notification to every active VENDOR_OWNER/VENDOR_STAFF for the shop (Req 11.4)', async () => {
     const repo = makeShopProductsRepoMock({ stock_quantity: 5 })
     const shopStaffRepo = makeShopStaffRepoMock([STAFF_USER_A, STAFF_USER_B])
     const notificationsService = makeNotificationsServiceMock()
@@ -231,7 +231,7 @@ describe('stock 5 → 0 transition (Req 11.1, 11.2, 11.3, 11.4)', () => {
 
     expect(
       shopStaffRepo.findActiveUserIdsByShopAndRoles
-    ).toHaveBeenCalledWith(SHOP_ID, ['SHOP_ADMIN', 'SHOP_MANAGER'])
+    ).toHaveBeenCalledWith(SHOP_ID, ['VENDOR_OWNER', 'VENDOR_STAFF'])
 
     expect(notificationsService.sendNotification).toHaveBeenCalledTimes(2)
     const userIds = notificationsService.sendNotification.mock.calls.map(
@@ -583,7 +583,7 @@ describe('rollback path skips all side effects (Req 11.8)', () => {
       SHOP_ID,
       SHOP_PRODUCT_ID,
       { stock_quantity: 0 },
-      { id: USER_ID, shopRole: 'SHOP_VIEWER' }
+      { id: USER_ID, shopRole: 'VENDOR_RIDER' }
     )
 
     expect(result.success).toBe(false)
@@ -1184,7 +1184,7 @@ describe('Req 11.9 — low-stock threshold notifications (extended)', () => {
     expect(notifyOrder).toBeGreaterThan(commitOrder)
   })
 
-  it('queries shop staff scoped by SHOP_ADMIN/SHOP_MANAGER roles only (no SHOP_VIEWER fan-out)', async () => {
+  it('queries shop staff scoped by VENDOR_OWNER/VENDOR_STAFF roles only (no VENDOR_RIDER fan-out)', async () => {
     const repo = makeShopProductsRepoMock({
       stock_quantity: 10,
       low_stock_threshold: 5,
@@ -1204,7 +1204,7 @@ describe('Req 11.9 — low-stock threshold notifications (extended)', () => {
 
     expect(
       shopStaffRepo.findActiveUserIdsByShopAndRoles
-    ).toHaveBeenCalledWith(SHOP_ID, ['SHOP_ADMIN', 'SHOP_MANAGER'])
+    ).toHaveBeenCalledWith(SHOP_ID, ['VENDOR_OWNER', 'VENDOR_STAFF'])
     expect(notificationsService.sendNotification).toHaveBeenCalledTimes(2)
   })
 

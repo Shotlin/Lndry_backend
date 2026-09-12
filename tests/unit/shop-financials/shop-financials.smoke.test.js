@@ -175,21 +175,23 @@ describe('shop-financials schema validation', () => {
 })
 
 describe('ShopFinancialsService.authorizeRead (Requirements 14.5, 14.7)', () => {
-  // Only platform ADMIN, SHOP_ADMIN, SHOP_MANAGER may view financials
+  // Only platform ADMIN or the real VENDOR_OWNER role may view financials
+  // (vendor_employees.role is DB-CHECK-constrained to VENDOR_OWNER/
+  // VENDOR_STAFF/VENDOR_RIDER — SHOP_ADMIN/SHOP_MANAGER can never appear on
+  // a real account's JWT; see shop-financials.routes.js for the rationale).
   const svc = () => new ShopFinancialsService(new ShopFinancialsRepository())
 
   it('allows platform ADMIN', () => {
     expect(svc().authorizeRead({ role: 'ADMIN' }).ok).toBe(true)
   })
 
-  it('allows SHOP_ADMIN and SHOP_MANAGER', () => {
-    expect(svc().authorizeRead({ shopRole: 'SHOP_ADMIN' }).ok).toBe(true)
-    expect(svc().authorizeRead({ shopRole: 'SHOP_MANAGER' }).ok).toBe(true)
+  it('allows VENDOR_OWNER', () => {
+    expect(svc().authorizeRead({ shopRole: 'VENDOR_OWNER' }).ok).toBe(true)
   })
 
-  it('rejects SHOP_STAFF and SHOP_VIEWER (no view_financials permission)', () => {
-    const r1 = svc().authorizeRead({ shopRole: 'SHOP_STAFF' })
-    const r2 = svc().authorizeRead({ shopRole: 'SHOP_VIEWER' })
+  it('rejects VENDOR_STAFF and VENDOR_RIDER (no view_financials permission)', () => {
+    const r1 = svc().authorizeRead({ shopRole: 'VENDOR_STAFF' })
+    const r2 = svc().authorizeRead({ shopRole: 'VENDOR_RIDER' })
     expect(r1.ok).toBe(false)
     expect(r1.code).toBe('FORBIDDEN')
     expect(r2.ok).toBe(false)
