@@ -37,7 +37,13 @@ async function _geocodeViaOla(queryText) {
       }
       return {
         description: r.formatted_address || '',
-        place_id: `ola:${Buffer.from(JSON.stringify(detail)).toString('base64url')}`,
+        // No 'ola:' prefix — a literal ':' in a find-my-way path parameter
+        // value breaks route matching (404s), since colons are find-my-way's
+        // own parameter-syntax character. base64url's alphabet has no
+        // colons, slashes, or anything else path-unsafe, so the id is
+        // self-describing without needing a prefix — see the decode-first
+        // attempt in /place-details below.
+        place_id: Buffer.from(JSON.stringify(detail)).toString('base64url'),
       }
     })
   } catch (err) {
@@ -194,14 +200,18 @@ export default async function mapsRoutes(fastify) {
     const { placeId } = request.params
 
     // Ola-sourced suggestion — the details are already encoded in the id
-    // itself (see _geocodeViaOla), no API call needed to resolve it.
-    if (placeId.startsWith('ola:')) {
-      try {
-        const detail = JSON.parse(Buffer.from(placeId.slice(4), 'base64url').toString('utf8'))
-        return reply.code(200).send(success(detail, 'Place details fetched'))
-      } catch (err) {
-        return reply.code(400).send(error('Invalid place id', 'INVALID_PLACE_ID'))
+    // itself (see _geocodeViaOla), no API call needed to resolve it. No
+    // distinguishing prefix on the id (see the comment there), so just
+    // attempt the decode — a real Google place_id or a 'mock_place_N' id
+    // never happens to parse as base64url JSON with a numeric `lat`, so
+    // this can't misfire on those.
+    try {
+      const decoded = JSON.parse(Buffer.from(placeId, 'base64url').toString('utf8'))
+      if (decoded && typeof decoded.lat === 'number') {
+        return reply.code(200).send(success(decoded, 'Place details fetched'))
       }
+    } catch (err) {
+      // Not an Ola-encoded id — fall through to Google/mock handling below.
     }
 
     const apiKey = process.env.GOOGLE_MAPS_API_KEY || env.GOOGLE_MAPS_API_KEY
