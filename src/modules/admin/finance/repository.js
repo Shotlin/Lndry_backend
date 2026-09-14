@@ -7,7 +7,14 @@ import { query } from '../../../config/database.js'
 export class AdminFinanceRepository {
   static SHOP_COLUMNS = `
     s.id, s.name, s.commission_rate, s.is_active,
-    s.bank_account_number, s.bank_ifsc, s.bank_name, s.bank_holder_name
+    CASE
+      WHEN s.bank_account_number IS NOT NULL
+       AND NULLIF(BTRIM(s.bank_account_number), '') IS NOT NULL
+       AND s.bank_ifsc IS NOT NULL
+       AND NULLIF(BTRIM(s.bank_ifsc), '') IS NOT NULL
+      THEN TRUE
+      ELSE FALSE
+    END AS payout_bank_ready
   `
 
   static TX_COLUMNS = `
