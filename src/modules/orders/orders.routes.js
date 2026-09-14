@@ -13,6 +13,7 @@ import {
   adminAssignRiderSchema,
   prepareOrderSchema,
 } from './orders.schema.js'
+import { blockLegacyAdminOrderMutation } from '../admin/orders/orders.lifecycle-guard.js'
 
 /**
  * Orders routes plugin
@@ -151,12 +152,12 @@ export default async function ordersRoutes(fastify) {
   // PUT /admin/:id/status — Update order status [ADMIN]
   fastify.put('/admin/:id/status', {
     schema: adminUpdateStatusSchema,
-    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN']), blockLegacyAdminOrderMutation],
   }, controller.adminUpdateStatus.bind(controller))
 
   // PUT /admin/:id/rider — Assign rider [ADMIN]
   fastify.put('/admin/:id/rider', {
     schema: adminAssignRiderSchema,
-    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
+    preHandler: [fastify.authenticate, fastify.authorize(['ADMIN']), blockLegacyAdminOrderMutation],
   }, controller.adminAssignRider.bind(controller))
 }

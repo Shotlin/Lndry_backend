@@ -258,6 +258,7 @@ beforeEach(() => {
           name: 'Quick Laundry',
           owner_id: VENDOR_OWNER_ID,
           status: 'DRAFT',
+          requested_daily_capacity: 50,
           created_at: new Date().toISOString()
         }]
       }
@@ -275,6 +276,7 @@ beforeEach(() => {
           owner_id: VENDOR_OWNER_ID,
           status: 'DRAFT',
           requested_service_radius_km: 5.00,
+          requested_daily_capacity: 50,
           approved_service_radius_km: 5.00,
           created_at: new Date().toISOString()
         }]
@@ -289,6 +291,7 @@ beforeEach(() => {
           owner_id: VENDOR_OWNER_ID,
           status: 'DRAFT',
           requested_service_radius_km: 5.00,
+          requested_daily_capacity: 50,
           approved_service_radius_km: 5.00,
           address_line1: '123 Street',
           city: 'Metropolis',
@@ -343,7 +346,8 @@ beforeEach(() => {
       return {
         rows: [
           { id: 'doc-1', document_type: 'owner_identity', file_url: 'private://1', status: 'APPROVED' },
-          { id: 'doc-2', document_type: 'shop_photo', file_url: 'private://2', status: 'APPROVED' }
+          { id: 'doc-2', document_type: 'shop_photo', file_url: 'private://2', status: 'APPROVED' },
+          { id: 'doc-3', document_type: 'service_list', file_url: 'private://3', status: 'APPROVED' }
         ]
       }
     }
@@ -361,7 +365,7 @@ beforeEach(() => {
     }
 
     // quotes pricing selection and config check
-    if (sql.includes('vendor_service_rates') && sql.includes('vendor_services') && sql.includes('LIMIT 1')) {
+    if (sql.includes('SELECT 1') && sql.includes('vendor_service_rates') && sql.includes('vendor_services') && sql.includes('LIMIT 1')) {
       return {
         rows: [{ configured: 1 }]
       }

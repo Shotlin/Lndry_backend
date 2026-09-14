@@ -574,10 +574,11 @@ describe('createVendorEmployeeSchema — permissions and role validation', () =>
     expect(PERMISSION_ENUM).toContain('reports.global_view')
   })
 
-  it('lists exactly the 2 staff roles from target structure', () => {
+  it('lists the canonical owner, staff, and rider vendor roles', () => {
     expect(VALID_ROLES).toEqual([
       'VENDOR_OWNER',
       'VENDOR_STAFF',
+      'VENDOR_RIDER',
     ])
   })
 
