@@ -92,21 +92,6 @@ function hasCompleteBankDetails(bank) {
   )
 }
 
-/**
- * Default disbursement implementation — there is no real bank API in the
- * MVP, so the worker just confirms the payout. Production should inject a
- * disbursement function via the constructor that returns a payout
- * reference (e.g. RazorpayX payout id) or throws on failure.
- *
- * @param {object} financial - locked shop_financials row
- * @returns {Promise<{payoutRef: string}>}
- */
-async function defaultDisbursement(financial) {
-  // Stable, deterministic reference per financial row so retries land on
-  // the same idempotency key in any future real disbursement adapter.
-  return { payoutRef: `INTERNAL-${financial.id}` }
-}
-
 export class PayoutService {
   /**
    * @param {object} [deps]
@@ -135,7 +120,12 @@ export class PayoutService {
       )
 
     this.queue = deps.queue || null
-    this.disburse = deps.disburse || defaultDisbursement
+    // A payout may only become PAID after an injected provider adapter
+    // returns its external evidence/reference.  An INTERNAL-* reference is
+    // not payment evidence, so a missing adapter is deliberately a
+    // configuration hold, not a successful MVP fallback.
+    this.disburse =
+      typeof deps.disburse === 'function' ? deps.disburse : null
   }
 
   // ────────────────────────────────────────────────────────
@@ -333,6 +323,50 @@ export class PayoutService {
           reason: 'missing bank details',
         }
         return result
+      }
+
+      // Do not fabricate a bank payout when this runtime has no configured
+      // provider. This is a non-transient configuration condition: hold the
+      // row immediately without consuming retry attempts, so the weekly
+      // worker cannot manufacture a PAID state or repeatedly retry forever.
+      if (!this.disburse) {
+        const held = await this.writeRepo.transitionPayoutStatus(
+          client,
+          locked.id,
+          ['PENDING', 'PROCESSING'],
+          'HELD',
+          { failureReason: 'payout provider not configured' }
+        )
+        await client.query('COMMIT')
+        logger.error(
+          {
+            financialId,
+            shopId: locked.vendor_id,
+            action: 'payout_held_provider_not_configured',
+          },
+          'Payout held — provider not configured'
+        )
+
+        emitAudit('payout_held', {
+          actor_user_id: null,
+          actor_role: null,
+          actor_shop_id: locked.vendor_id,
+          target_type: 'shop_financial',
+          target_id: financialId,
+          before: { payout_status: locked.payout_status },
+          after: {
+            payout_status: 'HELD',
+            reason: 'payout_provider_not_configured',
+          },
+        })
+
+        return {
+          financialId,
+          shopId: locked.vendor_id,
+          outcome: 'HELD_PROVIDER_NOT_CONFIGURED',
+          payoutStatus: held?.payout_status || 'HELD',
+          reason: 'payout provider not configured',
+        }
       }
 
       // ── Req 8.2 — PENDING → PROCESSING ──

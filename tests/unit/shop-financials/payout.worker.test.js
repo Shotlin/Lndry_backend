@@ -9,7 +9,7 @@
 // Coverage targets (from the task brief):
 //   • weekly-run filters PENDING + period_end <= asOfSunday
 //   • process-payout PENDING→PROCESSING→PAID happy path with ledger entry
-//   • missing bank → HELD (no attempt burn)
+//   • missing bank/provider → HELD (no attempt burn)
 //   • transient failure increments attempt_count and goes back to PENDING
 //   • third failure → HELD with reason 'max attempts'
 //   • set-hold and release-hold transitions
@@ -501,6 +501,53 @@ describe('createPayoutProcessor — missing bank details (Req 8.6)', () => {
     )
 
     expect(result.outcome).toBe('HELD_MISSING_BANK')
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════
+// process-payout — no provider configured (production safety)
+// ═══════════════════════════════════════════════════════════════
+
+describe('createPayoutProcessor — missing payout provider', () => {
+  it('holds a bank-ready payout instead of fabricating an INTERNAL reference', async () => {
+    const writeRepository = {
+      lockFinancialById: vi.fn().mockResolvedValueOnce(lockedRow()),
+      findShopBankDetails: vi.fn().mockResolvedValueOnce(validBank),
+      transitionPayoutStatus: vi
+        .fn()
+        .mockResolvedValueOnce(lockedRow({ payout_status: 'HELD' })),
+      incrementAttemptCount: vi.fn(),
+    }
+    const ledger = { recordEntry: vi.fn() }
+    const service = new PayoutService({
+      writeRepository,
+      queue: makeQueueMock(),
+      ledgerWriteService: ledger,
+      financialsService: { invalidateForShop: vi.fn() },
+    })
+    const process = createPayoutProcessor({ payoutService: service })
+
+    const result = await process(
+      makeJob({
+        name: 'process-payout',
+        data: { type: 'process-payout', financialId: FIN_A },
+      })
+    )
+
+    expect(result).toMatchObject({
+      outcome: 'HELD_PROVIDER_NOT_CONFIGURED',
+      payoutStatus: 'HELD',
+      reason: 'payout provider not configured',
+    })
+    expect(writeRepository.transitionPayoutStatus).toHaveBeenCalledWith(
+      expect.anything(),
+      FIN_A,
+      ['PENDING', 'PROCESSING'],
+      'HELD',
+      expect.objectContaining({ failureReason: 'payout provider not configured' })
+    )
+    expect(writeRepository.incrementAttemptCount).not.toHaveBeenCalled()
+    expect(ledger.recordEntry).not.toHaveBeenCalled()
   })
 })
 

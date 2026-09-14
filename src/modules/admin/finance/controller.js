@@ -79,7 +79,12 @@ export class AdminFinanceController {
     }))
   }
 
-  /** POST /vendors/:shopId/payouts/:periodId/mark-paid */
+  /**
+   * POST /vendors/:shopId/payouts/:periodId/mark-paid
+   *
+   * Compatibility endpoint. The service is deliberately fail-closed until a
+   * real payout provider/evidence workflow replaces this legacy shortcut.
+   */
   async markPaid(request, reply) {
     const paramParsed = markPaidParamSchema.safeParse(request.params)
     if (!paramParsed.success) {

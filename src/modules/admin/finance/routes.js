@@ -9,7 +9,8 @@ import { AdminFinanceRepository } from './repository.js'
  * All routes require:
  *   - Valid JWT (fastify.authenticate)
  *   - finance.global_view permission (ADMIN role)
- *   - mark-paid additionally requires shop_financials.mark_paid
+ *   - legacy mark-paid route is retained only as a fail-closed compatibility
+ *     response until a provider-evidenced payout workflow is connected.
  */
 export default async function adminFinanceRoutes(fastify) {
   const repository = new AdminFinanceRepository()
@@ -27,7 +28,9 @@ export default async function adminFinanceRoutes(fastify) {
     })
   }
 
-  // Permission guard: shop_financials.mark_paid (ADMIN only)
+  // Permission guard: shop_financials.mark_paid (ADMIN only). The endpoint
+  // remains fail-closed; this guard prevents disclosing its compatibility
+  // response to an untrusted caller.
   const requireMarkPaid = async function (request, reply) {
     const role = request.user?.role
     if (role === 'ADMIN') return
