@@ -12,8 +12,9 @@ export class PaymentsRepository {
   /**
    * Create a payment record
    */
-  async create(data) {
-    const { rows } = await query(
+  async create(data, client = null) {
+    const exec = client ? (text, params) => client.query(text, params) : query
+    const { rows } = await exec(
       `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, expires_at, metadata, order_draft_id, purpose)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING ${PAYMENT_COLUMNS}`,
@@ -77,6 +78,19 @@ export class PaymentsRepository {
     const { rows } = await query(
       `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE order_id = $1 AND purpose = $2 ORDER BY created_at DESC LIMIT 1`,
       [orderId, purpose]
+    )
+    return rows[0] ? this._format(rows[0]) : null
+  }
+
+  /**
+   * Find a PAID payment for a given order draft — the advance leg, before
+   * the real order exists (order_id is still null at that point). Distinct
+   * from findByOrderId, which only ever matches once order_id is set.
+   */
+  async findPaidByOrderDraftId(orderDraftId) {
+    const { rows } = await query(
+      `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE order_draft_id = $1 AND status = 'PAID' ORDER BY created_at DESC LIMIT 1`,
+      [orderDraftId]
     )
     return rows[0] ? this._format(rows[0]) : null
   }

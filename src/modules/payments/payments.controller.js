@@ -34,6 +34,17 @@ export class PaymentsController {
   }
 
   /**
+   * Pay from wallet balance
+   */
+  async payWithWallet(request, reply) {
+    const result = await this.service.payWithWallet(request.user.id, request.body)
+    if (!result.success) {
+      return reply.code(400).send(error(result.message, 'WALLET_PAY_FAILED'))
+    }
+    return reply.send(success(result.payment, 'Payment successful'))
+  }
+
+  /**
    * Razorpay webhook — no auth, verified via signature
    */
   async webhook(request, reply) {

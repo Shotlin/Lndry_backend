@@ -159,64 +159,6 @@ export const verifyTopUpSchema = {
   },
 }
 
-export const payFromWalletSchema = {
-  tags: ['Wallet'],
-  summary: 'Pay for an order from wallet',
-  body: {
-    type: 'object',
-    required: ['orderId'],
-    properties: {
-      orderId: { type: 'string', format: 'uuid' },
-    },
-  },
-  response: {
-    200: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        message: { type: 'string' },
-        data: {
-          type: 'object',
-          properties: {
-            wallet: walletResponseSchema,
-            transaction: transactionResponseSchema,
-          },
-        },
-      },
-    },
-  },
-}
-
-export const transferSchema = {
-  tags: ['Wallet'],
-  summary: 'Transfer money to another user by phone',
-  body: {
-    type: 'object',
-    required: ['phone', 'amount'],
-    properties: {
-      phone: { type: 'string', pattern: '^[6-9]\\d{9}$' },
-      amount: { type: 'number', minimum: 1, maximum: 10000 },
-      description: { type: 'string', maxLength: 255 },
-    },
-  },
-  response: {
-    200: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        message: { type: 'string' },
-        data: {
-          type: 'object',
-          properties: {
-            wallet: walletResponseSchema,
-            transaction: transactionResponseSchema,
-          },
-        },
-      },
-    },
-  },
-}
-
 // ─── Admin Schemas ─────────────────────────────────────
 
 export const adminCreditSchema = {

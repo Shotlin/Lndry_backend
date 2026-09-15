@@ -1,15 +1,9 @@
 import crypto from 'node:crypto'
-import { getClient } from '../../src/config/database.js'
-import { env } from '../../src/config/env.js'
-import { orderQueue } from '../../src/config/bullmq.js'
-import { logger } from '../../src/config/logger.js'
-import { razorpay } from '../../src/config/razorpay.js'
-import { getOffsetLimit, buildPagination } from '../../src/utils/paginate.js'
-import { OrdersRepository } from '../../src/modules/orders/orders.repository.js'
-
-const INLINE_AUTO_ASSIGN_IN_NON_PROD =
-  process.env.AUTO_ASSIGN_INLINE === 'true' ||
-  process.env.NODE_ENV !== 'production'
+import { getClient } from '../../config/database.js'
+import { env } from '../../config/env.js'
+import { logger } from '../../config/logger.js'
+import { razorpay } from '../../config/razorpay.js'
+import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 
 /**
  * Wallet service — business logic for digital wallet
@@ -17,7 +11,6 @@ const INLINE_AUTO_ASSIGN_IN_NON_PROD =
 export class WalletService {
   constructor(repository) {
     this.repo = repository
-    this.ordersRepo = new OrdersRepository()
   }
 
   /**
@@ -237,188 +230,6 @@ export class WalletService {
   }
 
   /**
-   * Pay for an order from wallet balance
-   */
-  async payFromWallet(userId, orderId) {
-    const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
-    if (!order) {
-      return { success: false, message: 'Order not found' }
-    }
-
-    if (order.paymentMethod !== 'WALLET') {
-      return { success: false, message: 'Order is not set for wallet payment' }
-    }
-
-    if (order.paymentStatus === 'PAID') {
-      return { success: false, message: 'Order is already paid' }
-    }
-
-    const client = await getClient()
-
-    try {
-      await client.query('BEGIN')
-
-      const wallet = await this.repo.getForUpdate(client, userId)
-      if (!wallet) {
-        await client.query('ROLLBACK')
-        return { success: false, message: 'Wallet not found' }
-      }
-
-      if (wallet.balance < order.totalAmount) {
-        await client.query('ROLLBACK')
-        return {
-          success: false,
-          message: `Insufficient balance. Need ₹${order.totalAmount}, have ₹${wallet.balance}`,
-        }
-      }
-
-      const result = await this.repo.debit(
-        client,
-        wallet.id,
-        order.totalAmount,
-        `Payment for order ${order.orderNumber}`,
-        order.id
-      )
-
-      await client.query('COMMIT')
-
-      // Update order payment status
-      await this.ordersRepo.updateStatus(orderId, 'WAITING_FOR_VENDOR_CONFIRMATION', {
-        paymentStatus: 'PAID',
-      })
-      try {
-        await orderQueue.add(
-          'auto-reject',
-          {
-            type: 'auto-reject',
-            orderId,
-          },
-          {
-            jobId: `auto-reject-${orderId}`,
-            delay: 15 * 60 * 1000,
-            removeOnComplete: true,
-          }
-        )
-      } catch (err) {
-        logger.warn({ err: err.message, orderId }, 'Failed to queue auto-reject on wallet payment')
-      }
-
-      // Clear cart and send notification AFTER successful wallet deduction
-      try {
-        const { CartRepository } = await import('../../src/modules/cart/cart.repository.js')
-        const cartRepo = new CartRepository()
-        await cartRepo.clearCart(userId)
-        await cartRepo.clearExtras(userId)
-      } catch (cartErr) {
-        logger.warn({ err: cartErr.message, userId }, 'Cart clear after wallet pay failed (non-critical)')
-      }
-
-      // Send "Order placed" notification only after confirmed payment
-      try {
-        const { NotificationsRepository } = await import('../../src/modules/notifications/notifications.repository.js')
-        const { NotificationsService } = await import('../../src/modules/notifications/notifications.service.js')
-        const { buildCustomerOrderEventNotification } = await import('../../src/modules/notifications/customer-order-event.helper.js')
-        const notifService = new NotificationsService(new NotificationsRepository(), null)
-        await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
-          orderId: order.id,
-          orderNumber: order.orderNumber || order.order_number,
-          timelineType: 'ORDER_PLACED',
-          status: 'CONFIRMED',
-        }))
-      } catch (notifErr) {
-        logger.warn({ err: notifErr.message, orderId }, 'Notification after wallet pay failed (non-critical)')
-      }
-
-      logger.info(
-        { userId, orderId, amount: order.totalAmount },
-        'Wallet payment successful'
-      )
-
-      return { success: true, ...result }
-    } catch (err) {
-      await client.query('ROLLBACK')
-      logger.error({ err, userId, orderId }, 'Wallet payment failed')
-      return { success: false, message: 'Payment failed: ' + err.message }
-    } finally {
-      client.release()
-    }
-  }
-
-  /**
-   * Transfer money to another user by phone number
-   */
-  async transfer(userId, { phone, amount, description }) {
-    const recipient = await this.repo.findUserByPhone(phone)
-    if (!recipient) {
-      return { success: false, message: 'Recipient not found' }
-    }
-
-    if (recipient.id === userId) {
-      return { success: false, message: 'Cannot transfer to yourself' }
-    }
-
-    const client = await getClient()
-
-    try {
-      await client.query('BEGIN')
-
-      // Lock sender wallet
-      const senderWallet = await this.repo.getForUpdate(client, userId)
-      if (!senderWallet) {
-        await client.query('ROLLBACK')
-        return { success: false, message: 'Wallet not found' }
-      }
-
-      if (senderWallet.balance < amount) {
-        await client.query('ROLLBACK')
-        return { success: false, message: 'Insufficient balance' }
-      }
-
-      // Ensure recipient wallet exists
-      await client.query(
-        `INSERT INTO wallets (user_id, balance) VALUES ($1, 0) ON CONFLICT (user_id) DO NOTHING`,
-        [recipient.id]
-      )
-
-      // Lock recipient wallet
-      const recipientWallet = await this.repo.getForUpdate(client, recipient.id)
-
-      // Debit sender
-      const senderResult = await this.repo.debit(
-        client,
-        senderWallet.id,
-        amount,
-        description || `Transfer to ${recipient.name || recipient.phone}`,
-        `transfer:${recipient.id}`
-      )
-
-      // Credit recipient
-      await this.repo.credit(
-        client,
-        recipientWallet.id,
-        amount,
-        `Transfer from user`,
-        `transfer:${userId}`
-      )
-
-      await client.query('COMMIT')
-
-      logger.info(
-        { from: userId, to: recipient.id, amount },
-        'Wallet transfer successful'
-      )
-
-      return { success: true, ...senderResult }
-    } catch (err) {
-      await client.query('ROLLBACK')
-      logger.error({ err, userId, amount }, 'Wallet transfer failed')
-      return { success: false, message: 'Transfer failed: ' + err.message }
-    } finally {
-      client.release()
-    }
-  }
-
-  /**
    * Admin: credit a user's wallet (refunds, promotions, etc.)
    */
   async adminCredit(targetUserId, { amount, description, referenceId }) {
@@ -433,7 +244,7 @@ export class WalletService {
    * Admin: get wallet overview statistics
    */
   async getAdminStats() {
-    const { query: dbQuery } = await import('../../src/config/database.js')
+    const { query: dbQuery } = await import('../../config/database.js')
 
     const balanceRes = await dbQuery('SELECT COALESCE(SUM(balance), 0) AS total_balance FROM wallets')
     const creditRes = await dbQuery(
@@ -451,48 +262,6 @@ export class WalletService {
       totalAdded: parseFloat(creditRes.rows[0].total),
       totalUsed: parseFloat(debitRes.rows[0].total),
       totalRefunded: parseFloat(refundRes.rows[0].total),
-    }
-  }
-
-  async _queueAutoAssign(orderId, source = 'WALLET_SERVICE') {
-    try {
-      await orderQueue.add(
-        'auto-assign',
-        {
-          type: 'auto-assign',
-          orderId,
-          source,
-        },
-        {
-          jobId: `auto-assign-${orderId}`,
-          removeOnComplete: true,
-        }
-      )
-      if (INLINE_AUTO_ASSIGN_IN_NON_PROD) {
-        await this._runAutoAssignFallback(orderId, `${source}_DEV_INLINE`)
-      }
-    } catch (err) {
-      logger.warn({ err, orderId, source }, 'Failed to queue auto-assign job')
-      await this._runAutoAssignFallback(orderId, source)
-    }
-  }
-
-  async _runAutoAssignFallback(orderId, source) {
-    try {
-      const { processOrderJob } = await import('../../workers/processors.js')
-      await processOrderJob({
-        data: {
-          type: 'auto-assign',
-          orderId,
-          source: `${source}_INLINE_FALLBACK`,
-        },
-      })
-      logger.info({ orderId, source }, 'Inline auto-assign fallback executed')
-    } catch (fallbackErr) {
-      logger.error(
-        { err: fallbackErr, orderId, source },
-        'Inline auto-assign fallback failed'
-      )
     }
   }
 }

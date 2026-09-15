@@ -190,9 +190,9 @@ export const buildApp = async () => {
   })
 
   // Wallet — fully implemented
-  // await app.register(import('./modules/wallet/wallet.routes.js'), {
-  //   prefix: '/api/v1/wallet',
-  // })
+  await app.register(import('./modules/wallet/wallet.routes.js'), {
+    prefix: '/api/v1/wallet',
+  })
 
   // Coupons — fully implemented
   // await app.register(import('./modules/coupons/coupons.routes.js'), {

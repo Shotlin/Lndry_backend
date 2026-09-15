@@ -5,7 +5,8 @@ import { razorpay } from '../../config/razorpay.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
-import { query } from '../../config/database.js'
+import { WalletRepository } from '../wallet/wallet.repository.js'
+import { query, getClient } from '../../config/database.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -18,6 +19,7 @@ export class PaymentsService {
   constructor(repository) {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
+    this.walletRepo = new WalletRepository()
   }
 
   /**
@@ -197,6 +199,172 @@ export class PaymentsService {
         purpose,
       },
     }
+  }
+
+  /**
+   * Pay a draft's advance, or an existing order's balance/full amount,
+   * directly from the customer's wallet — a same-transaction alternative
+   * to Razorpay's create+verify round trip. Debits the wallet and inserts
+   * a payments row already PAID in one atomic step, then runs the exact
+   * same post-paid side effects verifyPayment runs for that purpose, so
+   * placeOrderFromDraft (which only ever checks payments.status='PAID',
+   * never how it got there) behaves identically regardless of method.
+   */
+  async payWithWallet(userId, body) {
+    const { orderId, order_draft_id, orderDraftId } = body || {}
+    const orderDraftIdVal = order_draft_id || orderDraftId
+
+    let amountPaise = 0
+    let purpose
+
+    if (orderDraftIdVal) {
+      const draftRes = await query('SELECT id, payable_amount_paise FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
+      const draft = draftRes.rows[0]
+      if (!draft) {
+        return { success: false, message: 'Order draft not found' }
+      }
+      const existingPaid = await this.repo.findPaidByOrderDraftId(orderDraftIdVal)
+      if (existingPaid) {
+        return { success: false, message: 'Advance payment already completed' }
+      }
+      purpose = 'ADVANCE'
+      const advancePaise = await this._getAdvanceAmountPaise()
+      amountPaise = Math.min(advancePaise, draft.payable_amount_paise)
+    } else if (orderId) {
+      const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
+      if (!order) {
+        return { success: false, message: 'Order not found' }
+      }
+
+      const alreadyPaidRupees = await this.repo.sumPaidByOrderId(orderId)
+      purpose = alreadyPaidRupees > 0 ? 'BALANCE' : 'FULL'
+
+      if (purpose === 'FULL') {
+        if (order.paymentStatus === 'PAID') {
+          return { success: false, message: 'Order is already paid' }
+        }
+        amountPaise = Math.round(order.totalAmount * 100)
+      } else {
+        const balancePaise = Math.round(order.totalAmount * 100) - Math.round(alreadyPaidRupees * 100)
+        amountPaise = Math.max(0, balancePaise)
+        if (amountPaise === 0) {
+          return { success: false, message: 'No balance due' }
+        }
+      }
+    } else {
+      return { success: false, message: 'Either orderId or order_draft_id must be provided' }
+    }
+
+    const amountRupees = amountPaise / 100
+    const client = await getClient()
+    let payment
+
+    try {
+      await client.query('BEGIN')
+
+      const wallet = await this.walletRepo.getForUpdate(client, userId)
+      if (!wallet) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Wallet not found' }
+      }
+      if (wallet.balance < amountRupees) {
+        await client.query('ROLLBACK')
+        return { success: false, message: `Insufficient wallet balance. Need ₹${amountRupees}, have ₹${wallet.balance}` }
+      }
+
+      await this.walletRepo.debit(
+        client,
+        wallet.id,
+        amountRupees,
+        orderId ? `Payment for order ${orderId}` : 'Order advance payment',
+        orderId || orderDraftIdVal
+      )
+
+      payment = await this.repo.create(
+        {
+          orderId: orderId || null,
+          orderDraftId: orderDraftIdVal || null,
+          userId,
+          amount: amountRupees,
+          currency: 'INR',
+          status: 'PAID',
+          method: 'WALLET',
+          purpose,
+        },
+        client
+      )
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      logger.error({ err, userId, orderId, orderDraftId: orderDraftIdVal }, 'Wallet payment failed')
+      return { success: false, message: 'Payment failed: ' + err.message }
+    } finally {
+      client.release()
+    }
+
+    // Run the same post-paid side effects verifyPayment runs, keyed by
+    // purpose — ADVANCE needs none here: placeOrderFromDraft (called next
+    // by the client, exactly like after a Razorpay verify) does the rest.
+    if (orderId && purpose === 'BALANCE') {
+      await this.ordersRepo.updateStatus(orderId, undefined, { paymentStatus: 'PAID' })
+      try {
+        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
+        const { NotificationsService } = await import('../notifications/notifications.service.js')
+        const notifService = new NotificationsService(new NotificationsRepository(), null)
+        await notifService.sendNotification(userId, {
+          title: 'Balance payment received',
+          body: `Your remaining balance of ₹${amountRupees} has been received.`,
+          type: 'order_balance_paid',
+          data: { orderId },
+        })
+      } catch (err) {
+        logger.warn({ err: err.message, orderId }, 'Balance-paid notification failed (non-critical)')
+      }
+    } else if (orderId && purpose === 'FULL') {
+      await this.ordersRepo.updateStatus(orderId, 'WAITING_VENDOR_CONFIRMATION', { paymentStatus: 'PAID' })
+      try {
+        await orderQueue.add(
+          'auto-reject',
+          { type: 'auto-reject', orderId },
+          { jobId: `auto-reject-${orderId}`, delay: 15 * 60 * 1000, removeOnComplete: true }
+        )
+      } catch (err) {
+        logger.warn({ err: err.message, orderId }, 'Failed to queue auto-reject on wallet payment')
+      }
+      try {
+        const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
+        if (order) {
+          const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
+          const { NotificationsService } = await import('../notifications/notifications.service.js')
+          const { buildCustomerOrderEventNotification } = await import('../notifications/customer-order-event.helper.js')
+          const notifService = new NotificationsService(new NotificationsRepository(), null)
+          await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
+            orderId: order.id,
+            orderNumber: order.orderNumber || order.order_number,
+            timelineType: 'ORDER_PLACED',
+            status: 'CONFIRMED',
+          }))
+        }
+      } catch (err) {
+        logger.warn({ err: err.message, orderId }, 'Order notification after wallet payment failed (non-critical)')
+      }
+    }
+
+    if (purpose !== 'BALANCE') {
+      try {
+        const { CartRepository } = await import('../../../archived_modules/cart/cart.repository.js')
+        const cartRepo = new CartRepository()
+        await cartRepo.clearCart(userId)
+        await cartRepo.clearExtras(userId)
+      } catch (err) {
+        logger.warn({ err: err.message, userId }, 'Cart clear after wallet payment failed (non-critical)')
+      }
+    }
+
+    logger.info({ userId, orderId, orderDraftId: orderDraftIdVal, purpose, amount: amountRupees }, 'Wallet payment successful')
+
+    return { success: true, payment }
   }
 
   /**
