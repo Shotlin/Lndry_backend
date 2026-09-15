@@ -96,6 +96,15 @@ const orderResponseSchema = {
     scheduledSlotStart: { type: ['string', 'null'] },
     scheduledSlotEnd: { type: ['string', 'null'] },
     scheduledSlotLabel: { type: ['string', 'null'] },
+    // Pickup slot fields — computed by OrdersRepository._format() /
+    // joined from vendor_slots, but omitted here until now, which meant
+    // fast-json-stringify silently stripped them before the app ever saw
+    // them (same class of bug flagged above for the reconciliation fields).
+    vendorSlotId: { type: ['string', 'null'] },
+    pickupDate: { type: ['string', 'null'] },
+    pickupSlotStartTime: { type: ['string', 'null'] },
+    pickupSlotEndTime: { type: ['string', 'null'] },
+    isExpressPickup: { type: 'boolean' },
     timeline: { type: 'array', items: timelineItemSchema },
     tracking: trackingSchema,
     // Advance-payment + rider/vendor reconciliation feature — these are

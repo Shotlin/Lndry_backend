@@ -15,6 +15,7 @@ import {
   SHOP_ROLE_DEFAULT_PERMISSIONS,
 } from '../../utils/permissions.js'
 import { ERROR_CODES } from '../../constants/errors.js'
+import { VendorOrdersService } from '../vendor-orders/vendor-orders.service.js'
 
 const MAX_STAFF_PER_SHOP = 50
 const MAX_SHOPS_PER_USER = 10
@@ -330,16 +331,57 @@ export class VendorEmployeesService {
     }
 
     // ── 4. Branch by body shape ────────────────────────────────────
-    if (isNewUserShape) {
-      return this._createWithNewUser({ data, ctx, shopId, role, permissions })
+    const result = isNewUserShape
+      ? await this._createWithNewUser({ data, ctx, shopId, role, permissions })
+      : await this._createWithExistingUser({ data, ctx, shopId, role, permissions })
+
+    // A newly-added (or re-attached) rider might be the first one this
+    // shop has ever had — retry any order stuck at VENDOR_ACCEPTED with
+    // nobody assigned (see backfillPickupAssignments for why this can
+    // happen). They might also be the first one available again since a
+    // previous rider was deactivated/removed while still holding jobs
+    // (see reassignOrphanedAssignments). Never let either affect the
+    // create response either way.
+    if (result.success && (role === 'VENDOR_RIDER' || role === 'VENDOR_STAFF')) {
+      this._backfillPickupAssignments(shopId)
+      this._reassignOrphanedAssignments(shopId)
     }
-    return this._createWithExistingUser({
-      data,
-      ctx,
-      shopId,
-      role,
-      permissions,
-    })
+
+    return result
+  }
+
+  /**
+   * Fire-and-forget retry of stuck pickup assignments for a shop. Never
+   * throws into the caller — a failure here must not affect the
+   * create/update response that triggered it.
+   * @private
+   */
+  _backfillPickupAssignments(shopId) {
+    new VendorOrdersService()
+      .backfillPickupAssignments(shopId)
+      .catch((err) =>
+        logger.warn({ err: err.message, shopId }, 'Backfill pickup assignment failed (non-critical)'),
+      )
+  }
+
+  /**
+   * Fire-and-forget reassignment of any order still pointing at a rider/
+   * staff who is no longer active at this shop (deactivated, removed, or
+   * swapped for a different phone number) to whoever IS active now, if
+   * anyone. Complements backfillPickupAssignments, which only covers
+   * orders that never got an assignment at all — this covers the mirror
+   * case where an assignment was made and then its assignee went away,
+   * leaving the order invisible to every rider (the old one can no
+   * longer log in to see it; a new one's job list only ever matches
+   * their own employee_id). Never throws into the caller.
+   * @private
+   */
+  _reassignOrphanedAssignments(shopId) {
+    new VendorOrdersService()
+      .reassignOrphanedAssignments(shopId)
+      .catch((err) =>
+        logger.warn({ err: err.message, shopId }, 'Reassign orphaned assignment failed (non-critical)'),
+      )
   }
 
   /**
@@ -534,12 +576,7 @@ export class VendorEmployeesService {
           // phone/email should reactivate that assignment rather than
           // fail, since the `users.phone`/`users.email` unique
           // constraints are never freed by a soft-delete (see
-          // 030_shop_staff.sql). We only auto-reuse the account when it
-          // already has SOME history with this shop — an unrelated
-          // account (a customer, or staff at a different shop) that
-          // happens to share this phone/email still hard-conflicts, so
-          // this can't be used to silently attach a stranger's account
-          // to a shop's roster.
+          // 030_shop_staff.sql).
           const existingAssignment =
             await this.repo.findAssignmentByUserAndShopAnyStatus(
               client,
@@ -557,54 +594,90 @@ export class VendorEmployeesService {
           }
 
           if (!existingAssignment) {
-            await client.query('ROLLBACK')
-            // `findUserByEmailOrPhone` matches on email OR phone — report
-            // whichever field actually collided instead of always blaming
-            // email. This matters for rider creation, which never sends
-            // an email at all, so a match there can only ever be the
-            // phone.
-            const phoneCollided =
-              phone && dup.phone === phone && (!email || dup.email !== email)
-            if (phoneCollided) {
-              throw makeServiceError(
-                409,
-                ERROR_CODES.PHONE_TAKEN,
-                'A user with this phone number already exists',
-              )
+            // The matched account has no history at THIS shop, but it's a
+            // real, already-provisioned user (staff at a different shop,
+            // or a customer). `MAX_SHOPS_PER_USER` exists precisely to
+            // let one person staff multiple shops (e.g. a rider who also
+            // delivers for a second laundry) — the `_createWithExistingUser`
+            // branch above already supports "existing user, new shop"
+            // when the caller passes a `user_id` directly, but the
+            // dashboard/app UI only ever collects a phone/email, so it
+            // could never reach that path. Attach the existing account
+            // here instead of hard-rejecting with a 409. We only ever
+            // match on an EXACT phone/email the caller supplied, so this
+            // can't be used to attach a stranger's account without
+            // already knowing their real contact info — same trust model
+            // as the same-shop reactivation branch below.
+            const userShopCount = await this.repo.countActiveByUser(dup.id)
+            if (userShopCount >= MAX_SHOPS_PER_USER) {
+              await client.query('ROLLBACK')
+              return {
+                success: false,
+                message: `User cannot be assigned to more than ${MAX_SHOPS_PER_USER} vendors`,
+                code: 'STAFF_SHOP_LIMIT',
+              }
             }
-            throw makeServiceError(
-              409,
-              ERROR_CODES.EMAIL_TAKEN,
-              'A user with this email already exists',
+
+            const attachedStaff = await this.repo.createWithClient(client, {
+              user_id: dup.id,
+              vendor_id: shopId,
+              role,
+              permissions,
+              invited_by: ctx.actorUserId,
+            })
+
+            await emitAuditInTx(client, 'staff_created', {
+              actor_user_id: ctx.actorUserId,
+              actor_role: ctx.actorPlatformRole || ctx.actorRole || null,
+              actor_shop_id: shopId,
+              target_type: 'vendor_employees',
+              target_id: attachedStaff.id,
+              before: null,
+              after: {
+                id: attachedStaff.id,
+                vendor_id: shopId,
+                user_id: dup.id,
+                role,
+                permissions,
+                generate_temp_password: false,
+                reused_existing_account: true,
+              },
+              ip_address: ctx.ip,
+              user_agent: ctx.userAgent,
+            })
+
+            await client.query('COMMIT')
+            createdStaff = attachedStaff
+            createdUserId = dup.id
+            tempPassword = null
+          } else {
+            // Reactivate the existing (soft-deleted) assignment. No new
+            // `users` row and no password mutation — the account already
+            // exists and we must never reset a stranger's credentials just
+            // because someone typed a matching phone/email into this form.
+            const reactivated = await this.repo.reactivateWithClient(
+              client,
+              existingAssignment.id,
+              { role, permissions, invited_by: ctx.actorUserId },
             )
+
+            await emitAuditInTx(client, 'staff_reactivated', {
+              actor_user_id: ctx.actorUserId,
+              actor_role: ctx.actorPlatformRole || ctx.actorRole || null,
+              actor_shop_id: shopId,
+              target_type: 'vendor_employees',
+              target_id: reactivated.id,
+              before: existingAssignment,
+              after: reactivated,
+              ip_address: ctx.ip,
+              user_agent: ctx.userAgent,
+            })
+
+            await client.query('COMMIT')
+            createdStaff = reactivated
+            createdUserId = dup.id
+            tempPassword = null
           }
-
-          // Reactivate the existing (soft-deleted) assignment. No new
-          // `users` row and no password mutation — the account already
-          // exists and we must never reset a stranger's credentials just
-          // because someone typed a matching phone/email into this form.
-          const reactivated = await this.repo.reactivateWithClient(
-            client,
-            existingAssignment.id,
-            { role, permissions, invited_by: ctx.actorUserId },
-          )
-
-          await emitAuditInTx(client, 'staff_reactivated', {
-            actor_user_id: ctx.actorUserId,
-            actor_role: ctx.actorPlatformRole || ctx.actorRole || null,
-            actor_shop_id: shopId,
-            target_type: 'vendor_employees',
-            target_id: reactivated.id,
-            before: existingAssignment,
-            after: reactivated,
-            ip_address: ctx.ip,
-            user_agent: ctx.userAgent,
-          })
-
-          await client.query('COMMIT')
-          createdStaff = reactivated
-          createdUserId = dup.id
-          tempPassword = null
         } else {
           const newUser = await this.repo.createUserWithPassword(client, {
             email: email || null,
@@ -909,6 +982,25 @@ export class VendorEmployeesService {
     // any of those can change here.
     await invalidateStaffActiveCache(updated.user_id, updated.vendor_id)
 
+    // Either direction of an active-state flip can strand jobs. Going
+    // active → true (e.g. re-enabled after being toggled off) might be
+    // the shop's only available rider again — retry any order stuck at
+    // VENDOR_ACCEPTED with nobody assigned, and pick up anything left
+    // orphaned by someone else's deactivation in the meantime. Going
+    // active → false immediately orphans whatever this employee was
+    // still holding, so hand it off now instead of leaving it invisible
+    // until the next roster change. See backfillPickupAssignments /
+    // reassignOrphanedAssignments and the same hooks in create() above.
+    if (
+      data.is_active !== undefined &&
+      (updated.role === 'VENDOR_RIDER' || updated.role === 'VENDOR_STAFF')
+    ) {
+      if (data.is_active === true) {
+        this._backfillPickupAssignments(shopId)
+      }
+      this._reassignOrphanedAssignments(shopId)
+    }
+
     // ── 5. Audit (fire-and-forget) ─────────────────────────────────
     // The mutation has already committed — using emitInTx here would
     // require restructuring this method to take a pg client, which
@@ -1072,6 +1164,15 @@ export class VendorEmployeesService {
     // back we would have re-thrown above and skipped this line, leaving
     // the cache untouched — coherent with the unchanged DB state.
     await invalidateStaffActiveCache(existing.user_id, existing.vendor_id)
+
+    // This employee may have been actively holding pickup/delivery jobs
+    // (order_assignments rows) at the moment they were deactivated — hand
+    // those off to whoever's still active now, if anyone, instead of
+    // leaving them invisible until the next roster change happens to
+    // trigger a resync. See reassignOrphanedAssignments.
+    if (existing.role === 'VENDOR_RIDER' || existing.role === 'VENDOR_STAFF') {
+      this._reassignOrphanedAssignments(shopId)
+    }
 
     logger.info(
       {

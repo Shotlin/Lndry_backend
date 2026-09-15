@@ -2,7 +2,7 @@ import { AdminCustomersController } from './customers.controller.js'
 import {
   listCustomersSchema, customerIdSchema, customerOrdersSchema,
   churnedSchema, vipSchema, creditWalletSchema, sendNotificationSchema,
-  toggleBlockSchema,
+  toggleBlockSchema, setDefaultAddressSchema,
 } from './customers.schema.js'
 
 const ctrl = new AdminCustomersController()
@@ -21,6 +21,7 @@ export default async function adminCustomerRoutes(fastify) {
   fastify.get('/:id', { schema: customerIdSchema }, ctrl.getDetail)
   fastify.get('/:id/orders', { schema: customerOrdersSchema }, ctrl.getOrders)
   fastify.get('/:id/addresses', { schema: customerIdSchema }, ctrl.getAddresses)
+  fastify.put('/:id/addresses/:addressId/default', { schema: setDefaultAddressSchema }, ctrl.setDefaultAddress)
   fastify.post('/:id/credit-wallet', { schema: creditWalletSchema }, ctrl.creditWallet)
   fastify.post('/:id/notify', { schema: sendNotificationSchema }, ctrl.sendNotification)
   fastify.put('/:id/block', { schema: toggleBlockSchema }, ctrl.toggleBlock)

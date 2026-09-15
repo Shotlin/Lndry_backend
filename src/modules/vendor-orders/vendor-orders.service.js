@@ -6,6 +6,13 @@ import { orderQueue } from '../../config/bullmq.js'
 import { computeRecalculatedTotals } from '../../utils/order-recalculation.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
+import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
+import { emitJobOfferedToRiders } from '../../plugins/socketio.plugin.js'
+import { RiderAssignmentSettingsService } from '../rider-assignment-settings/rider-assignment-settings.service.js'
+
+function round2(value) {
+  return Math.round((Number(value) + Number.EPSILON) * 100) / 100
+}
 
 /**
  * Vendor Orders Service — handles vendor-side order lifecycle
@@ -24,6 +31,60 @@ export class VendorOrdersService {
     this.notificationsService = fastify
       ? new NotificationsService(new NotificationsRepository(), fastify)
       : null
+    this.feeSettingsService = new FeeSettingsService()
+    this.riderAssignmentSettingsService = new RiderAssignmentSettingsService()
+  }
+
+  /**
+   * Compute what the vendor actually earns from an order: their service
+   * subtotal plus the delivery fee (the vendor runs their own delivery, so
+   * they keep all of it — unlike platform fee/GST/handling fee, which are
+   * LNDRY/customer-side charges the vendor never sees), minus LNDRY's
+   * commission and, if enabled, GST on that commission — mirroring how
+   * Zomato/Swiggy show restaurant-partner earnings (commission computed on
+   * order value only, GST charged on top of the commission itself).
+   *
+   * This is a LIVE estimate computed from the vendor's current effective
+   * fee_settings (global or a per-shop override) — not a locked settlement
+   * snapshot. `vendor_commission_*` is a reference-only config (see the
+   * Fees admin page); it is not yet wired into shop-financials/
+   * settlement.service.js, so this figure is informational for the vendor,
+   * not an authoritative payout record.
+   *
+   * @private
+   * @param {object|object[]} orders - order row(s) with subtotal/delivery_fee
+   * @param {string} vendorId
+   */
+  async _attachVendorEarnings(orders, vendorId) {
+    const { config } = await this.feeSettingsService.resolveForShop(vendorId)
+    const list = Array.isArray(orders) ? orders : [orders]
+
+    for (const order of list) {
+      const subtotal = Number(order.subtotal) || 0
+      const deliveryFee = Number(order.delivery_fee) || 0
+
+      let commissionAmount = 0
+      if (config.vendor_commission_enabled) {
+        commissionAmount =
+          config.vendor_commission_type === 'PERCENT'
+            ? (subtotal * Number(config.vendor_commission_value)) / 100
+            : Number(config.vendor_commission_value)
+      }
+      const gstOnCommission = config.gst_enabled
+        ? (commissionAmount * Number(config.gst_rate)) / 100
+        : 0
+
+      order.vendor_commission_enabled = !!config.vendor_commission_enabled
+      order.vendor_commission_type = config.vendor_commission_type
+      order.vendor_commission_rate = Number(config.vendor_commission_value)
+      order.vendor_commission_amount = round2(commissionAmount)
+      order.vendor_gst_on_commission_enabled = !!config.gst_enabled
+      order.vendor_gst_rate = Number(config.gst_rate)
+      order.vendor_gst_on_commission_amount = round2(gstOnCommission)
+      order.vendor_payout_amount = round2(subtotal + deliveryFee - commissionAmount - gstOnCommission)
+    }
+
+    return orders
   }
 
   /**
@@ -83,6 +144,8 @@ export class VendorOrdersService {
     )
     const countRes = await query(`SELECT COUNT(*)::int AS total FROM orders o WHERE ${whereClause}`, params)
 
+    await this._attachVendorEarnings(listRes.rows, vendor.vendorId)
+
     return {
       orders: listRes.rows,
       pagination: {
@@ -140,6 +203,28 @@ export class VendorOrdersService {
     )
     order.amountPaidPaise = Math.round(Number(paidRes.rows[0].amount_paid) * 100)
 
+    const assignmentsRes = await query(
+      `SELECT oa.assignment_type, oa.status, oa.is_broadcast_offer, oa.offer_expires_at,
+              u2.name AS rider_name, u2.phone AS rider_phone
+       FROM order_assignments oa
+       LEFT JOIN users u2 ON u2.id = oa.employee_id
+       WHERE oa.order_id = $1`,
+      [orderId]
+    )
+    order.pickupAssignment = null
+    order.deliveryAssignment = null
+    for (const row of assignmentsRes.rows) {
+      const value = {
+        riderName: row.rider_name,
+        riderPhone: row.rider_phone,
+        status: row.status,
+        isBroadcastOffer: row.is_broadcast_offer,
+        offerExpiresAt: row.offer_expires_at,
+      }
+      if (row.assignment_type === 'PICKUP') order.pickupAssignment = value
+      else if (row.assignment_type === 'DELIVERY') order.deliveryAssignment = value
+    }
+
     const reconRes = await query(
       `SELECT * FROM order_reconciliations WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1`,
       [orderId]
@@ -175,6 +260,10 @@ export class VendorOrdersService {
       [orderId]
     )
     order.evidence = evidenceRes.rows
+
+    // Keep the vendor's payable/earnings breakdown alongside the order
+    // operational evidence. Both are vendor-scoped by the order lookup above.
+    await this._attachVendorEarnings(order, vendor.vendorId)
 
     return order
   }
@@ -240,6 +329,31 @@ export class VendorOrdersService {
         await this.otpService.generateOtp(orderId, 'PICKUP')
       } catch (err) {
         logger.warn({ err: err.message, orderId }, 'Pickup OTP generation failed (non-critical)')
+      }
+
+      // Realtime: let the customer's own app know right away instead of
+      // waiting for a manual refresh — `order:status` for any screen
+      // silently watching this order/list, plus an in-app notification
+      // (title/body + the same socket channel used by proposeReconciliation
+      // below) for a visible popup.
+      if (this.fastify?.emitOrderUpdate) {
+        try {
+          this.fastify.emitOrderUpdate(orderId, [order.user_id], { status: ORDER_STATUSES.VENDOR_ACCEPTED })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
+        }
+      }
+      if (this.notificationsService && order.user_id) {
+        try {
+          await this.notificationsService.sendNotification(order.user_id, {
+            title: 'Order accepted',
+            body: 'The vendor has accepted your order and will pick it up soon.',
+            type: 'order_vendor_accepted',
+            data: { orderId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of vendor acceptance (non-critical)')
+        }
       }
 
       return { orderId, status: ORDER_STATUSES.VENDOR_ACCEPTED }
@@ -318,6 +432,29 @@ export class VendorOrdersService {
         })
       } catch (err) {
         logger.warn({ err: err.message, orderId }, 'Failed to queue auto-refund after vendor rejection')
+      }
+
+      // Realtime: same pattern as acceptOrder above — the customer needs to
+      // know immediately, not on their next manual refresh, since a
+      // rejection needs their attention (auto-refund is already in flight).
+      if (this.fastify?.emitOrderUpdate) {
+        try {
+          this.fastify.emitOrderUpdate(orderId, [order.user_id], { status: ORDER_STATUSES.VENDOR_REJECTED })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
+        }
+      }
+      if (this.notificationsService && order.user_id) {
+        try {
+          await this.notificationsService.sendNotification(order.user_id, {
+            title: 'Order rejected',
+            body: reason || 'The vendor was unable to accept your order. A refund is on the way.',
+            type: 'order_vendor_rejected',
+            data: { orderId },
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of vendor rejection (non-critical)')
+        }
       }
 
       return { orderId, status: ORDER_STATUSES.VENDOR_REJECTED }
@@ -627,6 +764,16 @@ export class VendorOrdersService {
 
       await client.query('COMMIT')
 
+      if (this.fastify?.emitOrderUpdate) {
+        try {
+          this.fastify.emitOrderUpdate(orderId, [order.user_id], {
+            status: ORDER_STATUSES.RECONCILIATION_PENDING,
+            reconciliationId,
+          })
+        } catch (err) {
+          logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
+        }
+      }
       if (this.notificationsService && order.user_id) {
         try {
           await this.notificationsService.sendNotification(order.user_id, {
@@ -656,15 +803,16 @@ export class VendorOrdersService {
   }
 
   /**
-   * Auto-assign an employee from the same vendor with the lowest active jobs count.
-   * Purpose: 'PICKUP' or 'DELIVERY'
+   * Find the vendor employee with the fewest active (ASSIGNED/IN_TRANSIT)
+   * assignments right now. Prefers a dedicated VENDOR_RIDER; falls back to
+   * any VENDOR_STAFF so vendors who haven't configured a rider yet keep
+   * today's assignment behavior. Shared by _autoAssignEmployee (new order
+   * needs a first assignee) and reassignOrphanedAssignments (an existing
+   * assignment's assignee went inactive and needs a replacement) so both
+   * always agree on who's "next up".
+   * @private
    */
-  async _autoAssignEmployee(orderId, vendorId, purpose) {
-    const assignmentType = purpose === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
-
-    // Find the vendor employee with the fewest active assignments. Prefer
-    // a dedicated VENDOR_RIDER; fall back to any VENDOR_STAFF so vendors
-    // who haven't configured a rider yet keep today's assignment behavior.
+  async _pickLeastBusyEmployee(vendorId) {
     const employeeQuery = (role) => query(
       `SELECT ve.user_id, ve.id AS employee_id, u.name AS full_name,
               COALESCE((
@@ -687,12 +835,21 @@ export class VendorOrdersService {
       empRes = await employeeQuery('VENDOR_STAFF')
     }
 
-    if (empRes.rows.length === 0) {
+    return empRes.rows[0] || null
+  }
+
+  /**
+   * Auto-assign an employee from the same vendor with the lowest active jobs count.
+   * Purpose: 'PICKUP' or 'DELIVERY'
+   */
+  async _autoAssignEmployee(orderId, vendorId, purpose) {
+    const assignmentType = purpose === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
+
+    const employee = await this._pickLeastBusyEmployee(vendorId)
+    if (!employee) {
       logger.info({ orderId, vendorId, purpose }, 'No available employees for auto-assignment')
       return null
     }
-
-    const employee = empRes.rows[0]
 
     const client = await getClient()
     try {
@@ -763,6 +920,585 @@ export class VendorOrdersService {
       throw err
     } finally {
       client.release()
+    }
+  }
+
+  /**
+   * Retry pickup auto-assignment for this vendor's orders stuck at
+   * VENDOR_ACCEPTED with nobody assigned — this happens when the vendor
+   * accepts an order before adding any rider/staff, since acceptOrder's
+   * call to _autoAssignEmployee silently no-ops when the employee query
+   * comes back empty (see the 'No available employees for auto-assignment'
+   * log line above) and nothing ever retries it. Without this, such an
+   * order stays invisible to every rider forever, even ones added later.
+   * Called from vendor-employees.service.js whenever a rider becomes
+   * available (created, attached from an existing account, or
+   * reactivated) so the backlog clears itself instead of needing a
+   * manual fix.
+   */
+  async backfillPickupAssignments(vendorId) {
+    const { rows } = await query(
+      `SELECT id FROM orders WHERE vendor_id = $1 AND status = 'VENDOR_ACCEPTED' ORDER BY created_at ASC`,
+      [vendorId]
+    )
+
+    const assignedOrderIds = []
+    for (const row of rows) {
+      try {
+        const employee = await this._autoAssignEmployee(row.id, vendorId, 'PICKUP')
+        if (employee) assignedOrderIds.push(row.id)
+        else break // no employee available (or became unavailable mid-loop) — stop trying the rest
+      } catch (err) {
+        logger.warn({ err: err.message, orderId: row.id, vendorId }, 'Backfill pickup auto-assign failed (non-critical)')
+      }
+    }
+    return assignedOrderIds
+  }
+
+  /**
+   * Reassign any order_assignments row still pointing at a rider/staff who
+   * is no longer active at this vendor (deactivated, removed, or replaced
+   * by a different phone number) to whoever has the fewest active jobs
+   * among the vendor's currently-active riders/staff, if anyone.
+   *
+   * This is the mirror case to backfillPickupAssignments: that one covers
+   * an order that never got assigned in the first place (still sitting at
+   * VENDOR_ACCEPTED); this one covers an order that WAS assigned and then
+   * its assignee went inactive — the order_assignments row itself never
+   * changes on deactivation, so it silently keeps pointing at someone who
+   * can no longer even list their own jobs (VendorRiderService#listJobs
+   * requires is_active = true just to log in), while every other rider's
+   * job list only ever matches rows where employee_id is their own
+   * user_id. Without this, such an order is invisible to everyone forever,
+   * even a brand-new rider added specifically to replace the old one.
+   *
+   * Only the assignee (employee_id/rider_id) changes — the order's own
+   * status is left untouched, since the pickup/delivery stage itself
+   * hasn't changed, only who is doing it.
+   *
+   * Called from vendor-employees.service.js whenever a rider/staff's
+   * active state changes in either direction: someone going inactive
+   * hands off whatever they were holding right now (instead of leaving it
+   * stranded until some future roster change happens to trigger a
+   * resync), and someone becoming active picks up anything still left
+   * orphaned from an earlier deactivation.
+   */
+  async reassignOrphanedAssignments(vendorId) {
+    const { rows: orphaned } = await query(
+      `SELECT oa.id, oa.order_id
+       FROM order_assignments oa
+       WHERE oa.vendor_id = $1
+         AND oa.status IN ('ASSIGNED', 'IN_TRANSIT')
+         AND NOT EXISTS (
+           SELECT 1 FROM vendor_employees ve
+           WHERE ve.user_id = oa.employee_id
+             AND ve.vendor_id = $1
+             AND ve.is_active = true
+         )
+       ORDER BY oa.assigned_at ASC`,
+      [vendorId]
+    )
+
+    const reassignedOrderIds = []
+    for (const row of orphaned) {
+      try {
+        const employee = await this._pickLeastBusyEmployee(vendorId)
+        if (!employee) break // nobody active at all — stop, nothing else will succeed either
+
+        await query(
+          `UPDATE order_assignments SET employee_id = $1, rider_id = $1, updated_at = NOW() WHERE id = $2`,
+          [employee.user_id, row.id]
+        )
+        reassignedOrderIds.push(row.order_id)
+      } catch (err) {
+        logger.warn({ err: err.message, assignmentId: row.id, vendorId }, 'Reassign orphaned assignment failed (non-critical)')
+      }
+    }
+    return reassignedOrderIds
+  }
+
+  /**
+   * Manually assign (or reassign) a specific rider/staff to an order — the
+   * vendor picking someone by name, instead of the system auto-picking
+   * whoever is least busy. Phase 1 of the rider-assignment initiative (see
+   * CLAUDE.md "Rider Assignment: Broadcast + Timeout Reassignment System").
+   *
+   * Two cases, matched by the order's current status:
+   *   - No assignment yet (VENDOR_ACCEPTED for pickup, PACKED for delivery)
+   *     → creates the assignment AND advances the order status, exactly
+   *     like _autoAssignEmployee.
+   *   - Already assigned, work not yet done (PICKUP_ASSIGNED/
+   *     GOING_FOR_PICKUP/PICKUP_OTP_VERIFIED, or DELIVERY_ASSIGNED/
+   *     OUT_FOR_DELIVERY) → swaps just the assignee, order status
+   *     untouched — mirrors reassignOrphanedAssignments (the stage hasn't
+   *     changed, only who's doing it).
+   *
+   * @param {string} userId - authenticated caller (vendor owner/staff)
+   * @param {string} orderId
+   * @param {string} vendorEmployeeId - vendor_employees.id (the staff
+   *        record id the vendor app's roster list exposes as `id` — NOT
+   *        users.id, which is what order_assignments.employee_id actually
+   *        stores; resolved below).
+   */
+  async assignSpecificEmployee(userId, orderId, vendorEmployeeId) {
+    const vendor = await this._resolveVendorId(userId)
+    if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
+
+    const empRes = await query(
+      `SELECT ve.user_id, ve.id AS employee_id, u.name AS full_name
+       FROM vendor_employees ve
+       JOIN users u ON ve.user_id = u.id
+       WHERE ve.id = $1 AND ve.vendor_id = $2 AND ve.is_active = true
+         AND ve.role IN ('VENDOR_RIDER', 'VENDOR_STAFF')`,
+      [vendorEmployeeId, vendor.vendorId]
+    )
+    const employee = empRes.rows[0]
+    if (!employee) {
+      throw { statusCode: 404, message: 'Rider/staff not found or inactive', code: 'EMPLOYEE_NOT_FOUND' }
+    }
+
+    const PICKUP_STAGE_STATUSES = ['VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED']
+    const DELIVERY_STAGE_STATUSES = ['PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY']
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows } = await client.query(
+        `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
+        [orderId, vendor.vendorId]
+      )
+      const order = rows[0]
+      if (!order) {
+        await client.query('ROLLBACK')
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      let purpose
+      if (PICKUP_STAGE_STATUSES.includes(order.status)) purpose = 'PICKUP'
+      else if (DELIVERY_STAGE_STATUSES.includes(order.status)) purpose = 'DELIVERY'
+      else {
+        await client.query('ROLLBACK')
+        throw {
+          statusCode: 400,
+          message: `Order is not at a stage that can be assigned right now (currently ${order.status})`,
+          code: 'INVALID_TRANSITION',
+        }
+      }
+
+      const needsFirstAssignment = order.status === 'VENDOR_ACCEPTED' || order.status === 'PACKED'
+      const assignmentType = purpose === 'PICKUP' ? 'PICKUP_ASSIGNED' : 'DELIVERY_ASSIGNED'
+
+      if (needsFirstAssignment) {
+        const transition = validateTransition(order.status, assignmentType, vendor.role)
+        if (!transition.valid) {
+          await client.query('ROLLBACK')
+          throw { statusCode: 400, message: transition.message, code: 'INVALID_TRANSITION' }
+        }
+
+        await client.query(
+          `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id, is_broadcast_offer, offer_expires_at)
+           VALUES ($1, $2, $2, $3, 'ASSIGNED', $4, false, NULL)
+           ON CONFLICT (order_id, assignment_type) DO UPDATE SET
+             employee_id = EXCLUDED.employee_id,
+             rider_id = EXCLUDED.rider_id,
+             status = 'ASSIGNED',
+             is_broadcast_offer = false,
+             offer_expires_at = NULL,
+             assigned_at = NOW()`,
+          [orderId, employee.user_id, purpose, vendor.vendorId]
+        )
+        await client.query(
+          `UPDATE orders SET status = $1, updated_at = NOW() WHERE id = $2`,
+          [assignmentType, orderId]
+        )
+      } else {
+        // A direct assign always wins and always results in a clean,
+        // confirmed ASSIGNED state — regardless of whatever the row's
+        // prior status was (a previously assigned rider, or a pending
+        // broadcast/offer). Previously this only updated employee_id/
+        // rider_id and left `status` untouched, so reassigning over a
+        // still-OFFERED broadcast silently produced a row pointed at the
+        // right rider but still stuck OFFERED — invisible to that
+        // rider's job list, which only shows ASSIGNED/IN_TRANSIT.
+        await client.query(
+          `UPDATE order_assignments SET employee_id = $1, rider_id = $1, status = 'ASSIGNED',
+             is_broadcast_offer = false, offer_expires_at = NULL, updated_at = NOW()
+           WHERE order_id = $2 AND assignment_type = $3`,
+          [employee.user_id, orderId, purpose]
+        )
+      }
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: needsFirstAssignment ? assignmentType : order.status,
+        actorId: userId,
+        actorRole: vendor.role,
+        note: `Manually ${needsFirstAssignment ? 'assigned' : 'reassigned'} ${purpose.toLowerCase()} to ${employee.full_name}`,
+      })
+
+      await client.query('COMMIT')
+
+      return {
+        orderId,
+        employeeId: employee.employee_id,
+        employeeName: employee.full_name,
+        purpose,
+        status: needsFirstAssignment ? assignmentType : order.status,
+      }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Offer (rather than directly assign) a specific rider/staff — creates
+   * an OFFERED order_assignments row the rider must explicitly accept
+   * (VendorRiderService#acceptOffer) before it becomes their confirmed
+   * job. Phase 2 of the rider-assignment initiative (see CLAUDE.md) — the
+   * single-target counterpart to what Phase 3's broadcast will do for
+   * multiple riders at once.
+   *
+   * Unlike assignSpecificEmployee (Phase 1, direct + final), offering
+   * does NOT change the order's own status — that only happens on
+   * accept, so an unaccepted offer never falsely claims a pipeline stage
+   * nobody is actually working on.
+   *
+   * @param {string} userId - authenticated caller (vendor owner/staff)
+   * @param {string} orderId
+   * @param {string} vendorEmployeeId - vendor_employees.id
+   */
+  async offerToEmployee(userId, orderId, vendorEmployeeId) {
+    const vendor = await this._resolveVendorId(userId)
+    if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
+
+    const empRes = await query(
+      `SELECT ve.user_id, ve.id AS employee_id, u.name AS full_name
+       FROM vendor_employees ve
+       JOIN users u ON ve.user_id = u.id
+       WHERE ve.id = $1 AND ve.vendor_id = $2 AND ve.is_active = true
+         AND ve.role IN ('VENDOR_RIDER', 'VENDOR_STAFF')`,
+      [vendorEmployeeId, vendor.vendorId]
+    )
+    const employee = empRes.rows[0]
+    if (!employee) {
+      throw { statusCode: 404, message: 'Rider/staff not found or inactive', code: 'EMPLOYEE_NOT_FOUND' }
+    }
+
+    const PICKUP_STAGE_STATUSES = ['VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED']
+    const DELIVERY_STAGE_STATUSES = ['PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY']
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows } = await client.query(
+        `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
+        [orderId, vendor.vendorId]
+      )
+      const order = rows[0]
+      if (!order) {
+        await client.query('ROLLBACK')
+        throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+      }
+
+      let purpose
+      if (PICKUP_STAGE_STATUSES.includes(order.status)) purpose = 'PICKUP'
+      else if (DELIVERY_STAGE_STATUSES.includes(order.status)) purpose = 'DELIVERY'
+      else {
+        await client.query('ROLLBACK')
+        throw {
+          statusCode: 400,
+          message: `Order is not at a stage that can be offered right now (currently ${order.status})`,
+          code: 'INVALID_TRANSITION',
+        }
+      }
+
+      const existing = await client.query(
+        `SELECT status FROM order_assignments WHERE order_id = $1 AND assignment_type = $2 FOR UPDATE`,
+        [orderId, purpose]
+      )
+      if (existing.rows[0] && ['ASSIGNED', 'IN_TRANSIT'].includes(existing.rows[0].status)) {
+        await client.query('ROLLBACK')
+        throw {
+          statusCode: 409,
+          message: 'This order already has a confirmed rider — reassign it directly instead of offering',
+          code: 'ALREADY_ASSIGNED',
+        }
+      }
+
+      await client.query(
+        `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id)
+         VALUES ($1, $2, $2, $3, 'OFFERED', $4)
+         ON CONFLICT (order_id, assignment_type) DO UPDATE SET
+           employee_id = EXCLUDED.employee_id,
+           rider_id = EXCLUDED.rider_id,
+           status = 'OFFERED',
+           assigned_at = NOW()`,
+        [orderId, employee.user_id, purpose, vendor.vendorId]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: order.status,
+        newStatus: order.status,
+        actorId: userId,
+        actorRole: vendor.role,
+        note: `Offered ${purpose.toLowerCase()} to ${employee.full_name}, pending their acceptance`,
+      })
+
+      await client.query('COMMIT')
+
+      return {
+        orderId,
+        employeeId: employee.employee_id,
+        employeeName: employee.full_name,
+        purpose,
+        status: 'OFFERED',
+      }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Broadcast this order to every active rider/staff at the vendor at
+   * once — first to call the accept endpoint wins. Phase 3 of the
+   * rider-assignment initiative (see CLAUDE.md). Also schedules the
+   * Phase 4 timeout job that re-broadcasts automatically if nobody
+   * accepts in time.
+   *
+   * Vendor-triggered for now (an explicit button in the app) — this is
+   * NOT yet wired into the automatic acceptOrder/backfillPickupAssignments
+   * paths, which still call _autoAssignEmployee and silently pick one
+   * person directly. Flipping those over to broadcast is a deliberately
+   * separate, later step once the rider-app accept experience has been
+   * proven out for real.
+   */
+  async broadcastToRiders(userId, orderId) {
+    const vendor = await this._resolveVendorId(userId)
+    if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
+
+    const PICKUP_STAGE_STATUSES = ['VENDOR_ACCEPTED', 'PICKUP_ASSIGNED', 'GOING_FOR_PICKUP', 'PICKUP_OTP_VERIFIED']
+    const DELIVERY_STAGE_STATUSES = ['PACKED', 'DELIVERY_ASSIGNED', 'OUT_FOR_DELIVERY']
+
+    const { rows: orderRows } = await query(
+      `SELECT id, status FROM orders WHERE id = $1 AND vendor_id = $2`,
+      [orderId, vendor.vendorId]
+    )
+    const order = orderRows[0]
+    if (!order) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+
+    let purpose
+    if (PICKUP_STAGE_STATUSES.includes(order.status)) purpose = 'PICKUP'
+    else if (DELIVERY_STAGE_STATUSES.includes(order.status)) purpose = 'DELIVERY'
+    else {
+      throw {
+        statusCode: 400,
+        message: `Order is not at a stage that can be broadcast right now (currently ${order.status})`,
+        code: 'INVALID_TRANSITION',
+      }
+    }
+
+    // Broadcasting must never silently clobber a rider the vendor already
+    // confirmed (directly assigned, or who already accepted an earlier
+    // offer) — _broadcastOffer's INSERT ... ON CONFLICT unconditionally
+    // overwrites whatever row is there, which previously meant a stray
+    // "Broadcast" tap after a direct "Assign" would erase that assignment
+    // and replace it with a pending offer to an unrelated placeholder rider.
+    const { rows: existingRows } = await query(
+      `SELECT status FROM order_assignments WHERE order_id = $1 AND assignment_type = $2`,
+      [orderId, purpose]
+    )
+    if (existingRows[0] && ['ASSIGNED', 'IN_TRANSIT'].includes(existingRows[0].status)) {
+      throw {
+        statusCode: 409,
+        message: 'This order already has a confirmed rider — reassign it directly instead of broadcasting',
+        code: 'ALREADY_ASSIGNED',
+      }
+    }
+
+    const result = await this._broadcastOffer({
+      orderId,
+      vendorId: vendor.vendorId,
+      purpose,
+      orderStatus: order.status,
+      actorId: userId,
+      actorRole: vendor.role,
+    })
+    if (!result) {
+      throw { statusCode: 400, message: 'No active riders to broadcast to', code: 'NO_RIDERS_AVAILABLE' }
+    }
+    return result
+  }
+
+  /**
+   * Re-broadcast an order that's still OFFERED after the Phase 4 timeout
+   * — called by the BullMQ `rider-broadcast-timeout` job
+   * (src/workers/processors.js), not by any HTTP route. A no-op if the
+   * assignment already moved on (accepted, cancelled, or reassigned some
+   * other way) since it was last checked. If there are simply no active
+   * riders right now, the timeout is rescheduled anyway rather than
+   * giving up — someone may become active before the next check.
+   */
+  async rebroadcastIfStillOffered(orderId, purpose, vendorId) {
+    const { rows } = await query(
+      `SELECT status FROM order_assignments WHERE order_id = $1 AND assignment_type = $2 AND vendor_id = $3`,
+      [orderId, purpose, vendorId]
+    )
+    const assignment = rows[0]
+    if (!assignment || assignment.status !== 'OFFERED') {
+      return { skipped: true, reason: 'no_longer_offered' }
+    }
+
+    // order_events.new_status is NOT NULL — unlike the initial broadcast
+    // (which already has the order row in hand from broadcastToRiders'
+    // own lookup), a retry needs its own fetch to pass a real value.
+    const { rows: orderRows } = await query(`SELECT status FROM orders WHERE id = $1`, [orderId])
+    const currentOrderStatus = orderRows[0]?.status ?? null
+
+    const result = await this._broadcastOffer({
+      orderId,
+      vendorId,
+      purpose,
+      orderStatus: currentOrderStatus,
+      actorId: null,
+      actorRole: 'SYSTEM',
+      note: 'still unaccepted after the broadcast timeout',
+    })
+    if (!result) {
+      logger.info({ orderId, vendorId, purpose }, 'Rider broadcast timeout: no active riders — rescheduling anyway')
+      await this._scheduleBroadcastTimeout(orderId, purpose, vendorId)
+      return { skipped: true, reason: 'no_active_riders' }
+    }
+    return { rebroadcast: true, ...result }
+  }
+
+  /**
+   * Shared core for both the initial broadcast and every timeout-driven
+   * retry: creates/updates the single OFFERED row (placeholder assignee,
+   * is_broadcast_offer=true — see the Phase 3 note in CLAUDE.md for why),
+   * records an audit event, emits the socket push, and schedules the next
+   * timeout check. Returns null (no throw) when there are no active
+   * riders, so callers can decide what that means for them.
+   * @private
+   */
+  async _broadcastOffer({ orderId, vendorId, purpose, orderStatus, actorId, actorRole, note }) {
+    const { rows: activeRiders } = await query(
+      `SELECT ve.user_id FROM vendor_employees ve
+       WHERE ve.vendor_id = $1 AND ve.is_active = true AND ve.role = 'VENDOR_RIDER'`,
+      [vendorId]
+    )
+    if (activeRiders.length === 0) return null
+
+    const placeholder = await this._pickLeastBusyEmployee(vendorId)
+    // placeholder can only be null here if _pickLeastBusyEmployee's
+    // VENDOR_STAFF fallback also came up empty, but we already confirmed
+    // at least one active VENDOR_RIDER exists above, so this is just
+    // defense-in-depth, not a real-world path.
+    if (!placeholder) return null
+
+    // Fetched once up front (not inside _scheduleBroadcastTimeout, which
+    // would otherwise re-fetch the same setting a moment later) so the
+    // persisted offer_expires_at and the actual BullMQ delay always agree
+    // — Phase 6's rider-app countdown reads the former.
+    const { broadcast_timeout_minutes: timeoutMinutes } = await this.riderAssignmentSettingsService.get()
+    const offerExpiresAt = new Date(Date.now() + timeoutMinutes * 60 * 1000)
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      await client.query(
+        `INSERT INTO order_assignments (order_id, employee_id, rider_id, assignment_type, status, vendor_id, is_broadcast_offer, offer_expires_at)
+         VALUES ($1, $2, $2, $3, 'OFFERED', $4, true, $5)
+         ON CONFLICT (order_id, assignment_type) DO UPDATE SET
+           employee_id = EXCLUDED.employee_id,
+           rider_id = EXCLUDED.rider_id,
+           status = 'OFFERED',
+           is_broadcast_offer = true,
+           offer_expires_at = EXCLUDED.offer_expires_at,
+           assigned_at = NOW()`,
+        [orderId, placeholder.user_id, purpose, vendorId, offerExpiresAt]
+      )
+
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: orderStatus ?? null,
+        newStatus: orderStatus ?? null,
+        actorId,
+        actorRole,
+        note: note
+          ? `Re-broadcast ${purpose.toLowerCase()} offer to ${activeRiders.length} active rider(s) — ${note}`
+          : `Broadcast ${purpose.toLowerCase()} offer to ${activeRiders.length} active rider(s)`,
+      })
+
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+
+    const { rows: orderInfo } = await query(`SELECT order_number FROM orders WHERE id = $1`, [orderId])
+    emitJobOfferedToRiders(
+      activeRiders.map((r) => r.user_id),
+      {
+        orderId,
+        orderNumber: orderInfo[0]?.order_number || null,
+        purpose,
+        expiresAt: offerExpiresAt.toISOString(),
+      }
+    )
+
+    await this._scheduleBroadcastTimeout(orderId, purpose, vendorId, timeoutMinutes)
+
+    return { orderId, purpose, riderCount: activeRiders.length, status: 'OFFERED', expiresAt: offerExpiresAt.toISOString() }
+  }
+
+  /**
+   * Schedules the Phase 4 timeout check under a deterministic jobId
+   * (`rider-broadcast-timeout-{orderId}-{purpose}`).
+   *
+   * Known edge case: BullMQ ignores a second `add()` under a jobId that's
+   * still queued rather than resetting its delay. If the vendor
+   * broadcasts the same order twice in quick succession (before the
+   * first timeout fires), the second call's timeout silently keeps the
+   * first call's original deadline rather than restarting the clock —
+   * harmless (the eventual check still fires and re-broadcasts if
+   * needed), just not perfectly precise. The normal sequence (initial
+   * broadcast, then each retry from rebroadcastIfStillOffered right after
+   * its own timeout job has already fired and been removed via
+   * `removeOnComplete: true`) never hits this, since there's nothing
+   * still queued at that point.
+   *
+   * VendorRiderService#acceptOffer removes this job on a successful
+   * claim; if it fires anyway, rebroadcastIfStillOffered finds the
+   * assignment no longer OFFERED and no-ops.
+   * @private
+   */
+  async _scheduleBroadcastTimeout(orderId, purpose, vendorId, timeoutMinutes = null) {
+    try {
+      const minutes = timeoutMinutes ?? (await this.riderAssignmentSettingsService.get()).broadcast_timeout_minutes
+      await orderQueue.add(
+        'rider-broadcast-timeout',
+        { type: 'rider-broadcast-timeout', orderId, purpose, vendorId },
+        {
+          jobId: `rider-broadcast-timeout-${orderId}-${purpose}`,
+          delay: minutes * 60 * 1000,
+          removeOnComplete: true,
+        }
+      )
+    } catch (err) {
+      logger.warn({ err: err.message, orderId, purpose }, 'Failed to schedule rider-broadcast-timeout job')
     }
   }
 

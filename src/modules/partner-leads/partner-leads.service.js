@@ -1,4 +1,4 @@
-import { getClient } from '../../config/database.js'
+import { getClient, query } from '../../config/database.js'
 import { emitInTx } from '../../utils/audit-log.js'
 import { PARTNER_LEAD_SOURCE } from './partner-leads.contract.js'
 

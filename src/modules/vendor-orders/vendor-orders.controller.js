@@ -81,6 +81,41 @@ export class VendorOrdersController {
     }
   }
 
+  async assignRider(request, reply) {
+    try {
+      const result = await this.service.assignSpecificEmployee(
+        request.user.id,
+        request.params.orderId,
+        request.body.employee_id
+      )
+      return reply.send(success(result, 'Rider assigned'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async offerRider(request, reply) {
+    try {
+      const result = await this.service.offerToEmployee(
+        request.user.id,
+        request.params.orderId,
+        request.body.employee_id
+      )
+      return reply.send(success(result, 'Rider offered the job'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
+  async broadcastRider(request, reply) {
+    try {
+      const result = await this.service.broadcastToRiders(request.user.id, request.params.orderId)
+      return reply.send(success(result, 'Job broadcast to active riders'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message, err.code || 'INTERNAL_ERROR'))
+    }
+  }
+
   async getDashboardStats(request, reply) {
     try {
       const stats = await this.service.getDashboardStats(request.user.id)

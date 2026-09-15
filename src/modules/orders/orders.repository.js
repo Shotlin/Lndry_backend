@@ -13,7 +13,7 @@ const ORDER_COLUMNS = `id, order_number, user_id, rider_id, vendor_id, status, i
   estimated_delivery, delivered_at, proof_photo_url, cancelled_reason, handling_fee,
   late_night_fee, tip_amount, delivery_instructions, savings_total, delivery_mode,
   scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
-  vendor_slot_id, pickup_date, fee_breakdown, auto_assignment_status, created_at, updated_at`
+  vendor_slot_id, pickup_date, is_express_pickup, fee_breakdown, auto_assignment_status, created_at, updated_at`
 
 // Same projection, `o.`-qualified for the queries that LEFT JOIN users (ru).
 const ORDER_COLUMNS_O = ORDER_COLUMNS
@@ -261,9 +261,11 @@ export class OrdersRepository {
    */
   async findByIdAndUser(id, userId) {
     const { rows } = await query(
-      `SELECT ${ORDER_COLUMNS_O}, ru.name AS rider_name, ru.phone AS rider_phone
+      `SELECT ${ORDER_COLUMNS_O}, ru.name AS rider_name, ru.phone AS rider_phone,
+              vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time
        FROM orders o
        LEFT JOIN users ru ON ru.id = o.rider_id
+       LEFT JOIN vendor_slots vs ON vs.id = o.vendor_slot_id
        WHERE o.id = $1 AND o.user_id = $2`,
       [id, userId]
     )
@@ -379,8 +381,11 @@ export class OrdersRepository {
     )
 
     const { rows } = await query(
-      `SELECT ${ORDER_COLUMNS} FROM orders WHERE ${where}
-       ORDER BY created_at DESC
+      `SELECT ${ORDER_COLUMNS_O}, vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time
+       FROM orders o
+       LEFT JOIN vendor_slots vs ON vs.id = o.vendor_slot_id
+       WHERE ${where}
+       ORDER BY o.created_at DESC
        LIMIT $${idx++} OFFSET $${idx}`,
       [...params, limit, offset]
     )
@@ -612,6 +617,9 @@ export class OrdersRepository {
       scheduledSlotLabel: row.scheduled_slot_label || null,
       vendorSlotId: row.vendor_slot_id || null,
       pickupDate: row.pickup_date || null,
+      pickupSlotStartTime: row.pickup_slot_start_time || null,
+      pickupSlotEndTime: row.pickup_slot_end_time || null,
+      isExpressPickup: row.is_express_pickup || false,
       autoAssignmentStatus: row.auto_assignment_status || null,
       feeBreakdown:
         row.fee_breakdown == null

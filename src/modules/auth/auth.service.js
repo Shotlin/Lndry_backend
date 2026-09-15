@@ -268,7 +268,8 @@ export class AuthService {
         deviceId: device.device_id,
         platform: device.platform || 'UNKNOWN',
         fcmToken: device.fcm_token || '',
-        appVersion: device.app_version || ''
+        appVersion: device.app_version || '',
+        deviceModel: device.device_model || null
       })
     }
 
@@ -384,7 +385,14 @@ export class AuthService {
       }
     }
 
-    const payload = { id: user.id, phone: user.phone, role: user.role }
+    // Sign the token with the role being logged into (requestedRole), not the
+    // account's stored user.role — a phone number that was ever upgraded to
+    // RIDER (see the updateRole call above) stays RIDER in the DB forever,
+    // but should still get a CUSTOMER-scoped token when authenticating
+    // through the customer app, otherwise every authorize(['CUSTOMER'])
+    // route (e.g. quote/checkout) 403s for anyone who has ever also used
+    // the rider app with the same number.
+    const payload = { id: user.id, phone: user.phone, role: requestedRole }
     const tokens = generateTokenPair(payload)
 
     await redis.set(
@@ -395,7 +403,7 @@ export class AuthService {
     )
 
     let isVerified = false
-    if (user.role === 'RIDER') {
+    if (requestedRole === 'RIDER') {
       const riderProfile = await this.repo.getRiderProfile(user.id)
       isVerified = riderProfile?.is_approved === true
       if (isVerified) {
@@ -453,13 +461,20 @@ export class AuthService {
         logger.warn({ err: err.message, userId: user.id }, 'Shop staff lookup failed during refresh')
       }
 
+      // Preserve the role this refresh-token lineage was actually issued
+      // with (decoded.role), not the account's current user.role — the
+      // latter can silently diverge (e.g. a CUSTOMER session for a phone
+      // number that's since been upgraded to RIDER via the vendor/rider
+      // app), and re-deriving from user.role here would flip a live
+      // customer session to RIDER on its next silent refresh even after
+      // verifyOtp's login-time fix.
       if (staffAssignments.length === 1) {
         const assignment = staffAssignments[0]
         accessToken = signAccessToken(
           {
             id: user.id,
             phone: user.phone,
-            role: user.role,
+            role: decoded.role,
             shopId: assignment.vendor_id,
             shopRole: assignment.role,
             permissions: assignment.permissions || [],
@@ -472,15 +487,16 @@ export class AuthService {
         )
       } else {
         // No shop assignment or multiple — issue a plain token
-        const payload = { id: user.id, phone: user.phone, role: user.role }
+        const payload = { id: user.id, phone: user.phone, role: decoded.role }
         accessToken = signAccessToken(payload, { expiresIn: '24h' })
       }
 
-      // Rotate the refresh token
+      // Rotate the refresh token, carrying the same role forward so the
+      // *next* refresh preserves it too.
       const newRefreshToken = signRefreshToken({
         id: user.id,
         phone: user.phone,
-        role: user.role,
+        role: decoded.role,
       })
       await redis.set(
         `${REFRESH_TOKEN_PREFIX}${user.id}`,

@@ -64,6 +64,34 @@ export default async function vendorRiderRoutes(fastify) {
     },
   }, controller.getJobDetail.bind(controller))
 
+  // Phase 2 of the rider-assignment initiative (CLAUDE.md) — offers
+  // pending accept/decline, distinct from confirmed jobs above.
+  fastify.get('/offers', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'List jobs offered to this rider, pending accept/decline',
+      security: [{ bearerAuth: [] }],
+    },
+  }, controller.listOffers.bind(controller))
+
+  fastify.post('/offers/:orderId/accept', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Accept an offered job — atomic claim, first to accept wins',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+    },
+  }, controller.acceptOffer.bind(controller))
+
+  fastify.post('/offers/:orderId/decline', {
+    schema: {
+      tags: ['Vendor Rider'],
+      summary: 'Decline an offered job',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+    },
+  }, controller.declineOffer.bind(controller))
+
   fastify.post('/jobs/:orderId/start-pickup', {
     schema: {
       tags: ['Vendor Rider'],

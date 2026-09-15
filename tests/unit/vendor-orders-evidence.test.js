@@ -21,13 +21,29 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
   const USER_ID = 'user-vendor-owner'
   const VENDOR_ID = 'vendor-uuid-1'
   const ORDER_ID = 'order-uuid-1'
+  const FEE_CONFIG = {
+    vendor_commission_enabled: false,
+    vendor_commission_type: 'PERCENT',
+    vendor_commission_value: 10,
+    gst_enabled: false,
+    gst_rate: 18,
+  }
+
+  function createService() {
+    const service = new VendorOrdersService()
+    // getOrder() now adds the upstream vendor-earnings snapshot. Keep the
+    // evidence contract isolated from fee-settings persistence so this test
+    // still specifies the evidence query sequence precisely.
+    vi.spyOn(service.feeSettingsService, 'resolveForShop').mockResolvedValue({ config: FEE_CONFIG })
+    return service
+  }
 
   beforeEach(() => {
     vi.clearAllMocks()
   })
 
   it('returns the full cross-context evidence history for this order, tenant-scoped', async () => {
-    const service = new VendorOrdersService()
+    const service = createService()
 
     mockQuery
       .mockResolvedValueOnce({ rows: [{ vendor_id: VENDOR_ID, role: 'VENDOR_OWNER' }] }) // _resolveVendorId
@@ -35,6 +51,7 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
       .mockResolvedValueOnce({ rows: [] }) // lines
       .mockResolvedValueOnce({ rows: [] }) // events/timeline
       .mockResolvedValueOnce({ rows: [{ amount_paid: '0' }] }) // paid
+      .mockResolvedValueOnce({ rows: [] }) // pickup/delivery assignments
       .mockResolvedValueOnce({ rows: [] }) // no reconciliation row for this order
       .mockResolvedValueOnce({
         rows: [
@@ -59,7 +76,7 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
   })
 
   it('does not require a reconciliation to exist, and leaves latestReconciliation null when there is none', async () => {
-    const service = new VendorOrdersService()
+    const service = createService()
 
     mockQuery
       .mockResolvedValueOnce({ rows: [{ vendor_id: VENDOR_ID, role: 'VENDOR_OWNER' }] })
@@ -67,6 +84,7 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ amount_paid: '0' }] })
+      .mockResolvedValueOnce({ rows: [] }) // pickup/delivery assignments
       .mockResolvedValueOnce({ rows: [] }) // no reconciliation
       .mockResolvedValueOnce({ rows: [] }) // no evidence yet either
 
@@ -77,7 +95,7 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
   })
 
   it('keeps latestReconciliation.photos scoped to the latest reconciliation only, separate from the full evidence history', async () => {
-    const service = new VendorOrdersService()
+    const service = createService()
     const RECON_ID = 'recon-uuid-1'
 
     mockQuery
@@ -86,6 +104,7 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [] })
       .mockResolvedValueOnce({ rows: [{ amount_paid: '0' }] })
+      .mockResolvedValueOnce({ rows: [] }) // pickup/delivery assignments
       .mockResolvedValueOnce({ rows: [{ id: RECON_ID, status: 'PENDING_CUSTOMER' }] }) // latest reconciliation
       .mockResolvedValueOnce({ rows: [{ photo_url: 'https://cdn/recon-only.jpg' }] }) // reconciliation-scoped photos
       .mockResolvedValueOnce({

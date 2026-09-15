@@ -249,14 +249,15 @@ export class AuthRepository {
   /**
    * Register a user's device
    */
-  async registerDevice({ userId, deviceId, platform, fcmToken, appVersion }) {
+  async registerDevice({ userId, deviceId, platform, fcmToken, appVersion, deviceModel }) {
     const { rows } = await query(
-      `INSERT INTO devices (user_id, device_id, platform, fcm_token, app_version, updated_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
-       ON CONFLICT (user_id, device_id) 
-       DO UPDATE SET platform = $3, fcm_token = $4, app_version = $5, updated_at = NOW()
+      `INSERT INTO devices (user_id, device_id, platform, fcm_token, app_version, device_model, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (user_id, device_id)
+       DO UPDATE SET platform = $3, fcm_token = $4, app_version = $5,
+                     device_model = COALESCE($6, devices.device_model), updated_at = NOW()
        RETURNING id`,
-      [userId, deviceId, platform, fcmToken, appVersion]
+      [userId, deviceId, platform, fcmToken, appVersion, deviceModel || null]
     )
     return rows[0]
   }

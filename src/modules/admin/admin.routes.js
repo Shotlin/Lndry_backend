@@ -31,6 +31,7 @@ import adminCustomerSegmentsRoutes from './customer-segments/customer-segments.r
 import adminFirstTimeOffersRoutes from './first-time-offers/first-time-offers.routes.js'
 import adminOrderRecoveryRoutes from './order-recovery/order-recovery.routes.js'
 import adminCartMilestonesRoutes from './cart-milestones/cart-milestones.routes.js'
+import adminOlaMapsSettingsRoutes from './ola-maps-settings/ola-maps-settings.routes.js'
 
 /**
  * Admin routes plugin
@@ -97,4 +98,5 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminFirstTimeOffersRoutes, { prefix: '/first-time-offers' })
   fastify.register(adminOrderRecoveryRoutes, { prefix: '/incomplete-orders' })
   fastify.register(adminCartMilestonesRoutes, { prefix: '/cart-milestones' })
+  fastify.register(adminOlaMapsSettingsRoutes, { prefix: '/ola-maps-settings' })
 }

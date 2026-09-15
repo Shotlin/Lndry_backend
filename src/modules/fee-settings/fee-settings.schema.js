@@ -18,14 +18,23 @@ export const updateFeeSettingsSchema = z
   .object({
     is_active: z.boolean(),
 
-    // Delivery (distance-based)
+    // Delivery (distance-based, or flat when delivery_fee_mode='FLAT')
     delivery_fee_enabled: z.boolean(),
+    delivery_fee_mode: z.enum(['FLAT', 'DISTANCE']),
     min_delivery_fee: nonNegative.max(100000),
     base_distance_km: nonNegative.max(1000),
     per_km_fee: nonNegative.max(100000),
     max_delivery_distance_km: nonNegative.max(1000).nullable(),
     free_delivery_enabled: z.boolean(),
     free_delivery_above: nonNegative.max(10000000).nullable(),
+
+    // Vendor commission — reference value only (see migration 098); not
+    // yet applied to vendor payouts/settlement.
+    vendor_commission_enabled: z.boolean(),
+    vendor_commission_type: feeType,
+    vendor_commission_value: nonNegative.max(100000),
+    vendor_commission_label: label,
+    vendor_commission_description: description,
 
     // Handling
     handling_fee_enabled: z.boolean(),
@@ -80,6 +89,7 @@ export const updateFeeSettingsSchema = z
     const pctChecks = [
       ['handling_fee_type', 'handling_fee_value'],
       ['platform_fee_type', 'platform_fee_value'],
+      ['vendor_commission_type', 'vendor_commission_value'],
     ]
     for (const [typeKey, valueKey] of pctChecks) {
       if (data[typeKey] === 'PERCENT' && data[valueKey] !== undefined && data[valueKey] > 100) {

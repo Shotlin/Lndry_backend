@@ -76,14 +76,16 @@ export class TotalsEngine {
     const minFee = this._num(config.min_delivery_fee)
     const baseKm = this._num(config.base_distance_km)
     const perKm = this._num(config.per_km_fee)
+    const isFlatMode = config.delivery_fee_mode === 'FLAT'
     const distanceKnown = distanceKm !== null && distanceKm !== undefined && Number.isFinite(Number(distanceKm))
     const km = distanceKnown ? this._num(distanceKm) : null
 
     // Fallback when no distance is available: charge the safe minimum fee
-    // rather than crashing or guessing a distance.
+    // rather than crashing or guessing a distance. Same result in FLAT
+    // mode, where distance never enters the calculation at all.
     let before
     let outOfRange = false
-    if (!distanceKnown) {
+    if (isFlatMode || !distanceKnown) {
       before = minFee
     } else {
       // Clamp the chargeable distance to the configured maximum (when set) so

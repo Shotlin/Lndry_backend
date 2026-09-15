@@ -120,6 +120,54 @@ export default async function vendorOrdersRoutes(fastify) {
     }
   }, controller.rejectOrder.bind(controller))
 
+  // POST /:orderId/assign-rider — Manually assign/reassign a specific
+  // rider or staff member (Phase 1 of the rider-assignment initiative)
+  fastify.post('/:orderId/assign-rider', {
+    schema: {
+      tags: ['Vendor Orders'],
+      summary: 'Manually assign a specific rider/staff to this order',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+      body: {
+        type: 'object',
+        required: ['employee_id'],
+        properties: {
+          employee_id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, controller.assignRider.bind(controller))
+
+  // POST /:orderId/offer-rider — Offer (not directly assign) a specific
+  // rider/staff — they must accept before it's confirmed theirs (Phase 2
+  // of the rider-assignment initiative)
+  fastify.post('/:orderId/offer-rider', {
+    schema: {
+      tags: ['Vendor Orders'],
+      summary: 'Offer this order to a specific rider/staff, pending their acceptance',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams,
+      body: {
+        type: 'object',
+        required: ['employee_id'],
+        properties: {
+          employee_id: { type: 'string', format: 'uuid' }
+        }
+      }
+    }
+  }, controller.offerRider.bind(controller))
+
+  // POST /:orderId/broadcast-rider — Broadcast to every active rider at
+  // once; first to accept wins (Phase 3 of the rider-assignment initiative)
+  fastify.post('/:orderId/broadcast-rider', {
+    schema: {
+      tags: ['Vendor Orders'],
+      summary: 'Broadcast this order to every active rider — first to accept wins',
+      security: [{ bearerAuth: [] }],
+      params: orderIdParams
+    }
+  }, controller.broadcastRider.bind(controller))
+
   // POST /:orderId/processing-stage — Update processing stage
   fastify.post('/:orderId/processing-stage', {
     schema: {
