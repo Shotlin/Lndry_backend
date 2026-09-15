@@ -108,6 +108,9 @@ const envSchema = z.object({
   // Error tracking — optional. Sentry stays fully uninitialized (no-op)
   // when unset, in dev and in prod alike.
   SENTRY_DSN: z.string().optional(),
+  // Shared only by the website server and this backend to authenticate the
+  // partner-lead handoff. Never expose through NEXT_PUBLIC_* or mobile apps.
+  WEBSITE_PARTNER_LEAD_HMAC_SECRET: z.string().min(32).optional(),
 
   // Boot-time guards
   // STRICT_PERMISSION_AUDIT — when true, fail boot (exit 1) if any

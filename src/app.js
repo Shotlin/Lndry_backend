@@ -289,6 +289,13 @@ export const buildApp = async () => {
     prefix: '/api/v1/vendor',
   })
 
+  // Website partner enquiries enter canonical staging through a signed
+  // server-to-server boundary. This deliberately does not create a vendor
+  // application or bypass KYC/onboarding.
+  await app.register(import('./modules/partner-leads/partner-leads.routes.js'), {
+    prefix: '/api/v1/integrations',
+  })
+
   // Secure KYC documents streaming (Section 15)
   await app.register(async function secureDocumentsRoutes(fastify) {
     const { VendorsRepository } = await import('./modules/vendors/vendors.repository.js')
