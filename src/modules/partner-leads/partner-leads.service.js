@@ -3,6 +3,65 @@ import { emitInTx } from '../../utils/audit-log.js'
 import { PARTNER_LEAD_SOURCE } from './partner-leads.contract.js'
 
 export class PartnerLeadsService {
+  async list({ state, page = 1, limit = 25 } = {}) {
+    const safePage = Math.max(1, Number.parseInt(page, 10) || 1)
+    const safeLimit = Math.min(100, Math.max(1, Number.parseInt(limit, 10) || 25))
+    const values = []
+    const conditions = []
+    if (state) {
+      values.push(state)
+      conditions.push(`state = $${values.length}`)
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : ''
+    const count = await getClient().then(async (client) => {
+      try { return await client.query(`SELECT count(1)::int AS total FROM partner_leads ${where}`, values) } finally { client.release() }
+    })
+    const client = await getClient()
+    try {
+      const offset = (safePage - 1) * safeLimit
+      const rows = await client.query(`
+        SELECT id, external_lead_id, full_name, business_name, email, phone, city,
+          service_area, services, business_type, daily_capacity, state,
+          source_submitted_at, received_at, last_received_at, received_count,
+          claimed_by_user_id, claimed_at
+        FROM partner_leads ${where}
+        ORDER BY received_at DESC
+        LIMIT $${values.length + 1} OFFSET $${values.length + 2}
+      `, [...values, safeLimit, offset])
+      return { leads: rows.rows, page: safePage, limit: safeLimit, total: count.rows[0].total }
+    } finally { client.release() }
+  }
+
+  async claim(leadId, actorId, requestMeta = {}) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      const updated = await client.query(`
+        UPDATE partner_leads
+        SET state = 'CLAIMED', claimed_by_user_id = $2, claimed_at = now()
+        WHERE id = $1 AND state = 'RECEIVED'
+        RETURNING id, state, claimed_by_user_id, claimed_at
+      `, [leadId, actorId])
+      if (!updated.rowCount) {
+        await client.query('ROLLBACK')
+        const existing = await query('SELECT state FROM partner_leads WHERE id = $1', [leadId])
+        if (!existing.rowCount) throw { statusCode: 404, message: 'Partner lead not found' }
+        throw { statusCode: 409, message: `Partner lead is already ${String(existing.rows[0].state).toLowerCase()}` }
+      }
+      const lead = updated.rows[0]
+      await emitInTx(client, 'partner_lead_claimed', {
+        actor_user_id: actorId, actor_role: 'ADMIN', target_type: 'partner_lead', target_id: lead.id,
+        after: { state: lead.state, claimedBy: actorId },
+        ip_address: requestMeta.ip || null, user_agent: requestMeta.userAgent || null,
+      })
+      await client.query('COMMIT')
+      return lead
+    } catch (error) {
+      try { await client.query('ROLLBACK') } catch { /* transaction already rolled back */ }
+      throw error
+    } finally { client.release() }
+  }
+
   async receiveWebsiteLead(externalLeadId, input, requestMeta = {}) {
     const client = await getClient()
     try {

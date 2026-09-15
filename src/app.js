@@ -295,6 +295,9 @@ export const buildApp = async () => {
   await app.register(import('./modules/partner-leads/partner-leads.routes.js'), {
     prefix: '/api/v1/integrations',
   })
+  await app.register(import('./modules/partner-leads/partner-leads.admin.routes.js'), {
+    prefix: '/api/v1/admin',
+  })
 
   // Secure KYC documents streaming (Section 15)
   await app.register(async function secureDocumentsRoutes(fastify) {
