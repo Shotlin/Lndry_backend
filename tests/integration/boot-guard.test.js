@@ -118,7 +118,7 @@ describe('Task 23.11: Boot-time guard — auditCollectedRoutes() detects violati
     const collectedRoutes = [
       {
         method: 'GET',
-        url: '/api/v1/vendors/list',
+        url: '/api/v1/vendors/admin/list',
         preHandler: [],
         config: {},
       },
@@ -129,7 +129,7 @@ describe('Task 23.11: Boot-time guard — auditCollectedRoutes() detects violati
     expect(result.violations).toHaveLength(1)
     expect(result.violations[0]).toMatchObject({
       method: 'GET',
-      url: '/api/v1/vendors/list',
+      url: '/api/v1/vendors/admin/list',
       kind: 'missing',
     })
   })
@@ -251,7 +251,7 @@ describe('Task 23.11: Boot-time guard — runPermissionAudit() strict mode fails
       },
       {
         method: 'POST',
-        url: '/api/v1/vendors/create',
+        url: '/api/v1/vendors/admin/create',
         preHandler: [],
         config: { requiredPermission: 'vendors.create' },
       },

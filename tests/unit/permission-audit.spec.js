@@ -124,12 +124,22 @@ describe('auditCollectedRoutes', () => {
     const result = auditCollectedRoutes([
       route({
         method: 'GET',
-        url: '/api/v1/vendors/123',
+        url: '/api/v1/vendors/admin/123',
         config: { requiredPermission: canonical },
       }),
     ])
     expect(result.violations).toEqual([])
     expect(result.protectedCount).toBe(1)
+  })
+
+  it('does not classify public vendor discovery routes as protected', () => {
+    const result = auditCollectedRoutes([
+      route({ method: 'GET', url: '/api/v1/vendors/:vendorId' }),
+      route({ method: 'GET', url: '/api/v1/vendors/:vendorId/services' }),
+    ])
+    expect(result.violations).toEqual([])
+    expect(result.protectedCount).toBe(0)
+    expect(result.unscopedCount).toBe(2)
   })
 
   it('accepts a canonical Permission_String attached via preHandler.requiredPermission', () => {

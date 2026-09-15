@@ -78,7 +78,10 @@ import { CANONICAL_PERMISSIONS } from './permissions.js'
  *                                   settings, analytics, customers, riders,
  *                                   themes, banners, audit logs, finance,
  *                                   reports, coupons, shop-garment_rates approval)
- *   - `/api/v1/vendors/*`           — vendors module + nested staff alias
+ *   - `/api/v1/vendors/admin/*`     — HQ vendor/application controls
+ *   - `/api/v1/vendors/:shopId/staff` — vendor staff alias
+ *   - `/api/v1/vendors/:shopId/garment_rates` — nested catalogue controls
+ *   - `/api/v1/vendors/:shopId/stock-movements` — nested stock ledger reader
  *   - `/api/v1/shop-staff/*`      — staff CRUD
  *   - `/api/v1/shop-garment_rates/*`   — per-shop inventory, manual create,
  *                                   stock adjust, bulk price update
@@ -89,7 +92,13 @@ import { CANONICAL_PERMISSIONS } from './permissions.js'
  *   - `/api/v1/shop-coupons/*`    — store-scoped coupon CRUD (Phase C)
  *   - `/api/v1/shop-audit-logs`   — store-scoped audit reader (Phase C)
  *
- * Note: customer-facing modules (cart, customer orders, addresses,
+ * Note: the public marketplace vendor discovery routes live at
+ * `/api/v1/vendors/:vendorId` and `/api/v1/vendors/:vendorId/services`.
+ * They are deliberately not part of the protected set; matching the whole
+ * `/api/v1/vendors/` prefix would falsely report those public routes and
+ * encourage route authors to add an admin permission to a customer API.
+ *
+ * Customer-facing modules (cart, customer orders, addresses,
  * allocation, payments, wallet, wishlist, reviews, notifications, banners,
  * theme, garment_rates read, categories read, tip-presets read, payment-offers
  * read, scheduled-orders, bulk-orders) are explicitly EXCLUDED from this
@@ -100,7 +109,10 @@ import { CANONICAL_PERMISSIONS } from './permissions.js'
  */
 const PROTECTED_PREFIXES = Object.freeze([
   '/api/v1/admin/',
-  '/api/v1/vendors/',
+  '/api/v1/vendors/admin/',
+  '/api/v1/vendors/:shopId/staff',
+  '/api/v1/vendors/:shopId/garment_rates',
+  '/api/v1/vendors/:shopId/stock-movements',
   '/api/v1/shop-staff',
   '/api/v1/shop-garment_rates',
   '/api/v1/shop-transactions',
