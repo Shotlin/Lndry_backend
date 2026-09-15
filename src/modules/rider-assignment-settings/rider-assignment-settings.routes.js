@@ -1,6 +1,7 @@
 import { RiderAssignmentSettingsController } from './rider-assignment-settings.controller.js'
 import { RiderAssignmentSettingsService } from './rider-assignment-settings.service.js'
 import { RiderAssignmentSettingsRepository } from './rider-assignment-settings.repository.js'
+import { requirePermission } from '../../middlewares/permission-check.js'
 
 /**
  * Rider Assignment Settings admin routes plugin — Phase 5 of the
@@ -17,15 +18,18 @@ export default async function riderAssignmentSettingsRoutes(fastify) {
   const repository = new RiderAssignmentSettingsRepository()
   const service = new RiderAssignmentSettingsService(repository)
   const controller = new RiderAssignmentSettingsController(service)
-  const adminAuth = [fastify.authenticate, fastify.requireAdmin]
+  const readAuth = [fastify.authenticate, requirePermission('riders.view')]
+  const writeAuth = [fastify.authenticate, requirePermission('riders.assign')]
 
   fastify.get('/', {
     schema: { tags: ['Rider Assignment Settings'], summary: 'Get rider assignment settings' },
-    preHandler: adminAuth,
+    config: { requiredPermission: 'riders.view' },
+    preHandler: readAuth,
   }, controller.get.bind(controller))
 
   fastify.put('/', {
     schema: { tags: ['Rider Assignment Settings'], summary: 'Update rider assignment settings' },
-    preHandler: adminAuth,
+    config: { requiredPermission: 'riders.assign' },
+    preHandler: writeAuth,
   }, controller.update.bind(controller))
 }
