@@ -248,6 +248,30 @@ export default async function vendorOrdersRoutes(fastify) {
             type: 'array',
             minItems: 1,
             items: { type: 'string' }
+          },
+          // Structured "report a problem" annotations (damaged item, item
+          // not applicable to this service, etc.) attached to specific
+          // lines on this order — see reconciliation-problem-types module.
+          // Purely evidentiary: the actual price change still comes from
+          // lines[]/confirmed_weight_kg/new_garment_type_id above.
+          problems: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['order_line_id', 'photo_urls'],
+              properties: {
+                order_line_id: { type: 'string', format: 'uuid' },
+                // Omit for "Other" — custom_message is required in that case.
+                problem_type_id: { type: 'string', format: 'uuid' },
+                custom_message: { type: 'string', maxLength: 500 },
+                photo_urls: {
+                  type: 'array',
+                  minItems: 1,
+                  maxItems: 3,
+                  items: { type: 'string' }
+                }
+              }
+            }
           }
         }
       }

@@ -654,12 +654,7 @@ export class OrdersService {
     const reconciliation = reconRes.rows[0]
     if (!reconciliation) return null
 
-    const photosRes = await query(
-      `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
-      [reconciliation.id]
-    )
-
-    return { ...reconciliation, photos: photosRes.rows.map((r) => r.photo_url) }
+    return this._attachReconciliationPhotos(reconciliation)
   }
 
   /**
@@ -1056,15 +1051,43 @@ export class OrdersService {
   }
 
   /**
-   * Attaches photo evidence to a reconciliation row for customer display.
+   * Attaches photo evidence and any vendor-reported line-item problems
+   * (damaged item, item not applicable to this service, etc. — see
+   * reconciliation-problem-types module) to a reconciliation row for
+   * customer/vendor display. Rider-stage reconciliations never have
+   * problems attached (only the vendor's reconcile flow proposes them),
+   * so the query just comes back empty for those — no branching needed.
    */
   async _attachReconciliationPhotos(row) {
     if (!row) return null
-    const photosRes = await query(
-      `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
-      [row.id]
-    )
-    return { ...row, photos: photosRes.rows.map((r) => r.photo_url) }
+    const [photosRes, problemsRes] = await Promise.all([
+      query(
+        `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+        [row.id]
+      ),
+      query(
+        `SELECT p.id, p.order_line_id, p.problem_type_id, p.custom_message, p.photo_urls, p.created_at,
+                pt.label AS problem_type_label
+         FROM order_reconciliation_problems p
+         LEFT JOIN reconciliation_problem_types pt ON pt.id = p.problem_type_id
+         WHERE p.order_reconciliation_id = $1
+         ORDER BY p.created_at ASC`,
+        [row.id]
+      ),
+    ])
+    return {
+      ...row,
+      photos: photosRes.rows.map((r) => r.photo_url),
+      problems: problemsRes.rows.map((p) => ({
+        id: p.id,
+        orderLineId: p.order_line_id,
+        problemTypeId: p.problem_type_id,
+        problemTypeLabel: p.problem_type_label,
+        customMessage: p.custom_message,
+        photoUrls: p.photo_urls,
+        createdAt: p.created_at,
+      })),
+    }
   }
 
   async _enrichCustomerOrder(order) {

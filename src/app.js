@@ -526,6 +526,13 @@ export const buildApp = async () => {
     prefix: '/api/v1/referrals',
   })
 
+  // Reconciliation Problem Types — vendor-facing active list for the
+  // reconcile-sheet picker (admin CRUD is under /api/v1/admin/reconciliation-problem-types)
+  const { vendorReconciliationProblemTypesRoutes } = await import('./modules/admin/reconciliation-problem-types/reconciliation-problem-types.routes.js')
+  await app.register(vendorReconciliationProblemTypesRoutes, {
+    prefix: '/api/v1/reconciliation-problem-types',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {

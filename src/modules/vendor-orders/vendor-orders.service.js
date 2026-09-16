@@ -234,12 +234,37 @@ export class VendorOrdersService {
       // vendor's own order-detail screen can keep showing exactly what was
       // submitted (services, quantities, amount, reason, evidence) while a
       // proposal is pending/disputed, instead of reverting to stale
-      // pre-reconciliation data.
-      const photosRes = await query(
-        `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
-        [reconRes.rows[0].id]
-      )
-      order.latestReconciliation = { ...reconRes.rows[0], photos: photosRes.rows.map((r) => r.photo_url) }
+      // pre-reconciliation data. Same for reported line-item problems
+      // (damaged item, item not applicable to this service, etc.) — the
+      // vendor should keep seeing what they flagged, not just the customer.
+      const [photosRes, problemsRes] = await Promise.all([
+        query(
+          `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+          [reconRes.rows[0].id]
+        ),
+        query(
+          `SELECT p.id, p.order_line_id, p.problem_type_id, p.custom_message, p.photo_urls, p.created_at,
+                  pt.label AS problem_type_label
+           FROM order_reconciliation_problems p
+           LEFT JOIN reconciliation_problem_types pt ON pt.id = p.problem_type_id
+           WHERE p.order_reconciliation_id = $1
+           ORDER BY p.created_at ASC`,
+          [reconRes.rows[0].id]
+        ),
+      ])
+      order.latestReconciliation = {
+        ...reconRes.rows[0],
+        photos: photosRes.rows.map((r) => r.photo_url),
+        problems: problemsRes.rows.map((p) => ({
+          id: p.id,
+          orderLineId: p.order_line_id,
+          problemTypeId: p.problem_type_id,
+          problemTypeLabel: p.problem_type_label,
+          customMessage: p.custom_message,
+          photoUrls: p.photo_urls,
+          createdAt: p.created_at,
+        })),
+      }
     } else {
       order.latestReconciliation = null
     }
@@ -579,6 +604,7 @@ export class VendorOrdersService {
       adjustment_reason: adjustmentReason,
       photo_urls: photoUrls,
       new_lines: requestedNewLines,
+      problems: requestedProblems,
     } = body
 
     if (!Array.isArray(photoUrls) || photoUrls.length === 0) {
@@ -613,6 +639,32 @@ export class VendorOrdersService {
         [orderId]
       )
       const linesById = new Map(linesRes.rows.map((l) => [l.id, l]))
+
+      // "Report a problem" annotations (damaged item, item not applicable
+      // to this service, etc.) — purely evidentiary, validated up front so
+      // a bad entry fails the whole request instead of a partial insert.
+      const problemsInput = Array.isArray(requestedProblems) ? requestedProblems : []
+      for (const p of problemsInput) {
+        if (!linesById.has(p.order_line_id)) {
+          throw { statusCode: 400, message: `Unknown order_line_id in problems: ${p.order_line_id}`, code: 'VALIDATION_ERROR' }
+        }
+        if (!p.problem_type_id && !(p.custom_message && p.custom_message.trim())) {
+          throw { statusCode: 400, message: 'A problem with no problem_type_id must include a custom_message', code: 'VALIDATION_ERROR' }
+        }
+      }
+      const problemTypeIds = [...new Set(problemsInput.filter((p) => p.problem_type_id).map((p) => p.problem_type_id))]
+      if (problemTypeIds.length > 0) {
+        const ptRes = await client.query(
+          `SELECT id FROM reconciliation_problem_types WHERE id = ANY($1::uuid[])`,
+          [problemTypeIds]
+        )
+        const validProblemTypeIds = new Set(ptRes.rows.map((r) => r.id))
+        for (const id of problemTypeIds) {
+          if (!validProblemTypeIds.has(id)) {
+            throw { statusCode: 400, message: `Unknown problem_type_id: ${id}`, code: 'VALIDATION_ERROR' }
+          }
+        }
+      }
 
       // Reclassification (100% of an existing line moves to a different
       // service, e.g. a delicate item selected under a per-kg wash actually
@@ -716,6 +768,15 @@ export class VendorOrdersService {
           `INSERT INTO order_pickup_photos (order_id, photo_url, is_grouped, uploaded_by, context, order_reconciliation_id)
            VALUES ($1, $2, true, $3, 'VENDOR_RECONCILIATION', $4)`,
           [orderId, url, userId, reconciliationId]
+        )
+      }
+
+      for (const p of problemsInput) {
+        await client.query(
+          `INSERT INTO order_reconciliation_problems (
+             order_reconciliation_id, order_line_id, problem_type_id, custom_message, photo_urls, created_by
+           ) VALUES ($1, $2, $3, $4, $5, $6)`,
+          [reconciliationId, p.order_line_id, p.problem_type_id || null, p.custom_message || null, p.photo_urls, userId]
         )
       }
 
