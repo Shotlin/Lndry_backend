@@ -1066,7 +1066,7 @@ export class OrdersService {
         [row.id]
       ),
       query(
-        `SELECT p.id, p.order_line_id, p.problem_type_id, p.custom_message, p.photo_urls, p.created_at,
+        `SELECT p.id, p.order_line_id, p.new_line_index, p.problem_type_id, p.custom_message, p.photo_urls, p.created_at,
                 pt.label AS problem_type_label
          FROM order_reconciliation_problems p
          LEFT JOIN reconciliation_problem_types pt ON pt.id = p.problem_type_id
@@ -1081,6 +1081,7 @@ export class OrdersService {
       problems: problemsRes.rows.map((p) => ({
         id: p.id,
         orderLineId: p.order_line_id,
+        newLineIndex: p.new_line_index,
         problemTypeId: p.problem_type_id,
         problemTypeLabel: p.problem_type_label,
         customMessage: p.custom_message,
