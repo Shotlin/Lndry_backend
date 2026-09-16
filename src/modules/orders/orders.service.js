@@ -1596,6 +1596,38 @@ export class OrdersService {
       }
     }
 
+    // 4e. Referral reward credit (Refer & Earn, Phase 3) — a free express
+    // or standard delivery earned via referral, redeemed automatically
+    // like the rewards above (no code needed). Always stacks — never
+    // yields to a coupon/first-time-offer/cart-milestone discount — same
+    // precedent First-Time-Offer's FREE_DELIVERY already set: "free
+    // delivery" and "money off" are different benefits, not competitors
+    // for the same discount slot. Only consumed if it actually reduces
+    // what's owed (checked below via the real computed fee, not just
+    // "is express pickup"), so an earned credit is never silently wasted
+    // on an order that would've been free/inapplicable anyway — e.g. a
+    // FREE_STANDARD_DELIVERY credit does nothing on an order already above
+    // fee_settings.free_delivery_above. Snapshot the reservation (not yet
+    // consumed — see placeOrderFromDraft below) rather than decrementing
+    // now, so an abandoned draft never spends a credit for nothing.
+    let referralCredit = null
+    const referralCreditType = isExpressPickup ? 'FREE_EXPRESS_DELIVERY' : 'FREE_STANDARD_DELIVERY'
+    const availableReferralCredit = await this.referralsRepo.getCredit(userId, referralCreditType)
+    if (availableReferralCredit > 0) {
+      const preReferralBreakdown = await this._buildDraftFeeBreakdown({
+        quote, vendor, distanceKm: distance,
+        couponDiscount: appliedCouponDiscount + extraDiscount,
+        isExpressPickup,
+      })
+      const feeToWaivePaise = isExpressPickup
+        ? preReferralBreakdown.express_fee_paise
+        : preReferralBreakdown.delivery_fee_paise
+      if (feeToWaivePaise > 0) {
+        referralCredit = { creditType: referralCreditType }
+        extraDiscount += this._paiseToRupees(feeToWaivePaise)
+      }
+    }
+
     // 5. Canonical backend pricing. Quote owns item pricing; TotalsEngine owns
     // fees/taxes/discount math so draft and final order use the same snapshot.
     const feeBreakdown = await this._buildDraftFeeBreakdown({
@@ -1620,6 +1652,7 @@ export class OrdersService {
       cart_milestone: cartMilestone
         ? { id: cartMilestone.id, name: cartMilestone.name, rewardType: cartMilestone.rewardType, unlockCouponId: cartMilestoneReward?.unlockCouponId ?? null }
         : null,
+      referral_credit: referralCredit,
       coupon_code: appliedCouponCode
     }
 
@@ -1865,6 +1898,18 @@ export class OrdersService {
           await this.cartMilestonesService.recordUsage(snapshot.cart_milestone.id, userId, order.id)
         } catch (err) {
           logger.warn({ err: err.message, orderId: order.id }, 'Cart milestone follow-through failed')
+        }
+      }
+
+      // Referral reward credit follow-through — the reservation made in
+      // prepareOrder (see snapshot.referral_credit) is only actually spent
+      // now that the order is real, mirroring the coupon-usage/milestone
+      // pattern above; an abandoned draft never consumes it.
+      if (snapshot.referral_credit) {
+        try {
+          await this.referralsRepo.consumeCredit(userId, snapshot.referral_credit.creditType)
+        } catch (err) {
+          logger.warn({ err: err.message, orderId: order.id }, 'Referral credit consumption failed')
         }
       }
 
