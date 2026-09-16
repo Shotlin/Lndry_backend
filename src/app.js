@@ -520,6 +520,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/cart-milestones',
   })
 
+  // Referrals — customer-facing "Refer & Earn" (admin CRUD of programs is under /api/v1/admin/referral-programs)
+  const { default: referralsRoutes } = await import('./modules/referrals/referrals.routes.js')
+  await app.register(referralsRoutes, {
+    prefix: '/api/v1/referrals',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {

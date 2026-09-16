@@ -31,7 +31,10 @@ export class UsersController {
       return reply.code(400).send(error(result.message, 'EMAIL_TAKEN'))
     }
 
-    return reply.code(200).send(success(result.user, 'Profile updated'))
+    // An invalid/already-used referral code is a soft failure — profile
+    // completion itself already succeeded above, so this rides along as
+    // extra metadata rather than failing the whole request.
+    return reply.code(200).send(success(result.user, 'Profile updated', { referral: result.referral }))
   }
 
   /**

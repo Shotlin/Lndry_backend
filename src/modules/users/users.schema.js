@@ -42,6 +42,7 @@ export const updateProfileSchema = {
       name: { type: 'string', minLength: 2, maxLength: 100 },
       email: { type: 'string', format: 'email', maxLength: 255 },
       birthday: { type: 'string', format: 'date' },
+      referralCode: { type: 'string', maxLength: 20 },
     },
   },
   response: {
@@ -51,6 +52,7 @@ export const updateProfileSchema = {
         success: { type: 'boolean' },
         message: { type: 'string' },
         data: { type: 'object' },
+        referral: { type: 'object' },
       },
     },
   },

@@ -22,6 +22,8 @@ import { FirstTimeOffersRepository } from '../admin/first-time-offers/first-time
 import { FirstTimeOffersService } from '../admin/first-time-offers/first-time-offers.service.js'
 import { CartMilestonesRepository } from '../admin/cart-milestones/cart-milestones.repository.js'
 import { CartMilestonesService } from '../admin/cart-milestones/cart-milestones.service.js'
+import { ReferralsRepository } from '../referrals/referrals.repository.js'
+import { ReferralsService } from '../referrals/referrals.service.js'
 import { ShopProductsRepository } from '../shop-garment_rates/shop-garment_rates.repository.js'
 import { ShopProductsService } from '../shop-garment_rates/shop-garment_rates.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
@@ -58,6 +60,10 @@ export class OrdersService {
       options.cartMilestonesRepository || new CartMilestonesRepository()
     this.cartMilestonesService =
       options.cartMilestonesService || new CartMilestonesService(this.cartMilestonesRepo, undefined, this.couponsRepo)
+    this.referralsRepo =
+      options.referralsRepository || new ReferralsRepository()
+    this.referralsService =
+      options.referralsService || new ReferralsService(this.referralsRepo)
     this.shopProductsRepo =
       options.shopProductsRepository || new ShopProductsRepository()
     // Build a ShopProductsService for stock-transition side effects so that
@@ -1860,6 +1866,18 @@ export class OrdersService {
         } catch (err) {
           logger.warn({ err: err.message, orderId: order.id }, 'Cart milestone follow-through failed')
         }
+      }
+
+      // Referral completion — if this buyer was referred and this is their
+      // genuine first order (never true for the draft's own just-inserted
+      // row alone; isFirstOrder explicitly excludes it), grant whichever
+      // side(s) of the referral are ON_FIRST_ORDER_COMPLETE-triggered and
+      // still pending. Same deferred-until-confirmed reasoning as the two
+      // blocks above — an abandoned draft never grants anything.
+      try {
+        await this.referralsService.completeReferralForOrder(userId, order.id)
+      } catch (err) {
+        logger.warn({ err: err.message, orderId: order.id }, 'Referral completion failed')
       }
 
       // Notify vendor
