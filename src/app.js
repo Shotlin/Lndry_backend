@@ -660,5 +660,34 @@ export const buildApp = async () => {
     }
   })
 
+  // Temporary diagnostic checkpoint for the vendor app's splash-hang
+  // investigation (2026-09-16) — the affected tester device is remote
+  // (different city, no physical/USB access), so the vendor app pings this
+  // at each step of its startup/session-restore sequence instead of
+  // guessing blind. No auth — it must work before any token exists.
+  // Read results with: docker compose logs api | grep VENDOR_SPLASH_DIAG
+  // Safe to delete this route once that investigation is closed.
+  app.post('/health/diag', {
+    schema: {
+      tags: ['Health'],
+      summary: 'Temporary client startup checkpoint logger (vendor app splash-hang investigation)',
+      body: {
+        type: 'object',
+        properties: {
+          app: { type: 'string' },
+          sessionId: { type: 'string' },
+          step: { type: 'string' },
+          extra: { type: 'object', additionalProperties: true },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    request.log.info(
+      { tag: 'VENDOR_SPLASH_DIAG', ...request.body, ip: request.ip },
+      'VENDOR_SPLASH_DIAG'
+    )
+    return reply.code(204).send()
+  })
+
   return app
 }
