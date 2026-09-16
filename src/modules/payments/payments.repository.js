@@ -69,6 +69,24 @@ export class PaymentsRepository {
   }
 
   /**
+   * Every payment attempt for an order (ADVANCE, BALANCE, and any FAILED/
+   * PENDING retries), oldest first — the full history, unlike findByOrderId
+   * (latest row only) or findByOrderIdAndPurpose (latest row of one
+   * purpose). Customer-facing "how was this order actually paid" needs the
+   * whole list: an order's advance and balance legs can genuinely have been
+   * paid by two different methods (e.g. advance via Razorpay, balance via
+   * the LNDRY wallet), which orders.payment_method alone can't represent —
+   * that column only ever encodes the checkout-time COD-vs-online choice.
+   */
+  async listByOrderId(orderId) {
+    const { rows } = await query(
+      `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE order_id = $1 ORDER BY created_at ASC`,
+      [orderId]
+    )
+    return rows.map((row) => this._format(row))
+  }
+
+  /**
    * Find the latest payment of a specific purpose (ADVANCE/BALANCE/FULL)
    * for an order — distinct from findByOrderId, which only ever sees the
    * single latest row regardless of purpose and would otherwise wrongly

@@ -288,7 +288,14 @@ export class PaymentsService {
           amount: amountRupees,
           currency: 'INR',
           status: 'PAID',
-          method: 'WALLET',
+          // Distinct from a Razorpay-side "wallet" sub-method (Paytm/
+          // PhonePe etc. paid *through* Razorpay's own checkout, which its
+          // webhook can independently report as method: 'wallet') — this is
+          // LNDRY's own stored-value balance, debited directly above with
+          // no gateway involved at all. Keeping the string distinct is what
+          // lets the client tell the two apart instead of showing both as
+          // an ambiguous "Wallet".
+          method: 'LNDRY_WALLET',
           purpose,
         },
         client

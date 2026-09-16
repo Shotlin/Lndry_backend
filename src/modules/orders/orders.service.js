@@ -1068,7 +1068,7 @@ export class OrdersService {
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems] = await Promise.all([
+    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems, paymentsRes] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
@@ -1084,6 +1084,15 @@ export class OrdersService {
       // whenever it has rows (older orders predating order_lines fall back
       // to the snapshot).
       this.repo.getOrderItems(order.id),
+      // Full payment history (ADVANCE + BALANCE, and any failed/pending
+      // attempts), oldest first — orders.payment_method alone only ever
+      // encodes the checkout-time COD-vs-online choice, never which method
+      // actually settled each leg (the advance and balance can genuinely
+      // differ, e.g. advance via Razorpay, balance via the LNDRY wallet).
+      query(
+        `SELECT id, purpose, method, status, amount, created_at FROM payments WHERE order_id = $1 ORDER BY created_at ASC`,
+        [order.id]
+      ),
     ])
 
     const [riderReevaluation, vendorReevaluation] = await Promise.all([
@@ -1109,6 +1118,17 @@ export class OrdersService {
     // not yet paid), not a bug, so no diagnostic logging is needed here.
     const amountPaidPaise = Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100)
 
+    // Customer-facing shape only — deliberately excludes Razorpay's
+    // internal order/payment/signature IDs, which this screen never needs.
+    const payments = paymentsRes.rows.map((row) => ({
+      id: row.id,
+      purpose: row.purpose,
+      method: row.method || null,
+      status: row.status,
+      amountPaise: Math.round(Number(row.amount) * 100),
+      createdAt: row.created_at,
+    }))
+
     return {
       ...enriched,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
@@ -1116,6 +1136,7 @@ export class OrdersService {
       amountPaidPaise,
       deliveryFeePaise: feeBreakdown.delivery_fee_paise ?? 2900,
       platformFeePaise: feeBreakdown.platform_fee_paise ?? 500,
+      payments,
       riderReevaluation,
       vendorReevaluation,
     }
