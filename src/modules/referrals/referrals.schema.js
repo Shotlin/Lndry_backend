@@ -79,3 +79,71 @@ export const getMyHistorySchema = {
     },
   },
 }
+
+export const listAllAdminSchema = {
+  tags: ['Referrals', 'Admin'],
+  summary: 'All referrals platform-wide, paginated and searchable [ADMIN]',
+  querystring: {
+    type: 'object',
+    properties: {
+      page: { type: 'integer', minimum: 1, default: 1 },
+      limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+      search: { type: 'string', maxLength: 100 },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              status: { type: 'string' },
+              referrerName: { type: ['string', 'null'] },
+              referrerPhone: { type: ['string', 'null'] },
+              refereeName: { type: ['string', 'null'] },
+              refereePhone: { type: ['string', 'null'] },
+              programName: { type: ['string', 'null'] },
+              referrerRewardStatus: { type: 'string' },
+              referrerRewardGrantedAt: { type: ['string', 'null'] },
+              refereeRewardStatus: { type: 'string' },
+              refereeRewardGrantedAt: { type: ['string', 'null'] },
+              createdAt: { type: 'string' },
+              refereeSignedUpAt: { type: 'string' },
+              refereeFirstOrderCompletedAt: { type: ['string', 'null'] },
+            },
+          },
+        },
+        pagination: { type: 'object' },
+      },
+    },
+  },
+}
+
+export const getAdminSummarySchema = {
+  tags: ['Referrals', 'Admin'],
+  summary: 'Platform-wide referral stats for the monitoring page stat strip [ADMIN]',
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            total: { type: 'integer' },
+            pending: { type: 'integer' },
+            completed: { type: 'integer' },
+            rewardsGranted: { type: 'integer' },
+          },
+        },
+      },
+    },
+  },
+}

@@ -155,6 +155,84 @@ export class ReferralsRepository {
     }
   }
 
+  /** Platform-wide, paginated referral list for the admin monitoring page. */
+  async findAllAdmin({ limit, offset, search }) {
+    const params = []
+    let idx = 1
+    let searchClause = ''
+    if (search) {
+      searchClause = `AND (referrer.name ILIKE $${idx} OR referrer.phone ILIKE $${idx} OR referee.name ILIKE $${idx} OR referee.phone ILIKE $${idx})`
+      params.push(`%${search}%`)
+      idx += 1
+    }
+
+    const countResult = await query(
+      `SELECT COUNT(*) FROM referrals r
+       JOIN users referrer ON referrer.id = r.referrer_id
+       JOIN users referee ON referee.id = r.referee_id
+       WHERE 1=1 ${searchClause}`,
+      params
+    )
+
+    const listParams = [...params, limit, offset]
+    const { rows } = await query(
+      `SELECT r.id, r.status, r.created_at, r.referee_signed_up_at, r.referee_first_order_completed_at,
+              r.referrer_reward_status, r.referrer_reward_granted_at,
+              r.referee_reward_status, r.referee_reward_granted_at,
+              referrer.name AS referrer_name, referrer.phone AS referrer_phone,
+              referee.name AS referee_name, referee.phone AS referee_phone,
+              p.name AS program_name
+       FROM referrals r
+       JOIN users referrer ON referrer.id = r.referrer_id
+       JOIN users referee ON referee.id = r.referee_id
+       LEFT JOIN referral_programs p ON p.id = r.referral_program_id
+       WHERE 1=1 ${searchClause}
+       ORDER BY r.created_at DESC
+       LIMIT $${idx} OFFSET $${idx + 1}`,
+      listParams
+    )
+
+    return {
+      referrals: rows.map((row) => ({
+        id: row.id,
+        status: row.status,
+        referrerName: row.referrer_name,
+        referrerPhone: row.referrer_phone,
+        refereeName: row.referee_name,
+        refereePhone: row.referee_phone,
+        programName: row.program_name,
+        referrerRewardStatus: row.referrer_reward_status,
+        referrerRewardGrantedAt: row.referrer_reward_granted_at,
+        refereeRewardStatus: row.referee_reward_status,
+        refereeRewardGrantedAt: row.referee_reward_granted_at,
+        createdAt: row.created_at,
+        refereeSignedUpAt: row.referee_signed_up_at,
+        refereeFirstOrderCompletedAt: row.referee_first_order_completed_at,
+      })),
+      total: parseInt(countResult.rows[0].count, 10),
+    }
+  }
+
+  /** Platform-wide summary stats for the admin monitoring page's stat strip. */
+  async getAdminSummary() {
+    const { rows } = await query(
+      `SELECT
+         COUNT(*)::int AS total,
+         COUNT(*) FILTER (WHERE status = 'PENDING_FIRST_ORDER')::int AS pending,
+         COUNT(*) FILTER (WHERE status = 'COMPLETED')::int AS completed,
+         (COUNT(*) FILTER (WHERE referrer_reward_status = 'GRANTED')
+          + COUNT(*) FILTER (WHERE referee_reward_status = 'GRANTED'))::int AS rewards_granted
+       FROM referrals`
+    )
+    const row = rows[0] || {}
+    return {
+      total: row.total || 0,
+      pending: row.pending || 0,
+      completed: row.completed || 0,
+      rewardsGranted: row.rewards_granted || 0,
+    }
+  }
+
   // ── Reward credits ledger (referral_reward_credits) ────────────────────────
 
   async grantCredit(userId, creditType, count, sourceReferralId) {

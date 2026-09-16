@@ -225,4 +225,17 @@ export class ReferralsService {
     const { referrals, total } = await this.repo.findByReferrer(userId, { limit, offset })
     return { referrals, pagination: buildPagination({ page, limit, total }) }
   }
+
+  // ── Admin monitoring (platform-wide, read-only) ─────────────────────────────
+
+  async listAllAdmin(filters = {}) {
+    const { offset, limit } = getOffsetLimit(filters)
+    const page = Math.max(1, Math.floor(filters.page || 1))
+    const { referrals, total } = await this.repo.findAllAdmin({ limit, offset, search: filters.search })
+    return { referrals, pagination: buildPagination({ page, limit, total }) }
+  }
+
+  async getAdminSummary() {
+    return this.repo.getAdminSummary()
+  }
 }
