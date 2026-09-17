@@ -107,6 +107,7 @@ describe('VendorOrdersService.getOrder — evidence read path', () => {
       .mockResolvedValueOnce({ rows: [] }) // pickup/delivery assignments
       .mockResolvedValueOnce({ rows: [{ id: RECON_ID, status: 'PENDING_CUSTOMER' }] }) // latest reconciliation
       .mockResolvedValueOnce({ rows: [{ photo_url: 'https://cdn/recon-only.jpg' }] }) // reconciliation-scoped photos
+      .mockResolvedValueOnce({ rows: [] }) // reconciliation-scoped problem reports
       .mockResolvedValueOnce({
         rows: [
           { photo_url: 'https://cdn/pickup-old.jpg', context: 'RIDER_PICKUP', order_line_id: null, is_grouped: false, created_at: '2026-08-01T00:00:00Z', uploaded_by: 'rider-1', uploaded_by_name: 'Ravi Rider' },
