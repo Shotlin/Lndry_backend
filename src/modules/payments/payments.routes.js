@@ -6,6 +6,7 @@ import {
   createPaymentOrderSchema,
   verifyPaymentSchema,
   paymentHistorySchema,
+  payWithWalletSchema,
   refundSchema,
 } from './payments.schema.js'
 
@@ -37,6 +38,12 @@ export default async function paymentsRoutes(fastify) {
     schema: paymentHistorySchema,
     preHandler: [fastify.authenticate],
   }, controller.history.bind(controller))
+
+  // POST /pay-with-wallet — Pay a draft's advance or an order's balance from wallet
+  fastify.post('/pay-with-wallet', {
+    schema: payWithWalletSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.payWithWallet.bind(controller))
 
   // ─── Webhook (NO AUTH — verified by Razorpay signature) ────────────
 

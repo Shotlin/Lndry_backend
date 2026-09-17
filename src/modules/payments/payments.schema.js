@@ -77,6 +77,29 @@ export const verifyPaymentSchema = {
   },
 }
 
+export const payWithWalletSchema = {
+  tags: ['Payments', 'Wallet'],
+  summary: "Pay a draft's advance, or an order's balance, from wallet balance",
+  body: {
+    type: 'object',
+    properties: {
+      orderId: { type: 'string', format: 'uuid' },
+      order_draft_id: { type: 'string', format: 'uuid' },
+      orderDraftId: { type: 'string', format: 'uuid' },
+    },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: paymentResponseSchema,
+      },
+    },
+  },
+}
+
 export const webhookSchema = {
   tags: ['Payments'],
   summary: 'Razorpay webhook handler',

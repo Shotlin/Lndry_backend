@@ -527,7 +527,8 @@ export class OrdersRepository {
    */
   async getOrderItems(orderId) {
     const { rows } = await query(
-      `SELECT garment_type_id AS garment_rate_id, garment_type_id AS product_id,
+      `SELECT id AS order_line_id,
+              garment_type_id AS garment_rate_id, garment_type_id AS product_id,
               name, unit,
               COALESCE(rate_paise / 100.0, price) AS price,
               COALESCE(confirmed_quantity, quantity) AS quantity,

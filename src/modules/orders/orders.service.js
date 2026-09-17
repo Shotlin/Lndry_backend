@@ -22,6 +22,8 @@ import { FirstTimeOffersRepository } from '../admin/first-time-offers/first-time
 import { FirstTimeOffersService } from '../admin/first-time-offers/first-time-offers.service.js'
 import { CartMilestonesRepository } from '../admin/cart-milestones/cart-milestones.repository.js'
 import { CartMilestonesService } from '../admin/cart-milestones/cart-milestones.service.js'
+import { ReferralsRepository } from '../referrals/referrals.repository.js'
+import { ReferralsService } from '../referrals/referrals.service.js'
 import { ShopProductsRepository } from '../shop-garment_rates/shop-garment_rates.repository.js'
 import { ShopProductsService } from '../shop-garment_rates/shop-garment_rates.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
@@ -58,6 +60,10 @@ export class OrdersService {
       options.cartMilestonesRepository || new CartMilestonesRepository()
     this.cartMilestonesService =
       options.cartMilestonesService || new CartMilestonesService(this.cartMilestonesRepo, undefined, this.couponsRepo)
+    this.referralsRepo =
+      options.referralsRepository || new ReferralsRepository()
+    this.referralsService =
+      options.referralsService || new ReferralsService(this.referralsRepo)
     this.shopProductsRepo =
       options.shopProductsRepository || new ShopProductsRepository()
     // Build a ShopProductsService for stock-transition side effects so that
@@ -648,12 +654,7 @@ export class OrdersService {
     const reconciliation = reconRes.rows[0]
     if (!reconciliation) return null
 
-    const photosRes = await query(
-      `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
-      [reconciliation.id]
-    )
-
-    return { ...reconciliation, photos: photosRes.rows.map((r) => r.photo_url) }
+    return this._attachReconciliationPhotos(reconciliation)
   }
 
   /**
@@ -1050,19 +1051,48 @@ export class OrdersService {
   }
 
   /**
-   * Attaches photo evidence to a reconciliation row for customer display.
+   * Attaches photo evidence and any vendor-reported line-item problems
+   * (damaged item, item not applicable to this service, etc. — see
+   * reconciliation-problem-types module) to a reconciliation row for
+   * customer/vendor display. Rider-stage reconciliations never have
+   * problems attached (only the vendor's reconcile flow proposes them),
+   * so the query just comes back empty for those — no branching needed.
    */
   async _attachReconciliationPhotos(row) {
     if (!row) return null
-    const photosRes = await query(
-      `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
-      [row.id]
-    )
-    return { ...row, photos: photosRes.rows.map((r) => r.photo_url) }
+    const [photosRes, problemsRes] = await Promise.all([
+      query(
+        `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+        [row.id]
+      ),
+      query(
+        `SELECT p.id, p.order_line_id, p.new_line_index, p.problem_type_id, p.custom_message, p.photo_urls, p.created_at,
+                pt.label AS problem_type_label
+         FROM order_reconciliation_problems p
+         LEFT JOIN reconciliation_problem_types pt ON pt.id = p.problem_type_id
+         WHERE p.order_reconciliation_id = $1
+         ORDER BY p.created_at ASC`,
+        [row.id]
+      ),
+    ])
+    return {
+      ...row,
+      photos: photosRes.rows.map((r) => r.photo_url),
+      problems: problemsRes.rows.map((p) => ({
+        id: p.id,
+        orderLineId: p.order_line_id,
+        newLineIndex: p.new_line_index,
+        problemTypeId: p.problem_type_id,
+        problemTypeLabel: p.problem_type_label,
+        customMessage: p.custom_message,
+        photoUrls: p.photo_urls,
+        createdAt: p.created_at,
+      })),
+    }
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems] = await Promise.all([
+    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems, paymentsRes] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
@@ -1078,6 +1108,15 @@ export class OrdersService {
       // whenever it has rows (older orders predating order_lines fall back
       // to the snapshot).
       this.repo.getOrderItems(order.id),
+      // Full payment history (ADVANCE + BALANCE, and any failed/pending
+      // attempts), oldest first — orders.payment_method alone only ever
+      // encodes the checkout-time COD-vs-online choice, never which method
+      // actually settled each leg (the advance and balance can genuinely
+      // differ, e.g. advance via Razorpay, balance via the LNDRY wallet).
+      query(
+        `SELECT id, purpose, method, status, amount, created_at FROM payments WHERE order_id = $1 ORDER BY created_at ASC`,
+        [order.id]
+      ),
     ])
 
     const [riderReevaluation, vendorReevaluation] = await Promise.all([
@@ -1103,6 +1142,17 @@ export class OrdersService {
     // not yet paid), not a bug, so no diagnostic logging is needed here.
     const amountPaidPaise = Math.round(Number(paidRes.rows[0]?.amount_paid || 0) * 100)
 
+    // Customer-facing shape only — deliberately excludes Razorpay's
+    // internal order/payment/signature IDs, which this screen never needs.
+    const payments = paymentsRes.rows.map((row) => ({
+      id: row.id,
+      purpose: row.purpose,
+      method: row.method || null,
+      status: row.status,
+      amountPaise: Math.round(Number(row.amount) * 100),
+      createdAt: row.created_at,
+    }))
+
     return {
       ...enriched,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
@@ -1110,6 +1160,7 @@ export class OrdersService {
       amountPaidPaise,
       deliveryFeePaise: feeBreakdown.delivery_fee_paise ?? 2900,
       platformFeePaise: feeBreakdown.platform_fee_paise ?? 500,
+      payments,
       riderReevaluation,
       vendorReevaluation,
     }
@@ -1590,6 +1641,38 @@ export class OrdersService {
       }
     }
 
+    // 4e. Referral reward credit (Refer & Earn, Phase 3) — a free express
+    // or standard delivery earned via referral, redeemed automatically
+    // like the rewards above (no code needed). Always stacks — never
+    // yields to a coupon/first-time-offer/cart-milestone discount — same
+    // precedent First-Time-Offer's FREE_DELIVERY already set: "free
+    // delivery" and "money off" are different benefits, not competitors
+    // for the same discount slot. Only consumed if it actually reduces
+    // what's owed (checked below via the real computed fee, not just
+    // "is express pickup"), so an earned credit is never silently wasted
+    // on an order that would've been free/inapplicable anyway — e.g. a
+    // FREE_STANDARD_DELIVERY credit does nothing on an order already above
+    // fee_settings.free_delivery_above. Snapshot the reservation (not yet
+    // consumed — see placeOrderFromDraft below) rather than decrementing
+    // now, so an abandoned draft never spends a credit for nothing.
+    let referralCredit = null
+    const referralCreditType = isExpressPickup ? 'FREE_EXPRESS_DELIVERY' : 'FREE_STANDARD_DELIVERY'
+    const availableReferralCredit = await this.referralsRepo.getCredit(userId, referralCreditType)
+    if (availableReferralCredit > 0) {
+      const preReferralBreakdown = await this._buildDraftFeeBreakdown({
+        quote, vendor, distanceKm: distance,
+        couponDiscount: appliedCouponDiscount + extraDiscount,
+        isExpressPickup,
+      })
+      const feeToWaivePaise = isExpressPickup
+        ? preReferralBreakdown.express_fee_paise
+        : preReferralBreakdown.delivery_fee_paise
+      if (feeToWaivePaise > 0) {
+        referralCredit = { creditType: referralCreditType }
+        extraDiscount += this._paiseToRupees(feeToWaivePaise)
+      }
+    }
+
     // 5. Canonical backend pricing. Quote owns item pricing; TotalsEngine owns
     // fees/taxes/discount math so draft and final order use the same snapshot.
     const feeBreakdown = await this._buildDraftFeeBreakdown({
@@ -1614,6 +1697,7 @@ export class OrdersService {
       cart_milestone: cartMilestone
         ? { id: cartMilestone.id, name: cartMilestone.name, rewardType: cartMilestone.rewardType, unlockCouponId: cartMilestoneReward?.unlockCouponId ?? null }
         : null,
+      referral_credit: referralCredit,
       coupon_code: appliedCouponCode
     }
 
@@ -1860,6 +1944,30 @@ export class OrdersService {
         } catch (err) {
           logger.warn({ err: err.message, orderId: order.id }, 'Cart milestone follow-through failed')
         }
+      }
+
+      // Referral reward credit follow-through — the reservation made in
+      // prepareOrder (see snapshot.referral_credit) is only actually spent
+      // now that the order is real, mirroring the coupon-usage/milestone
+      // pattern above; an abandoned draft never consumes it.
+      if (snapshot.referral_credit) {
+        try {
+          await this.referralsRepo.consumeCredit(userId, snapshot.referral_credit.creditType)
+        } catch (err) {
+          logger.warn({ err: err.message, orderId: order.id }, 'Referral credit consumption failed')
+        }
+      }
+
+      // Referral completion — if this buyer was referred and this is their
+      // genuine first order (never true for the draft's own just-inserted
+      // row alone; isFirstOrder explicitly excludes it), grant whichever
+      // side(s) of the referral are ON_FIRST_ORDER_COMPLETE-triggered and
+      // still pending. Same deferred-until-confirmed reasoning as the two
+      // blocks above — an abandoned draft never grants anything.
+      try {
+        await this.referralsService.completeReferralForOrder(userId, order.id)
+      } catch (err) {
+        logger.warn({ err: err.message, orderId: order.id }, 'Referral completion failed')
       }
 
       // Notify vendor

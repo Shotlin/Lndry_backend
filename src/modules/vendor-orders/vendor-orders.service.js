@@ -234,12 +234,38 @@ export class VendorOrdersService {
       // vendor's own order-detail screen can keep showing exactly what was
       // submitted (services, quantities, amount, reason, evidence) while a
       // proposal is pending/disputed, instead of reverting to stale
-      // pre-reconciliation data.
-      const photosRes = await query(
-        `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
-        [reconRes.rows[0].id]
-      )
-      order.latestReconciliation = { ...reconRes.rows[0], photos: photosRes.rows.map((r) => r.photo_url) }
+      // pre-reconciliation data. Same for reported line-item problems
+      // (damaged item, item not applicable to this service, etc.) — the
+      // vendor should keep seeing what they flagged, not just the customer.
+      const [photosRes, problemsRes] = await Promise.all([
+        query(
+          `SELECT photo_url FROM order_pickup_photos WHERE order_reconciliation_id = $1 ORDER BY created_at ASC`,
+          [reconRes.rows[0].id]
+        ),
+        query(
+          `SELECT p.id, p.order_line_id, p.new_line_index, p.problem_type_id, p.custom_message, p.photo_urls, p.created_at,
+                  pt.label AS problem_type_label
+           FROM order_reconciliation_problems p
+           LEFT JOIN reconciliation_problem_types pt ON pt.id = p.problem_type_id
+           WHERE p.order_reconciliation_id = $1
+           ORDER BY p.created_at ASC`,
+          [reconRes.rows[0].id]
+        ),
+      ])
+      order.latestReconciliation = {
+        ...reconRes.rows[0],
+        photos: photosRes.rows.map((r) => r.photo_url),
+        problems: problemsRes.rows.map((p) => ({
+          id: p.id,
+          orderLineId: p.order_line_id,
+          newLineIndex: p.new_line_index,
+          problemTypeId: p.problem_type_id,
+          problemTypeLabel: p.problem_type_label,
+          customMessage: p.custom_message,
+          photoUrls: p.photo_urls,
+          createdAt: p.created_at,
+        })),
+      }
     } else {
       order.latestReconciliation = null
     }
@@ -598,10 +624,18 @@ export class VendorOrdersService {
       adjustment_reason: adjustmentReason,
       photo_urls: photoUrls,
       new_lines: requestedNewLines,
+      problems: requestedProblems,
     } = body
 
-    if (!Array.isArray(photoUrls) || photoUrls.length === 0) {
-      throw { statusCode: 400, message: 'At least one photo_urls entry is required', code: 'VALIDATION_ERROR' }
+    // Evidence requirement is satisfied by either the general photo_urls
+    // here OR at least one problems[] entry (which already carries its own
+    // required 1-3 photos) — a submission that's already documented a
+    // specific line's problem shouldn't also be forced to attach a
+    // redundant, less-specific set of general photos.
+    const hasGeneralPhotos = Array.isArray(photoUrls) && photoUrls.length > 0
+    const hasProblemReports = Array.isArray(requestedProblems) && requestedProblems.length > 0
+    if (!hasGeneralPhotos && !hasProblemReports) {
+      throw { statusCode: 400, message: 'At least one photo_urls entry or problems[] report is required', code: 'VALIDATION_ERROR' }
     }
 
     const client = await getClient()
@@ -695,6 +729,45 @@ export class VendorOrdersService {
         }
       }
 
+      // "Report to re-evaluation" annotations (damaged item, item not
+      // applicable to this service, etc.) — purely evidentiary, validated
+      // up front so a bad entry fails the whole request instead of a
+      // partial insert. Each entry targets exactly one of an existing line
+      // (order_line_id, checked against linesById) or a line being added in
+      // this same request (new_line_index, checked against newLines — which
+      // a not-yet-existing line has no order_lines.id for until the
+      // customer accepts and applyRecalculatedTotals actually inserts it).
+      const problemsInput = Array.isArray(requestedProblems) ? requestedProblems : []
+      for (const p of problemsInput) {
+        const targetsExistingLine = p.order_line_id != null
+        const targetsNewLine = p.new_line_index != null
+        if (targetsExistingLine === targetsNewLine) {
+          throw { statusCode: 400, message: 'Each problem must reference exactly one of order_line_id or new_line_index', code: 'VALIDATION_ERROR' }
+        }
+        if (targetsExistingLine && !linesById.has(p.order_line_id)) {
+          throw { statusCode: 400, message: `Unknown order_line_id in problems: ${p.order_line_id}`, code: 'VALIDATION_ERROR' }
+        }
+        if (targetsNewLine && (p.new_line_index < 0 || p.new_line_index >= newLines.length)) {
+          throw { statusCode: 400, message: `Unknown new_line_index in problems: ${p.new_line_index}`, code: 'VALIDATION_ERROR' }
+        }
+        if (!p.problem_type_id && !(p.custom_message && p.custom_message.trim())) {
+          throw { statusCode: 400, message: 'A problem with no problem_type_id must include a custom_message', code: 'VALIDATION_ERROR' }
+        }
+      }
+      const problemTypeIds = [...new Set(problemsInput.filter((p) => p.problem_type_id).map((p) => p.problem_type_id))]
+      if (problemTypeIds.length > 0) {
+        const ptRes = await client.query(
+          `SELECT id FROM reconciliation_problem_types WHERE id = ANY($1::uuid[])`,
+          [problemTypeIds]
+        )
+        const validProblemTypeIds = new Set(ptRes.rows.map((r) => r.id))
+        for (const id of problemTypeIds) {
+          if (!validProblemTypeIds.has(id)) {
+            throw { statusCode: 400, message: `Unknown problem_type_id: ${id}`, code: 'VALIDATION_ERROR' }
+          }
+        }
+      }
+
       const computed = computeRecalculatedTotals({
         orderRow: order,
         lines: linesRes.rows,
@@ -730,11 +803,23 @@ export class VendorOrdersService {
         throw err
       }
 
-      for (const url of photoUrls) {
+      for (const url of (photoUrls || [])) {
         await client.query(
           `INSERT INTO order_pickup_photos (order_id, photo_url, is_grouped, uploaded_by, context, order_reconciliation_id)
            VALUES ($1, $2, true, $3, 'VENDOR_RECONCILIATION', $4)`,
           [orderId, url, userId, reconciliationId]
+        )
+      }
+
+      for (const p of problemsInput) {
+        await client.query(
+          `INSERT INTO order_reconciliation_problems (
+             order_reconciliation_id, order_line_id, new_line_index, problem_type_id, custom_message, photo_urls, created_by
+           ) VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            reconciliationId, p.order_line_id ?? null, p.new_line_index ?? null,
+            p.problem_type_id || null, p.custom_message || null, p.photo_urls, userId,
+          ]
         )
       }
 

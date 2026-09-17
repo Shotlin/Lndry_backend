@@ -203,7 +203,6 @@ export default async function vendorOrdersRoutes(fastify) {
       params: orderIdParams,
       body: {
         type: 'object',
-        required: ['photo_urls'],
         properties: {
           lines: {
             type: 'array',
@@ -244,10 +243,43 @@ export default async function vendorOrdersRoutes(fastify) {
             }
           },
           adjustment_reason: { type: 'string', maxLength: 500 },
+          // Not required at the schema level any more — the service layer
+          // accepts either general photo_urls here OR at least one
+          // problems[] entry (which carries its own required photos) as
+          // sufficient evidence, so a submission isn't forced to duplicate
+          // photos it already has at the line level.
           photo_urls: {
             type: 'array',
-            minItems: 1,
             items: { type: 'string' }
+          },
+          // Structured "report to re-evaluation" annotations (damaged item,
+          // item not applicable to this service, etc.) attached to specific
+          // lines on this order — see reconciliation-problem-types module.
+          // Purely evidentiary: the actual price change still comes from
+          // lines[]/confirmed_weight_kg/new_garment_type_id above. Each
+          // entry targets exactly one of an existing line (order_line_id)
+          // or a line being added in this same request (new_line_index —
+          // its 0-based position within new_lines[] above), since a new
+          // line has no order_lines.id yet at submission time.
+          problems: {
+            type: 'array',
+            items: {
+              type: 'object',
+              required: ['photo_urls'],
+              properties: {
+                order_line_id: { type: 'string', format: 'uuid' },
+                new_line_index: { type: 'integer', minimum: 0 },
+                // Omit for "Other" — custom_message is required in that case.
+                problem_type_id: { type: 'string', format: 'uuid' },
+                custom_message: { type: 'string', maxLength: 500 },
+                photo_urls: {
+                  type: 'array',
+                  minItems: 1,
+                  maxItems: 3,
+                  items: { type: 'string' }
+                }
+              }
+            }
           }
         }
       }

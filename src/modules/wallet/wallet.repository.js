@@ -1,4 +1,4 @@
-import { query } from '../../src/config/database.js'
+import { query } from '../../config/database.js'
 
 /**
  * Wallet repository — SQL queries for wallets + wallet_transactions
@@ -199,17 +199,6 @@ export class WalletRepository {
     )
 
     return rows[0] ? this._formatTransaction(rows[0]) : null
-  }
-
-  /**
-   * Find user by phone number (for transfers)
-   */
-  async findUserByPhone(phone) {
-    const { rows } = await query(
-      `SELECT id, name, phone FROM users WHERE phone = $1 AND is_active = true`,
-      [phone]
-    )
-    return rows[0] || null
   }
 
   /**

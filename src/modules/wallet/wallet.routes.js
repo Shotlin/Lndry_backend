@@ -7,8 +7,6 @@ import {
   addMoneySchema,
   createTopUpSchema,
   verifyTopUpSchema,
-  payFromWalletSchema,
-  transferSchema,
   adminCreditSchema,
 } from './wallet.schema.js'
 
@@ -52,18 +50,6 @@ export default async function walletRoutes(fastify) {
     schema: addMoneySchema,
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.addMoney.bind(controller))
-
-  // POST /pay — Pay for an order from wallet
-  fastify.post('/pay', {
-    schema: payFromWalletSchema,
-    preHandler: [fastify.authenticate],
-  }, controller.payFromWallet.bind(controller))
-
-  // POST /transfer — Transfer to another user
-  fastify.post('/transfer', {
-    schema: transferSchema,
-    preHandler: [fastify.authenticate],
-  }, controller.transfer.bind(controller))
 
   // ─── Admin routes ───────────────────────────────────────
 

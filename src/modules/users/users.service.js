@@ -2,13 +2,16 @@ import { logger } from '../../config/logger.js'
 import { env } from '../../config/env.js'
 import { buildCloudinaryUrl, normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { uploadImageWithCloudinaryFallback } from '../../utils/cloudinary-upload.js'
+import { ReferralsRepository } from '../referrals/referrals.repository.js'
+import { ReferralsService } from '../referrals/referrals.service.js'
 
 /**
  * Users service — business logic for user management
  */
 export class UsersService {
-  constructor(repository) {
+  constructor(repository, options = {}) {
     this.repo = repository
+    this.referralsService = options.referralsService || new ReferralsService(new ReferralsRepository())
   }
 
   /**
@@ -33,7 +36,19 @@ export class UsersService {
     }
 
     const updated = await this.repo.updateProfile(userId, data)
-    return { success: true, user: this._normalizeUserMedia(updated) }
+
+    // Referral code redemption — an optional field on this same endpoint
+    // (the onboarding "complete your profile" screen is the only client
+    // caller that ever populates it) rather than a dedicated endpoint.
+    // redeemCode itself is a safe no-op for a blank code, and the service
+    // layer's own `referred_by IS NULL` check inside it means this stays
+    // safe even if called again later from an ordinary profile edit.
+    let referral
+    if (data.referralCode) {
+      referral = await this.referralsService.redeemCode(userId, data.referralCode)
+    }
+
+    return { success: true, user: this._normalizeUserMedia(updated), referral }
   }
 
   /**

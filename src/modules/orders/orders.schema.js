@@ -115,6 +115,24 @@ const orderResponseSchema = {
     amountPaidPaise: { type: 'number' },
     deliveryFeePaise: { type: 'number' },
     platformFeePaise: { type: 'number' },
+    // Full payment history (ADVANCE + BALANCE legs, oldest first) — see the
+    // comment on _enrichCustomerOrder. Declared explicitly for the exact
+    // reason amountPaidPaise is above it: fast-json-stringify silently
+    // strips any computed field missing from this schema.
+    payments: {
+      type: 'array',
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', format: 'uuid' },
+          purpose: { type: 'string', enum: ['ADVANCE', 'BALANCE', 'FULL'] },
+          method: { type: ['string', 'null'] },
+          status: { type: 'string' },
+          amountPaise: { type: 'number' },
+          createdAt: { type: 'string' },
+        },
+      },
+    },
     riderReevaluation: { type: ['object', 'null'], additionalProperties: true },
     vendorReevaluation: { type: ['object', 'null'], additionalProperties: true },
   },

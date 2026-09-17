@@ -190,9 +190,9 @@ export const buildApp = async () => {
   })
 
   // Wallet — fully implemented
-  // await app.register(import('./modules/wallet/wallet.routes.js'), {
-  //   prefix: '/api/v1/wallet',
-  // })
+  await app.register(import('./modules/wallet/wallet.routes.js'), {
+    prefix: '/api/v1/wallet',
+  })
 
   // Coupons — fully implemented
   // await app.register(import('./modules/coupons/coupons.routes.js'), {
@@ -537,6 +537,19 @@ export const buildApp = async () => {
     prefix: '/api/v1/cart-milestones',
   })
 
+  // Referrals — customer-facing "Refer & Earn" (admin CRUD of programs is under /api/v1/admin/referral-programs)
+  const { default: referralsRoutes } = await import('./modules/referrals/referrals.routes.js')
+  await app.register(referralsRoutes, {
+    prefix: '/api/v1/referrals',
+  })
+
+  // Reconciliation Problem Types — vendor-facing active list for the
+  // reconcile-sheet picker (admin CRUD is under /api/v1/admin/reconciliation-problem-types)
+  const { vendorReconciliationProblemTypesRoutes } = await import('./modules/admin/reconciliation-problem-types/reconciliation-problem-types.routes.js')
+  await app.register(vendorReconciliationProblemTypesRoutes, {
+    prefix: '/api/v1/reconciliation-problem-types',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
@@ -669,6 +682,35 @@ export const buildApp = async () => {
       uptime: process.uptime(),
       dependencies,
     }
+  })
+
+  // Temporary diagnostic checkpoint for the vendor app's splash-hang
+  // investigation (2026-09-16) — the affected tester device is remote
+  // (different city, no physical/USB access), so the vendor app pings this
+  // at each step of its startup/session-restore sequence instead of
+  // guessing blind. No auth — it must work before any token exists.
+  // Read results with: docker compose logs api | grep VENDOR_SPLASH_DIAG
+  // Safe to delete this route once that investigation is closed.
+  app.post('/health/diag', {
+    schema: {
+      tags: ['Health'],
+      summary: 'Temporary client startup checkpoint logger (vendor app splash-hang investigation)',
+      body: {
+        type: 'object',
+        properties: {
+          app: { type: 'string' },
+          sessionId: { type: 'string' },
+          step: { type: 'string' },
+          extra: { type: 'object', additionalProperties: true },
+        },
+      },
+    },
+  }, async (request, reply) => {
+    request.log.info(
+      { tag: 'VENDOR_SPLASH_DIAG', ...request.body, ip: request.ip },
+      'VENDOR_SPLASH_DIAG'
+    )
+    return reply.code(204).send()
   })
 
   return app

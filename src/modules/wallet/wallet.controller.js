@@ -1,4 +1,4 @@
-import { success, error } from '../../src/utils/apiResponse.js'
+import { success, error } from '../../utils/apiResponse.js'
 
 /**
  * Wallet controller — thin HTTP layer
@@ -61,32 +61,6 @@ export class WalletController {
     }
     return reply.send(
       success({ wallet: result.wallet, transaction: result.transaction }, 'Money added')
-    )
-  }
-
-  /**
-   * Pay for order from wallet
-   */
-  async payFromWallet(request, reply) {
-    const result = await this.service.payFromWallet(request.user.id, request.body.orderId)
-    if (!result.success) {
-      return reply.code(400).send(error(result.message, 'WALLET_PAY_FAILED'))
-    }
-    return reply.send(
-      success({ wallet: result.wallet, transaction: result.transaction }, 'Payment successful')
-    )
-  }
-
-  /**
-   * Transfer money to another user
-   */
-  async transfer(request, reply) {
-    const result = await this.service.transfer(request.user.id, request.body)
-    if (!result.success) {
-      return reply.code(400).send(error(result.message, 'TRANSFER_FAILED'))
-    }
-    return reply.send(
-      success({ wallet: result.wallet, transaction: result.transaction }, 'Transfer successful')
     )
   }
 
