@@ -572,6 +572,29 @@ export const buildApp = async () => {
     prefix: '/api/v1/vendor',
   })
 
+  // Epic Laundry Desktop POS parity — Tier 0 (see CLAUDE.md's "Epic Laundry
+  // Desktop ↔ Backend Live Sync" initiative). Each of these is a standalone
+  // vendor-facing counter-operations module ported from
+  // epic-laundry-desktop/server/src/modules/laundry/, with no dependency on
+  // the still-missing garment-unit tracking (Tier 2 of that plan).
+  const { default: vendorCashShiftsRoutes } = await import('./modules/vendor-cash-shifts/vendor-cash-shifts.routes.js')
+  await app.register(vendorCashShiftsRoutes, { prefix: '/api/v1/vendor/cash-shifts' })
+
+  const { default: vendorCustomerLedgerRoutes } = await import('./modules/vendor-customer-ledger/vendor-customer-ledger.routes.js')
+  await app.register(vendorCustomerLedgerRoutes, { prefix: '/api/v1/vendor/customer-ledger' })
+
+  const { default: vendorExpensesRoutes } = await import('./modules/vendor-expenses/vendor-expenses.routes.js')
+  await app.register(vendorExpensesRoutes, { prefix: '/api/v1/vendor/expenses' })
+
+  const { default: vendorRackProfilesRoutes } = await import('./modules/vendor-rack-profiles/vendor-rack-profiles.routes.js')
+  await app.register(vendorRackProfilesRoutes, { prefix: '/api/v1/vendor/rack-profiles' })
+
+  const { default: vendorAttendanceRoutes } = await import('./modules/vendor-attendance/vendor-attendance.routes.js')
+  await app.register(vendorAttendanceRoutes, { prefix: '/api/v1/vendor/attendance' })
+
+  const { default: vendorReportViewsRoutes } = await import('./modules/vendor-report-views/vendor-report-views.routes.js')
+  await app.register(vendorReportViewsRoutes, { prefix: '/api/v1/vendor/report-views' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
