@@ -3,7 +3,7 @@ import { query } from '../../config/database.js'
 const COLUMNS = `
   id, vendor_id, customer_user_id, pos_order_id, order_number, items,
   subtotal_paise, discount_paise, tax_paise, total_paise, payment_method,
-  wallet_amount_paise, wallet_redemption_request_id, placed_at, created_at
+  wallet_amount_paise, wallet_redemption_request_id, cash_shift_id, placed_at, created_at
 `
 
 /**
@@ -24,8 +24,8 @@ export class StoreOrdersRepository {
       `INSERT INTO store_orders (
          vendor_id, customer_user_id, pos_order_id, order_number, items,
          subtotal_paise, discount_paise, tax_paise, total_paise, payment_method,
-         wallet_amount_paise, wallet_redemption_request_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+         wallet_amount_paise, wallet_redemption_request_id, cash_shift_id
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        ON CONFLICT (vendor_id, pos_order_id) DO UPDATE SET
          order_number = EXCLUDED.order_number,
          items = EXCLUDED.items,
@@ -35,7 +35,8 @@ export class StoreOrdersRepository {
          total_paise = EXCLUDED.total_paise,
          payment_method = EXCLUDED.payment_method,
          wallet_amount_paise = EXCLUDED.wallet_amount_paise,
-         wallet_redemption_request_id = EXCLUDED.wallet_redemption_request_id
+         wallet_redemption_request_id = EXCLUDED.wallet_redemption_request_id,
+         cash_shift_id = EXCLUDED.cash_shift_id
        RETURNING ${COLUMNS}`,
       [
         data.vendorId,
@@ -50,6 +51,7 @@ export class StoreOrdersRepository {
         data.paymentMethod ?? null,
         data.walletAmountPaise ?? 0,
         data.walletRedemptionRequestId ?? null,
+        data.cashShiftId ?? null,
       ]
     )
     return this._format(rows[0])
@@ -83,6 +85,7 @@ export class StoreOrdersRepository {
       paymentMethod: row.payment_method,
       walletAmountPaise: row.wallet_amount_paise,
       walletRedemptionRequestId: row.wallet_redemption_request_id,
+      cashShiftId: row.cash_shift_id,
       placedAt: row.placed_at,
       createdAt: row.created_at,
     }

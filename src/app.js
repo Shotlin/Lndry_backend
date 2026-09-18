@@ -627,6 +627,13 @@ export const buildApp = async () => {
   const { default: vendorReturnCasesRoutes } = await import('./modules/vendor-return-cases/vendor-return-cases.routes.js')
   await app.register(vendorReturnCasesRoutes, { prefix: '/api/v1/vendor/return-cases' })
 
+  // Tier 3 of the POS-parity initiative — counter-sale (walk-in checkout)
+  // booking. Books into the existing store_orders table (Desktop Sync
+  // Phase 4), not the real pickup-delivery orders table — see
+  // vendor-counter-sales.service.js for why.
+  const { default: vendorCounterSalesRoutes } = await import('./modules/vendor-counter-sales/vendor-counter-sales.routes.js')
+  await app.register(vendorCounterSalesRoutes, { prefix: '/api/v1/vendor/counter-sales' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
