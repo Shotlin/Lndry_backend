@@ -643,6 +643,14 @@ export const buildApp = async () => {
   const { default: vendorOrderHoldsRoutes } = await import('./modules/vendor-order-holds/vendor-order-holds.routes.js')
   await app.register(vendorOrderHoldsRoutes, { prefix: '/api/v1/vendor/order-holds' })
 
+  // Tier 4 (final tier) of the POS-parity initiative — dashboard/export/
+  // search, pure read-side reporting over everything shipped in Tiers 0-3.
+  // Zero new tables. Item 23 (customer privacy/portal-token) deliberately
+  // skipped — superseded by the real app's own JWT auth, per the original
+  // gap-analysis's own conclusion.
+  const { default: vendorPosDashboardRoutes } = await import('./modules/vendor-pos-dashboard/vendor-pos-dashboard.routes.js')
+  await app.register(vendorPosDashboardRoutes, { prefix: '/api/v1/vendor/pos' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
