@@ -595,6 +595,14 @@ export const buildApp = async () => {
   const { default: vendorReportViewsRoutes } = await import('./modules/vendor-report-views/vendor-report-views.routes.js')
   await app.register(vendorReportViewsRoutes, { prefix: '/api/v1/vendor/report-views' })
 
+  // Group 1 of the next tier (see CLAUDE.md) — charge/discount rule library
+  // + service packages, both standalone (no garment-unit-tracking dependency).
+  const { default: vendorAdjustmentRulesRoutes } = await import('./modules/vendor-adjustment-rules/vendor-adjustment-rules.routes.js')
+  await app.register(vendorAdjustmentRulesRoutes, { prefix: '/api/v1/vendor/adjustment-rules' })
+
+  const { default: vendorServicePackagesRoutes } = await import('./modules/vendor-service-packages/vendor-service-packages.routes.js')
+  await app.register(vendorServicePackagesRoutes, { prefix: '/api/v1/vendor/service-packages' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
