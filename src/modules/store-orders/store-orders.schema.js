@@ -24,6 +24,8 @@ const storeOrderProperties = {
   taxPaise: { type: 'integer' },
   totalPaise: { type: 'integer' },
   paymentMethod: { type: ['string', 'null'] },
+  walletAmountPaise: { type: 'integer' },
+  walletRedemptionRequestId: { type: ['string', 'null'] },
   placedAt: { type: 'string' },
   createdAt: { type: 'string' },
 }
@@ -67,6 +69,8 @@ export const pushStoreOrderSchema = {
       taxPaise: { type: 'integer', minimum: 0 },
       totalPaise: { type: 'integer', minimum: 0 },
       paymentMethod: { type: 'string' },
+      walletAmountPaise: { type: 'integer', minimum: 0 },
+      walletRedemptionRequestId: { type: 'string', format: 'uuid' },
     },
   },
   response: {
