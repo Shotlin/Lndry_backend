@@ -1,5 +1,6 @@
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { VendorGarmentUnitsRepository } from './vendor-garment-units.repository.js'
+import { VendorProductionTasksService } from '../vendor-production-tasks/vendor-production-tasks.service.js'
 
 const GARMENT_UNIT_STATES = ['INTAKE', 'SORTED', 'PROCESSING', 'QC', 'REWASH', 'ASSEMBLY', 'RACKED', 'DISPATCHED', 'DELIVERED', 'MISSING', 'DAMAGED', 'CANCELLED']
 const PIECE_UNITS = new Set(['piece', 'pair', 'pc', 'pcs'])
@@ -9,10 +10,15 @@ const REASON_REQUIRED_STATES = new Set(['REWASH', 'MISSING', 'DAMAGED'])
  * Vendor Garment Units service — generate/scan/reprint/replace, ported from
  * epic-laundry-desktop's domain.ts. See TagRetiredError-equivalent handling
  * in scan(): a retired tag returns a structured 'TAG_RETIRED' result instead
- * of throwing, same information epic's TagRetiredError carries.
+ * of throwing, same information epic's TagRetiredError carries. On a real
+ * state transition, also drives the production task queue (completes any
+ * open task for the unit, opens the next one if applicable) — mirrors
+ * epic's scanLaundryGarment calling completeOpenTask/createProductionTask
+ * inline rather than as a separate step the caller has to remember.
  */
 export class VendorGarmentUnitsService {
-  constructor(repository = new VendorGarmentUnitsRepository()) {
+  constructor(repository = new VendorGarmentUnitsRepository(), productionTasksService = new VendorProductionTasksService()) {
+    this.productionTasks = productionTasksService
     this.repo = repository
   }
 
@@ -29,6 +35,9 @@ export class VendorGarmentUnitsService {
     if (requestedCount > 500) return { success: false, message: 'Cannot generate more than 500 tags at once' }
 
     const units = await this.repo.createBatch(vendorId, actor.userId, line.order_id, line.id, line.customer_user_id, line.garment_type_id, requestedCount, 1)
+    for (const unit of units) {
+      await this.productionTasks.onGarmentUnitTransitioned(vendorId, actor.userId, { garmentUnitId: unit.id, orderId: unit.orderId, nextState: 'INTAKE', note: 'Created at order intake' })
+    }
     emitAudit('vendor_garment_units_generated', {
       actor_user_id: actor.userId, actor_role: actor.role, target_type: 'order_line', target_id: line.id,
       before: null, after: { count: units.length, orderId: line.order_id }, ip_address: actor.ip, user_agent: actor.userAgent,
@@ -86,6 +95,7 @@ export class VendorGarmentUnitsService {
       const fromState = unit.state
       await this.repo.transition(unit.id, { state: nextState, location, condition })
       await this.repo.appendEvent(unit.id, { eventType: 'STATE_TRANSITION', fromState, toState: nextState, location, note, actorId: actor.userId })
+      await this.productionTasks.onGarmentUnitTransitioned(vendorId, actor.userId, { garmentUnitId: unit.id, orderId: unit.orderId, nextState, note })
       emitAudit('vendor_garment_unit_scanned', {
         actor_user_id: actor.userId, actor_role: actor.role, target_type: 'vendor_garment_unit', target_id: unit.id,
         before: { state: fromState, location: unit.location }, after: { state: nextState, location, tagCode },

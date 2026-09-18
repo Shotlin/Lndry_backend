@@ -616,6 +616,17 @@ export const buildApp = async () => {
   const { default: vendorPrintJobsRoutes } = await import('./modules/vendor-print-jobs/vendor-print-jobs.routes.js')
   await app.register(vendorPrintJobsRoutes, { prefix: '/api/v1/vendor/print-jobs' })
 
+  // Rest of Group 2 (POS-parity Tier 2) — all three depend on garment units
+  // (registered just above) already existing.
+  const { default: vendorProductionTasksRoutes } = await import('./modules/vendor-production-tasks/vendor-production-tasks.routes.js')
+  await app.register(vendorProductionTasksRoutes, { prefix: '/api/v1/vendor/production-tasks' })
+
+  const { default: vendorQualityClaimsRoutes } = await import('./modules/vendor-quality-claims/vendor-quality-claims.routes.js')
+  await app.register(vendorQualityClaimsRoutes, { prefix: '/api/v1/vendor/quality-claims' })
+
+  const { default: vendorReturnCasesRoutes } = await import('./modules/vendor-return-cases/vendor-return-cases.routes.js')
+  await app.register(vendorReturnCasesRoutes, { prefix: '/api/v1/vendor/return-cases' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
