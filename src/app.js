@@ -603,6 +603,19 @@ export const buildApp = async () => {
   const { default: vendorServicePackagesRoutes } = await import('./modules/vendor-service-packages/vendor-service-packages.routes.js')
   await app.register(vendorServicePackagesRoutes, { prefix: '/api/v1/vendor/service-packages' })
 
+  // Tier 2 (Group 2) of the POS-parity initiative — the garment tag-scanning
+  // system: physical garment units + their state machine, bag/container
+  // tracking for bulk lines, and a print-job log. Foundational — several
+  // later pieces (production queue, quality claims, returns) depend on these.
+  const { default: vendorGarmentUnitsRoutes } = await import('./modules/vendor-garment-units/vendor-garment-units.routes.js')
+  await app.register(vendorGarmentUnitsRoutes, { prefix: '/api/v1/vendor/garment-units' })
+
+  const { default: vendorLaundryContainersRoutes } = await import('./modules/vendor-laundry-containers/vendor-laundry-containers.routes.js')
+  await app.register(vendorLaundryContainersRoutes, { prefix: '/api/v1/vendor/laundry-containers' })
+
+  const { default: vendorPrintJobsRoutes } = await import('./modules/vendor-print-jobs/vendor-print-jobs.routes.js')
+  await app.register(vendorPrintJobsRoutes, { prefix: '/api/v1/vendor/print-jobs' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
