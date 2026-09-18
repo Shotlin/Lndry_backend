@@ -9,6 +9,9 @@ import {
   verifyTopUpSchema,
   adminCreditSchema,
 } from './wallet.schema.js'
+import { WalletRedemptionController } from '../wallet-redemption/wallet-redemption.controller.js'
+import { WalletRedemptionService } from '../wallet-redemption/wallet-redemption.service.js'
+import { getPendingSchema } from '../wallet-redemption/wallet-redemption.schema.js'
 
 /**
  * Wallet routes plugin
@@ -18,6 +21,7 @@ export default async function walletRoutes(fastify) {
   const repository = new WalletRepository()
   const service = new WalletService(repository)
   const controller = new WalletController(service)
+  const redemptionController = new WalletRedemptionController(new WalletRedemptionService())
 
   // ─── Customer routes (AUTH) ─────────────────────────────
 
@@ -50,6 +54,14 @@ export default async function walletRoutes(fastify) {
     schema: addMoneySchema,
     preHandler: [fastify.authenticate, fastify.authorize(['ADMIN'])],
   }, controller.addMoney.bind(controller))
+
+  // GET /redemption-requests/pending — this customer's own pending
+  // POS-counter wallet redemption request, if any (see the
+  // wallet-redemption module for the vendor-facing side)
+  fastify.get('/redemption-requests/pending', {
+    schema: getPendingSchema,
+    preHandler: [fastify.authenticate],
+  }, redemptionController.getPending.bind(redemptionController))
 
   // ─── Admin routes ───────────────────────────────────────
 

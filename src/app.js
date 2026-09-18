@@ -563,6 +563,15 @@ export const buildApp = async () => {
     prefix: '/api/v1/vendor',
   })
 
+  // Wallet Redemption — vendor-facing POS-counter wallet redemption
+  // (lookup/create/confirm/cancel). The customer-facing pending-check is
+  // added directly onto the existing /api/v1/wallet prefix instead
+  // (see wallet.routes.js), not registered here.
+  const { default: vendorWalletRedemptionRoutes } = await import('./modules/vendors/vendor-wallet-redemption.routes.js')
+  await app.register(vendorWalletRedemptionRoutes, {
+    prefix: '/api/v1/vendor',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
