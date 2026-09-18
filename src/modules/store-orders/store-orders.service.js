@@ -14,11 +14,22 @@ export class StoreOrdersService {
 
   /**
    * Phone lookup is a real-name-and-account oracle by phone number, even
-   * without a wallet balance attached — the route layer rate-limits and
-   * audit-logs every call regardless of outcome, this just does the lookup.
+   * without a wallet balance attached — rate-limited at the route layer and
+   * audit-logged here on every call regardless of outcome.
    */
-  async resolvePhone(phone) {
-    return this.repo.findByPhone(phone)
+  async resolvePhone(phone, actor) {
+    const customer = await this.repo.findByPhone(phone)
+    emitAudit('store_order_phone_lookup', {
+      actor_user_id: actor?.userId ?? null,
+      actor_role: actor?.role ?? null,
+      target_type: 'user',
+      target_id: customer?.id ?? null,
+      before: null,
+      after: { phone, matched: Boolean(customer), vendor_id: actor?.vendorId ?? null },
+      ip_address: actor?.ip ?? null,
+      user_agent: actor?.userAgent ?? null,
+    })
+    return customer
   }
 
   async pushOrder(data, actor) {
