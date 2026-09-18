@@ -33,8 +33,12 @@ export class WalletRedemptionRepository {
   }
 
   async create({ customerUserId, vendorId, requestedByUserId, amountPaise, otpHash, expiresAt }) {
+    // AS wrr: the shared COLUMNS constant's RETURNING references are all
+    // wrr.-prefixed (matching the SELECT queries below, which do have a
+    // real FROM ... wrr to alias) — a bare INSERT has no table alias in
+    // scope by default, so this needs the explicit `AS wrr` to resolve.
     const { rows } = await query(
-      `INSERT INTO wallet_redemption_requests
+      `INSERT INTO wallet_redemption_requests AS wrr
          (customer_user_id, vendor_id, requested_by_user_id, amount_paise, otp_hash, expires_at)
        VALUES ($1, $2, $3, $4, $5, $6)
        RETURNING ${COLUMNS}`,
@@ -105,9 +109,11 @@ export class WalletRedemptionRepository {
    * vendor-rider.service.js#acceptOffer.
    */
   async claimForConfirm(client, id, vendorId) {
+    // AS wrr — same reason as create()'s comment above: a bare UPDATE has
+    // no table alias in scope by default, and COLUMNS is wrr.-prefixed.
     const { rows } = await client.query(
-      `UPDATE wallet_redemption_requests SET status = 'CONFIRMED', confirmed_at = NOW(), updated_at = NOW()
-       WHERE id = $1 AND vendor_id = $2 AND status = 'PENDING' AND expires_at > NOW()
+      `UPDATE wallet_redemption_requests AS wrr SET status = 'CONFIRMED', confirmed_at = NOW(), updated_at = NOW()
+       WHERE wrr.id = $1 AND wrr.vendor_id = $2 AND wrr.status = 'PENDING' AND wrr.expires_at > NOW()
        RETURNING ${COLUMNS}`,
       [id, vendorId]
     )
