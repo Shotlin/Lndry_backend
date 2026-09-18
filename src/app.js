@@ -550,6 +550,19 @@ export const buildApp = async () => {
     prefix: '/api/v1/reconciliation-problem-types',
   })
 
+  // Store Orders — walk-in/counter sales pushed by a vendor's own POS
+  // desktop app when a customer's phone matches a real LNDRY account.
+  // Customer-facing "my Laundry Store history" is its own prefix; the
+  // vendor-facing lookup/push endpoints share /api/v1/vendor with
+  // vendor-applications.routes.js and others already registered there.
+  const { default: storeOrdersRoutes, vendorStoreOrdersRoutes } = await import('./modules/store-orders/store-orders.routes.js')
+  await app.register(storeOrdersRoutes, {
+    prefix: '/api/v1/store-orders',
+  })
+  await app.register(vendorStoreOrdersRoutes, {
+    prefix: '/api/v1/vendor',
+  })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
