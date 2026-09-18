@@ -634,6 +634,15 @@ export const buildApp = async () => {
   const { default: vendorCounterSalesRoutes } = await import('./modules/vendor-counter-sales/vendor-counter-sales.routes.js')
   await app.register(vendorCounterSalesRoutes, { prefix: '/api/v1/vendor/counter-sales' })
 
+  // Rest of Tier 3 — rider/staff settlement (distinct from the existing
+  // vendor-level payout system) and order holds (parked in-progress carts
+  // with a claim/lease so two staff can't collide on the same sale).
+  const { default: vendorRiderSettlementsRoutes } = await import('./modules/vendor-rider-settlements/vendor-rider-settlements.routes.js')
+  await app.register(vendorRiderSettlementsRoutes, { prefix: '/api/v1/vendor/rider-settlements' })
+
+  const { default: vendorOrderHoldsRoutes } = await import('./modules/vendor-order-holds/vendor-order-holds.routes.js')
+  await app.register(vendorOrderHoldsRoutes, { prefix: '/api/v1/vendor/order-holds' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
