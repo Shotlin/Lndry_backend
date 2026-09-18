@@ -657,7 +657,8 @@ export class VendorsService {
       `SELECT vsr.garment_type_id, gt.name AS garment_name, gt.unit, vsr.rate_paise,
               vs.id AS vendor_service_id, vs.name AS service_name,
               sc.id AS category_id, sc.name AS category_name,
-              COALESCE(vs.image_asset_id, sc.image_url) AS image_url
+              COALESCE(vs.image_asset_id, sc.image_url) AS image_url,
+              gt.images->>0 AS garment_image_url
        FROM vendor_service_rates vsr
        JOIN vendor_services vs ON vsr.vendor_service_id = vs.id
        JOIN garment_types gt ON vsr.garment_type_id = gt.id
