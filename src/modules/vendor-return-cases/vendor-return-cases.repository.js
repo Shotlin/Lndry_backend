@@ -10,7 +10,12 @@ const COLUMNS = `id, vendor_id, order_id, customer_user_id, amount_paise, reason
  */
 export class VendorReturnCasesRepository {
   async findOrder(vendorId, orderId) {
-    const { rows } = await query(`SELECT id, user_id AS customer_user_id, total_amount FROM orders WHERE id = $1 AND vendor_id = $2`, [orderId, vendorId])
+    const { rows } = await query(
+      `SELECT id, user_id AS customer_user_id, total_amount FROM orders WHERE id = $1 AND vendor_id = $2
+       UNION ALL
+       SELECT id, customer_user_id, total_paise / 100.0 AS total_amount FROM store_orders WHERE id = $1 AND vendor_id = $2`,
+      [orderId, vendorId]
+    )
     return rows[0] || null
   }
 

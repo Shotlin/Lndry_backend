@@ -74,9 +74,14 @@ export class VendorCashShiftsRepository {
     const upperBound = closedAt ?? new Date()
     const [collections, expenses] = await Promise.all([
       query(
-        `SELECT COALESCE(SUM(total_paise), 0)::int AS total, COUNT(*)::int AS count
-         FROM store_orders
-         WHERE vendor_id = $1 AND payment_method = 'CASH' AND placed_at >= $2 AND placed_at <= $3`,
+        `SELECT COALESCE(SUM(amt), 0)::int AS total, COUNT(*)::int AS count FROM (
+           SELECT p.amount_paise AS amt FROM store_order_payments p
+            WHERE p.vendor_id = $1 AND p.mode = 'CASH' AND p.created_at >= $2 AND p.created_at <= $3
+           UNION ALL
+           SELECT so.total_paise AS amt FROM store_orders so
+            WHERE so.vendor_id = $1 AND so.payment_method = 'CASH' AND so.placed_at >= $2 AND so.placed_at <= $3
+              AND NOT EXISTS (SELECT 1 FROM store_order_payments p WHERE p.store_order_id = so.id)
+         ) cash`,
         [vendorId, openedAt, upperBound]
       ),
       query(

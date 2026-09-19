@@ -21,7 +21,12 @@ export class VendorLaundryContainersRepository {
   static TRANSITIONS = CONTAINER_TRANSITIONS
 
   async findOrder(vendorId, orderId) {
-    const { rows } = await query(`SELECT id, user_id AS customer_user_id FROM orders WHERE id = $1 AND vendor_id = $2`, [orderId, vendorId])
+    const { rows } = await query(
+      `SELECT id, user_id AS customer_user_id FROM orders WHERE id = $1 AND vendor_id = $2
+       UNION ALL
+       SELECT id, customer_user_id FROM store_orders WHERE id = $1 AND vendor_id = $2`,
+      [orderId, vendorId]
+    )
     return rows[0] || null
   }
 

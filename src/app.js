@@ -651,6 +651,11 @@ export const buildApp = async () => {
   const { default: vendorPosDashboardRoutes } = await import('./modules/vendor-pos-dashboard/vendor-pos-dashboard.routes.js')
   await app.register(vendorPosDashboardRoutes, { prefix: '/api/v1/vendor/pos' })
 
+  // Counter work orders — walk-in customers, booking with garment/bag tags,
+  // lifecycle, payments (store_orders, migration 130).
+  const { default: vendorCounterOrdersRoutes } = await import('./modules/vendor-counter-orders/vendor-counter-orders.routes.js')
+  await app.register(vendorCounterOrdersRoutes, { prefix: '/api/v1/vendor/counter' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
