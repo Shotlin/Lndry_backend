@@ -3,7 +3,8 @@ import { success, error } from '../../utils/apiResponse.js'
 import { VendorCounterOrdersService } from './vendor-counter-orders.service.js'
 import { VendorCounterViewsService } from './vendor-counter-views.service.js'
 
-const loose = { type: 'object', additionalProperties: true }
+// No body schemas on purpose: this app's AJV runs with removeAdditional:'all', which would strip every
+// field of a free-form body. Inputs are validated in the service instead.
 const idParams = { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } }
 
 /**
@@ -41,26 +42,26 @@ export default async function vendorCounterOrdersRoutes(fastify) {
 
   // Customers
   fastify.get('/customers', async (request, res) => res.send(success(await service.listCustomers(request.vendorId, request.query.search))))
-  fastify.post('/customers', { schema: { body: loose } }, async (request, res) => reply(res, await service.findOrCreateCustomer(request.vendorId, actorOf(request), request.body || {}), 'Customer ready', 201))
+  fastify.post('/customers', async (request, res) => reply(res, await service.findOrCreateCustomer(request.vendorId, actorOf(request), request.body || {}), 'Customer ready', 201))
   fastify.get('/customers/:id', { schema: { params: idParams } }, async (request, res) => {
     const profile = await service.customerProfile(request.vendorId, request.params.id)
     return profile ? res.send(success(profile)) : notFound(res, 'Customer')
   })
 
   // Orders
-  fastify.post('/orders/quote', { schema: { body: loose } }, async (request, res) => reply(res, await service.quote(request.vendorId, request.body || {}), 'Quote computed'))
-  fastify.post('/orders', { schema: { body: loose } }, async (request, res) => reply(res, await service.book(request.vendorId, actorOf(request), request.body || {}), 'Order booked', 201))
+  fastify.post('/orders/quote', async (request, res) => reply(res, await service.quote(request.vendorId, request.body || {}), 'Quote computed'))
+  fastify.post('/orders', async (request, res) => reply(res, await service.book(request.vendorId, actorOf(request), request.body || {}), 'Order booked', 201))
   fastify.get('/orders', async (request, res) => res.send(success(await service.listOrders(request.vendorId, request.query))))
   fastify.get('/orders/:id', { schema: { params: idParams } }, async (request, res) => {
     const detail = await service.getDetail(request.vendorId, request.params.id)
     return detail ? res.send(success(detail)) : notFound(res, 'Order')
   })
-  fastify.patch('/orders/:id', { schema: { params: idParams, body: loose } }, async (request, res) => reply(res, await service.update(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Order updated'))
-  fastify.post('/orders/:id/transition', { schema: { params: idParams, body: loose } }, async (request, res) => reply(res, await service.transition(request.vendorId, actorOf(request), request.params.id, request.body?.state, request.body || {}), 'Order updated'))
-  fastify.post('/orders/:id/cancel', { schema: { params: idParams, body: loose } }, async (request, res) => reply(res, await service.cancel(request.vendorId, actorOf(request), request.params.id, request.body?.reason), 'Order cancelled'))
-  fastify.post('/orders/:id/assign', { schema: { params: idParams, body: loose } }, async (request, res) => reply(res, await service.assign(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Captain assigned'))
+  fastify.patch('/orders/:id', { schema: { params: idParams} }, async (request, res) => reply(res, await service.update(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Order updated'))
+  fastify.post('/orders/:id/transition', { schema: { params: idParams} }, async (request, res) => reply(res, await service.transition(request.vendorId, actorOf(request), request.params.id, request.body?.state, request.body || {}), 'Order updated'))
+  fastify.post('/orders/:id/cancel', { schema: { params: idParams} }, async (request, res) => reply(res, await service.cancel(request.vendorId, actorOf(request), request.params.id, request.body?.reason), 'Order cancelled'))
+  fastify.post('/orders/:id/assign', { schema: { params: idParams} }, async (request, res) => reply(res, await service.assign(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Captain assigned'))
   fastify.get('/orders/:id/payments', { schema: { params: idParams } }, async (request, res) => res.send(success(await service.listPayments(request.vendorId, request.params.id))))
-  fastify.post('/orders/:id/payments', { schema: { params: idParams, body: loose } }, async (request, res) => reply(res, await service.collectPayment(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Payment recorded', 201))
+  fastify.post('/orders/:id/payments', { schema: { params: idParams} }, async (request, res) => reply(res, await service.collectPayment(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Payment recorded', 201))
 
   // Cross-order tag views
   fastify.get('/garment-units', async (request, res) => res.send(success(await service.listGarmentUnits(request.vendorId, request.query))))
