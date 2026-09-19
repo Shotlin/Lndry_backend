@@ -40,7 +40,9 @@ export const updateProfileSchema = {
     type: 'object',
     properties: {
       name: { type: 'string', minLength: 2, maxLength: 100 },
-      email: { type: 'string', format: 'email', maxLength: 255 },
+      // A blank email means "not provided" (older app builds send "" when the
+      // optional email box is empty) — anything non-blank must be a real email.
+      email: { type: 'string', maxLength: 255, anyOf: [{ format: 'email' }, { maxLength: 0 }] },
       birthday: { type: 'string', format: 'date' },
       referralCode: { type: 'string', maxLength: 20 },
     },

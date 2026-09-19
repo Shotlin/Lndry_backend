@@ -27,6 +27,13 @@ export class UsersService {
    * Update user profile (name, email, birthday)
    */
   async updateProfile(userId, data) {
+    // Blank email = not provided. Storing "" would collide on the unique
+    // email column across customers and would wipe an existing email.
+    if (typeof data.email === 'string' && !data.email.trim()) {
+      const { email: _blank, ...rest } = data
+      data = rest
+    }
+
     // Check email uniqueness if email is being updated
     if (data.email) {
       const taken = await this.repo.isEmailTaken(data.email, userId)

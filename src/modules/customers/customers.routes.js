@@ -28,6 +28,33 @@ export default async function customerRoutes(fastify) {
     }, 'Support contact fetched successfully'))
   })
 
+  // GET /checkout-content — the admin-editable advance-payment / refund copy
+  // shown on the payment screen (another small whitelisted slice of
+  // app_settings, same idea as /support-contact). A key with no saved value
+  // comes back null and the app falls back to its built-in text.
+  fastify.get('/checkout-content', {
+    preHandler: [fastify.authenticate, fastify.authorize(['CUSTOMER'])],
+    schema: {
+      tags: ['Customer Profile'],
+      summary: 'Get the admin-editable checkout advance/refund messages',
+      security: [{ bearerAuth: [] }]
+    }
+  }, async (request, reply) => {
+    const { rows } = await query(
+      `SELECT key, value FROM app_settings WHERE key IN (
+         'checkout_advance_title', 'checkout_advance_subtitle',
+         'checkout_refund_title', 'checkout_refund_body')`
+    )
+    const settings = Object.fromEntries(rows.map((r) => [r.key, r.value]))
+    const text = (v) => (typeof v === 'string' && v.trim() ? v : null)
+    return reply.code(200).send(success({
+      advanceTitle: text(settings.checkout_advance_title),
+      advanceSubtitle: text(settings.checkout_advance_subtitle),
+      refundTitle: text(settings.checkout_refund_title),
+      refundBody: text(settings.checkout_refund_body),
+    }, 'Checkout content fetched successfully'))
+  })
+
   fastify.get('/me', {
     preHandler: [fastify.authenticate, fastify.authorize(['CUSTOMER'])],
     schema: {
