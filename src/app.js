@@ -591,6 +591,9 @@ export const buildApp = async () => {
   const { default: vendorExpensesRoutes } = await import('./modules/vendor-expenses/vendor-expenses.routes.js')
   await app.register(vendorExpensesRoutes, { prefix: '/api/v1/vendor/expenses' })
 
+  const { default: vendorInventoryRoutes } = await import('./modules/vendor-inventory/vendor-inventory.routes.js')
+  await app.register(vendorInventoryRoutes, { prefix: '/api/v1/vendor/inventory' })
+
   const { default: vendorRackProfilesRoutes } = await import('./modules/vendor-rack-profiles/vendor-rack-profiles.routes.js')
   await app.register(vendorRackProfilesRoutes, { prefix: '/api/v1/vendor/rack-profiles' })
 

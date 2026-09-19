@@ -363,6 +363,18 @@ export class VendorEmployeesService {
       ? await this._createWithNewUser({ data, ctx, shopId, role, permissions })
       : await this._createWithExistingUser({ data, ctx, shopId, role, permissions })
 
+    // A person removed earlier and now re-added (reactivated) may have a cached
+    // "not active here" answer from the moment they were removed, which would
+    // keep locking them out for minutes after the owner re-added them. Clear it
+    // now that the roster row is active again. Never let it affect the response.
+    if (result.success && result.data?.user_id) {
+      try {
+        await invalidateStaffActiveCache(result.data.user_id, shopId)
+      } catch (err) {
+        logger.warn({ err: err.message, shopId }, 'Staff cache invalidation after create failed (non-critical)')
+      }
+    }
+
     // A newly-added (or re-attached) rider might be the first one this
     // shop has ever had — retry any order stuck at VENDOR_ACCEPTED with
     // nobody assigned (see backfillPickupAssignments for why this can
@@ -614,9 +626,17 @@ export class VendorEmployeesService {
 
           if (existingAssignment && !existingAssignment.deleted_at) {
             await client.query('ROLLBACK')
+            // Say WHO they already are — "already a captain" and "already
+            // staff" are different problems for the person adding them.
+            const alreadyAs =
+              existingAssignment.role === 'VENDOR_RIDER'
+                ? 'a captain'
+                : existingAssignment.role === 'VENDOR_OWNER'
+                  ? 'the owner'
+                  : 'a staff member'
             return {
               success: false,
-              message: 'User is already assigned to this shop',
+              message: `This phone number is already added to your shop as ${alreadyAs}.`,
               code: 'STAFF_ALREADY_ASSIGNED',
             }
           }

@@ -85,7 +85,21 @@ const newUserCreateSchema = z
     // Phone (E.164-style, max 20 chars to match users.phone column).
     // Required for VENDOR_RIDER (enforced below) since it's their only
     // login credential; optional otherwise.
-    phone: z.string().trim().min(1).max(20).optional(),
+    // A mobile number is exactly 10 digits — anything else is refused, and the
+    // country code (+91 / 91) is dropped rather than counted, so the stored
+    // value is always the plain 10 digits the OTP login also uses. The same
+    // number therefore always maps to the same account (no "+91…" duplicate).
+    phone: z
+      .string()
+      .trim()
+      .transform((raw) => {
+        const digits = raw.replace(/[\s-]/g, '').replace(/^\+/, '')
+        return digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits
+      })
+      .refine((digits) => /^[0-9]{10}$/.test(digits), {
+        message: 'Enter a valid 10-digit mobile number.',
+      })
+      .optional(),
     // R20 AC#2 — defaults to true so the common flow doesn't need to opt in
     generate_temp_password: z.boolean().default(true),
     // R20 AC#4 — explicit password path (only used when generate_temp_password
