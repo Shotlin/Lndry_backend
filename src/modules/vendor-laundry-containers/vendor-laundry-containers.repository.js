@@ -119,7 +119,7 @@ export class VendorLaundryContainersRepository {
   _format(row) {
     return {
       id: row.id, vendorId: row.vendor_id, orderId: row.order_id, customerUserId: row.customer_user_id,
-      tagCode: row.tag_code, sequence: row.sequence, totalCount: row.total_count, weightKg: row.weight_kg,
+      tagCode: row.tag_code, sequence: row.sequence, totalCount: row.total_count, weightKg: row.weight_kg == null ? null : Number(row.weight_kg),
       state: row.state, location: row.location, condition: row.condition, createdBy: row.created_by,
       createdAt: row.created_at, updatedAt: row.updated_at, deliveredAt: row.delivered_at,
     }

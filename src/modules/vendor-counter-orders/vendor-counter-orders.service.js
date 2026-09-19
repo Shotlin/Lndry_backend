@@ -22,6 +22,12 @@ const NEXT_STATES = {
 // A garment must be at assembly (or beyond) before the order can be called ready.
 const NOT_READY_UNIT_STATES = ['INTAKE', 'SORTED', 'PROCESSING', 'QC', 'REWASH', 'MISSING']
 
+// pg returns DATE columns as Date objects at local midnight — format them without shifting the day.
+export const dateOnly = (value) => {
+  if (!value) return null
+  if (value instanceof Date) return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
+  return String(value).slice(0, 10)
+}
 const digits = (value) => String(value ?? '').replace(/\D/g, '')
 const tag = (prefix) => `${prefix}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 const referralCode = () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join('')
@@ -74,8 +80,8 @@ function presentOrder(row) {
     status: row.status,
     version: row.version,
     source: row.source,
-    orderDate: row.order_date ? String(row.order_date).slice(0, 10) : String(row.placed_at || '').slice(0, 10),
-    expectedDeliveryDate: row.expected_delivery_date ? String(row.expected_delivery_date).slice(0, 10) : null,
+    orderDate: dateOnly(row.order_date) || dateOnly(row.placed_at),
+    expectedDeliveryDate: dateOnly(row.expected_delivery_date),
     fulfillmentMode: row.fulfillment_mode,
     deliveryAddress: row.delivery_address,
     serviceZone: row.service_zone,
@@ -588,7 +594,7 @@ export class VendorCounterOrdersService {
       id: r.id, orderId: r.order_id, orderNumber: r.order_number, tagCode: r.active_tag_code, sequence: r.sequence, itemIndex: r.store_line_index,
       garmentName: r.garment_name, serviceName: r.items?.[r.store_line_index]?.serviceName || '', state: r.state, location: r.location, condition: r.condition,
       customerName: r.customer_name || '', customerPhone: r.customer_phone || '',
-      expectedDeliveryDate: r.expected_delivery_date ? String(r.expected_delivery_date).slice(0, 10) : null, createdAt: r.created_at, updatedAt: r.updated_at,
+      expectedDeliveryDate: dateOnly(r.expected_delivery_date), createdAt: r.created_at, updatedAt: r.updated_at,
     }))
   }
 
@@ -611,7 +617,7 @@ export class VendorCounterOrdersService {
       id: r.id, orderId: r.order_id, orderNumber: r.order_number, tagCode: r.tag_code, sequence: r.sequence, total: r.total_count,
       weightKg: r.weight_kg == null ? null : Number(r.weight_kg), state: r.state, location: r.location, condition: r.condition,
       customerName: r.customer_name || '', customerPhone: r.customer_phone || '',
-      expectedDeliveryDate: r.expected_delivery_date ? String(r.expected_delivery_date).slice(0, 10) : null,
+      expectedDeliveryDate: dateOnly(r.expected_delivery_date),
       createdAt: r.created_at, updatedAt: r.updated_at, deliveredAt: r.delivered_at,
     }))
   }
