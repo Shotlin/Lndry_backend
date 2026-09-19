@@ -1,4 +1,6 @@
 import { success } from '../../utils/apiResponse.js'
+import { isStepUpEnforced } from '../../middlewares/requireStepUp.js'
+import { logAdminActivity } from '../../utils/activityLogger.js'
 
 /**
  * Admin controller — handles admin-specific operations
@@ -99,5 +101,27 @@ export class AdminController {
     const settings = request.body
     const result = await this.service.updateSettings(settings)
     return reply.code(200).send(success(result, 'Settings updated'))
+  }
+
+  // ─── SECURITY: TWO-STEP VERIFICATION SWITCH ─────────
+
+  async getStepUpSetting(request, reply) {
+    return reply.code(200).send(success({ enabled: await isStepUpEnforced() }, 'Two-step verification setting fetched'))
+  }
+
+  async setStepUpSetting(request, reply) {
+    const { enabled } = request.body
+    const before = await isStepUpEnforced()
+    await this.service.updateSettings({ admin_step_up_enabled: enabled })
+    logAdminActivity(
+      request.user.id,
+      enabled ? 'Two-step verification turned ON' : 'Two-step verification turned OFF',
+      'security',
+      null,
+      { enabled: before },
+      { enabled },
+      request.ip,
+    )
+    return reply.code(200).send(success({ enabled }, `Two-step verification ${enabled ? 'enabled' : 'disabled'}`))
   }
 }

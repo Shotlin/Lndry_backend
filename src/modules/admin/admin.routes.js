@@ -79,6 +79,27 @@ export default async function adminRoutes(fastify) {
     preHandler: highRiskAuth,
   }, controller.updateSettings.bind(controller))
 
+  // Two-Step Verification switch. highRiskAuth here means: while ON, turning
+  // it OFF needs a valid step-up code; while OFF, requireStepUp is a no-op
+  // so it can be turned ON freely (the safe direction).
+  fastify.get('/security/step-up', {
+    schema: { tags: ['Admin'], summary: 'Is two-step (step-up) verification enforced?' },
+    preHandler: adminAuth,
+  }, controller.getStepUpSetting.bind(controller))
+
+  fastify.put('/security/step-up', {
+    schema: {
+      tags: ['Admin'],
+      summary: 'Turn two-step (step-up) verification ON or OFF',
+      body: {
+        type: 'object',
+        required: ['enabled'],
+        properties: { enabled: { type: 'boolean' } },
+      },
+    },
+    preHandler: highRiskAuth,
+  }, controller.setStepUpSetting.bind(controller))
+
   // ─── New Sub-Modules ────────────────────────────────
   fastify.register(adminAuthRoutes, { prefix: '/auth' })
   fastify.register(adminDashboardRoutes, { prefix: '/dashboard' })

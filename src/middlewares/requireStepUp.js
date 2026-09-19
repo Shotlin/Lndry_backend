@@ -18,14 +18,42 @@
  */
 import jwt from 'jsonwebtoken'
 import { env } from '../config/env.js'
+import { query } from '../config/database.js'
+import { logger } from '../config/logger.js'
 
 const STEP_UP_MAX_AGE_SECONDS = 300 // 5 minutes
+
+/**
+ * Whether step-up verification is currently enforced. Controlled by the
+ * `admin_step_up_enabled` app setting (Dashboard → Settings → Security →
+ * Two-Step Verification). Only an explicit `false` turns enforcement off —
+ * a missing row, garbage value or DB error all fail CLOSED (enforced).
+ */
+export async function isStepUpEnforced() {
+  try {
+    const { rows } = await query(
+      `SELECT value FROM app_settings WHERE key = 'admin_step_up_enabled'`
+    )
+    if (!rows.length) return true
+    const v = rows[0].value
+    return !(v === false || v === 'false')
+  } catch (err) {
+    logger.error({ err: err.message }, 'Could not read admin_step_up_enabled — enforcing step-up')
+    return true
+  }
+}
 
 /**
  * Fastify preHandler that validates the x-step-up-token header.
  * Must be used AFTER authenticate (request.user must be set).
  */
 export async function requireStepUp(request, reply) {
+  // Two-Step Verification switched OFF (development mode): no token needed.
+  if (!(await isStepUpEnforced())) {
+    request.stepUpBypassed = true
+    return
+  }
+
   const stepUpToken = request.headers['x-step-up-token']
 
   if (!stepUpToken) {
