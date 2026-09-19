@@ -309,7 +309,7 @@ export const cancelOrderSchema = {
 
 export const reorderSchema = {
   tags: ['Orders'],
-  summary: 'Re-order items from a past order',
+  summary: 'Prepare a reorder from a past order (validated against current vendor data)',
   params: {
     type: 'object',
     required: ['id'],
@@ -323,7 +323,35 @@ export const reorderSchema = {
       properties: {
         success: { type: 'boolean' },
         message: { type: 'string' },
-        data: { type: 'object' },
+        // Every field is listed: the server strips anything undeclared.
+        data: {
+          type: 'object',
+          properties: {
+            vendorId: { type: 'string' },
+            vendorName: { type: 'string' },
+            itemCount: { type: 'integer' },
+            items: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  serviceId: { type: 'string' },
+                  name: { type: 'string' },
+                  unit: { type: 'string' },
+                  quantity: { type: 'integer' },
+                  ratePaise: { type: 'integer' },
+                },
+              },
+            },
+            unavailable: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: { name: { type: 'string' }, reason: { type: 'string' } },
+              },
+            },
+          },
+        },
       },
     },
   },

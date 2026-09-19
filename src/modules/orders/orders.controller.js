@@ -68,11 +68,12 @@ export class OrdersController {
   async reorder(request, reply) {
     const result = await this.service.reorder(request.user.id, request.params.id)
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'REORDER_FAILED'))
+      // Not a client mistake: the order can't be repeated right now (vendor
+      // paused, items withdrawn). 404 only when the order itself isn't theirs.
+      const status = result.code === 'ORDER_NOT_FOUND' ? 404 : 409
+      return reply.code(status).send(error(result.message, result.code))
     }
-    return reply.send(success(result.cart, 'Items added to cart', {
-      warnings: result.warnings,
-    }))
+    return reply.send(success(result.data, 'Ready to reorder'))
   }
 
   // ─── Admin endpoints ────────────────────────────────────

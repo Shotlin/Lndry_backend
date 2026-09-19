@@ -67,6 +67,19 @@ export const buildApp = async () => {
   // validation/coercion, so this sanitizes already-validated string fields.
   app.addHook('preHandler', sanitize)
 
+  // A POST/PUT/DELETE that declares `content-type: application/json` but sends
+  // NO body (mobile HTTP clients do this for action endpoints like "reorder",
+  // "cancel") makes Fastify answer 400 FST_ERR_CTP_EMPTY_JSON_BODY before the
+  // route ever runs. An empty body is simply "no body" — drop the header so it
+  // is treated as such. Only a genuinely empty request (content-length: 0) is
+  // touched; a malformed or non-empty body still fails validation as before.
+  app.addHook('onRequest', async (request) => {
+    const contentType = request.headers['content-type']
+    if (contentType && request.headers['content-length'] === '0' && /^application\/json/i.test(contentType)) {
+      delete request.headers['content-type']
+    }
+  })
+
   // PHASE 7 FIX (mobile-network stale-UI bug):
   // Never allow an intermediary (Cloudflare, a mobile-carrier transparent
   // proxy, or an on-device HTTP cache) to serve a stale copy of a

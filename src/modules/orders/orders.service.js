@@ -27,6 +27,7 @@ import { ReferralsService } from '../referrals/referrals.service.js'
 import { ShopProductsRepository } from '../shop-garment_rates/shop-garment_rates.repository.js'
 import { ShopProductsService } from '../shop-garment_rates/shop-garment_rates.service.js'
 import { OrderSplitterService } from './order-splitter.service.js'
+import { prepareReorder } from './reorder.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from '../../../archived_modules/cart/totals-engine.service.js'
 
@@ -606,32 +607,13 @@ export class OrdersService {
   /**
    * Re-order: add items from a past order back to cart
    */
+  /**
+   * Prepares a reorder from a past order — see reorder.service.js. Nothing is
+   * written; the app puts the returned items in the cart and the customer
+   * reviews and checks out as usual.
+   */
   async reorder(userId, orderId) {
-    const order = await this.repo.findByIdAndUser(orderId, userId)
-    if (!order) {
-      return { success: false, message: 'Order not found' }
-    }
-
-    const warnings = []
-
-    for (const item of order.items) {
-      const result = await this.cartService.addItem(userId, {
-        productId: item.productId,
-        shopId: item.shopId || order.shopId || null,
-        quantity: item.quantity,
-      })
-      if (!result.success) {
-        warnings.push(result.message)
-      }
-    }
-
-    const cart = await this.cartService.getCart(userId)
-
-    return {
-      success: true,
-      cart,
-      warnings: warnings.length > 0 ? warnings : undefined,
-    }
+    return prepareReorder(userId, orderId)
   }
 
   // ─── Order reconciliation (customer accept/reject) ─────
