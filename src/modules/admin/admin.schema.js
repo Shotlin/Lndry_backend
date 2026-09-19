@@ -159,8 +159,20 @@ export const getSettingsSchema = {
 export const updateSettingsSchema = {
   tags: ['Admin'],
   summary: 'Update app settings',
+  // Settings are free-form keys, so they can't be listed under `properties`.
+  // NOTE: a bare `additionalProperties: true` does NOT keep them — this
+  // Fastify instance runs Ajv with `removeAdditional: 'all'`, which deletes
+  // every property not named in `properties`/`patternProperties` regardless
+  // of `additionalProperties: true`. That silently emptied the body, so
+  // every settings save returned 200 but wrote nothing. Matching keys via
+  // `patternProperties` is what keeps them. Value types are checked in
+  // AdminService.updateSettings (no schema coercion here on purpose).
   body: {
     type: 'object',
-    additionalProperties: true,
+    minProperties: 1,
+    additionalProperties: false,
+    patternProperties: {
+      '^[A-Za-z0-9_.-]{1,100}$': {},
+    },
   },
 }

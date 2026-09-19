@@ -110,8 +110,23 @@ export class AdminService {
   }
 
   async updateSettings(settings) {
+    const entries = Object.entries(settings || {})
+    // A save that carries no settings must never look like a success.
+    if (entries.length === 0) {
+      throw { statusCode: 400, message: 'No settings were provided to update' }
+    }
+    for (const [key, value] of entries) {
+      const ok =
+        typeof value === 'string' ||
+        typeof value === 'boolean' ||
+        (typeof value === 'number' && Number.isFinite(value))
+      if (!ok) {
+        throw { statusCode: 400, message: `Invalid value for setting: ${key}` }
+      }
+    }
+
     const results = {}
-    for (const [key, value] of Object.entries(settings)) {
+    for (const [key, value] of entries) {
       const existing = await this.repository.getSettingByKey(key)
       if (!existing) throw { statusCode: 400, message: `Unknown setting: ${key}` }
       results[key] = await this.repository.updateSetting(key, value)

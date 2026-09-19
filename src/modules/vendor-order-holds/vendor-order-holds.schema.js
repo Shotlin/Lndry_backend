@@ -25,7 +25,22 @@ const envelope = (dataSchema) => ({
 export const createOrderHoldSchema = {
   tags: ['Vendor Order Holds'],
   summary: 'Park an in-progress counter-sale cart for later [VENDOR]',
-  body: { type: 'object', required: ['payload'], properties: { payload: { type: 'object', additionalProperties: true } } },
+  // The cart payload is free-form. `additionalProperties: true` alone would NOT
+  // keep its keys — this instance runs Ajv with `removeAdditional: 'all'`, which
+  // emptied `payload` to `{}` so every hold failed the "needs a cart line"
+  // check. `patternProperties` (empty schema = accept as-is) keeps every key
+  // and leaves nested values untouched.
+  body: {
+    type: 'object',
+    required: ['payload'],
+    properties: {
+      payload: {
+        type: 'object',
+        additionalProperties: false,
+        patternProperties: { '^[\\s\\S]*$': {} },
+      },
+    },
+  },
   response: { 201: envelope({ type: 'object', properties: holdProperties }) },
 }
 
