@@ -9,7 +9,7 @@ export class VendorPrintJobsService {
   async create(vendorId, actor, input) {
     if (!input.orderId) return { success: false, message: 'orderId is required' }
     const hasTargets = (input.garmentUnitIds?.length || 0) > 0 || (input.containerIds?.length || 0) > 0
-    if (!hasTargets) return { success: false, message: 'At least one garmentUnitId or containerId is required' }
+    if (!hasTargets && input.documentType !== 'RECEIPT') return { success: false, message: 'At least one garmentUnitId or containerId is required' }
     const job = await this.repo.create(vendorId, actor.userId, input)
     emitAudit('vendor_print_job_created', {
       actor_user_id: actor.userId, actor_role: actor.role, target_type: 'vendor_print_job', target_id: job.id,

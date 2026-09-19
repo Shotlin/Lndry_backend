@@ -32,6 +32,8 @@ export const createPrintJobSchema = {
       containerIds: { type: 'array', items: { type: 'string', format: 'uuid' } },
       printerProfile: { type: 'string', maxLength: 80 },
       requestedCopies: { type: 'integer', minimum: 1, maximum: 20 },
+      status: { type: 'string', enum: ['PENDING', 'PRINTED', 'FAILED'] },
+      failureReason: { type: 'string', maxLength: 500 },
     },
   },
   response: { 201: envelope({ type: 'object', properties: jobProperties }) },
