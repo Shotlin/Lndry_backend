@@ -2,7 +2,7 @@ import { query } from '../../config/database.js'
 import { StoreOrdersController } from './store-orders.controller.js'
 import { StoreOrdersService } from './store-orders.service.js'
 import { StoreOrdersRepository } from './store-orders.repository.js'
-import { resolvePhoneSchema, pushStoreOrderSchema, listMyStoreOrdersSchema } from './store-orders.schema.js'
+import { resolvePhoneSchema, pushStoreOrderSchema, listMyStoreOrdersSchema, getMyStoreOrderSchema } from './store-orders.schema.js'
 
 /**
  * Customer-facing routes — mounted at /api/v1/store-orders. A signed-in
@@ -16,6 +16,13 @@ export default async function storeOrdersRoutes(fastify) {
     schema: listMyStoreOrdersSchema,
     preHandler: [fastify.authenticate],
   }, controller.listMine.bind(controller))
+
+  // One order, for the app's order-details screen. Registered after /mine —
+  // the static path wins over the :id param either way.
+  fastify.get('/:id', {
+    schema: getMyStoreOrderSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.getMine.bind(controller))
 }
 
 /**

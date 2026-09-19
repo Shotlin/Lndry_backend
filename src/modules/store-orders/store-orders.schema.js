@@ -26,6 +26,12 @@ const storeOrderProperties = {
   paymentMethod: { type: ['string', 'null'] },
   walletAmountPaise: { type: 'integer' },
   walletRedemptionRequestId: { type: ['string', 'null'] },
+  status: { type: 'string' },
+  chargesPaise: { type: 'integer' },
+  amountPaidPaise: { type: 'integer' },
+  expectedDeliveryDate: { type: ['string', 'null'] },
+  notes: { type: ['string', 'null'] },
+  fulfillmentMode: { type: ['string', 'null'] },
   placedAt: { type: 'string' },
   createdAt: { type: 'string' },
 }
@@ -95,6 +101,44 @@ export const listMyStoreOrdersSchema = {
         success: { type: 'boolean' },
         message: { type: 'string' },
         data: { type: 'array', items: { type: 'object', properties: storeOrderProperties } },
+      },
+    },
+  },
+}
+
+export const getMyStoreOrderSchema = {
+  tags: ['Store Orders'],
+  summary: 'One of this customer\'s own walk-in "Laundry Store" orders, with payments',
+  params: {
+    type: 'object',
+    required: ['id'],
+    properties: { id: { type: 'string', format: 'uuid' } },
+  },
+  response: {
+    200: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        message: { type: 'string' },
+        data: {
+          type: 'object',
+          properties: {
+            ...storeOrderProperties,
+            vendorPhone: { type: ['string', 'null'] },
+            vendorAddress: { type: ['string', 'null'] },
+            payments: {
+              type: 'array',
+              items: {
+                type: 'object',
+                properties: {
+                  mode: { type: 'string' },
+                  amountPaise: { type: 'integer' },
+                  createdAt: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
       },
     },
   },

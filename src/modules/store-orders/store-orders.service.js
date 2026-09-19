@@ -54,4 +54,8 @@ export class StoreOrdersService {
   async listMine(customerUserId) {
     return this.repo.findByCustomer(customerUserId)
   }
+
+  async getMine(id, customerUserId) {
+    return this.repo.findOneForCustomer(id, customerUserId)
+  }
 }

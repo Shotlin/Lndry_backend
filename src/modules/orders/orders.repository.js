@@ -262,10 +262,12 @@ export class OrdersRepository {
   async findByIdAndUser(id, userId) {
     const { rows } = await query(
       `SELECT ${ORDER_COLUMNS_O}, ru.name AS rider_name, ru.phone AS rider_phone,
-              vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time
+              vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time,
+              vd.name AS vendor_name
        FROM orders o
        LEFT JOIN users ru ON ru.id = o.rider_id
        LEFT JOIN vendor_slots vs ON vs.id = o.vendor_slot_id
+       LEFT JOIN vendors vd ON vd.id = o.vendor_id
        WHERE o.id = $1 AND o.user_id = $2`,
       [id, userId]
     )
@@ -277,9 +279,11 @@ export class OrdersRepository {
    */
   async findActiveByUser(userId) {
     const { rows } = await query(
-      `SELECT ${ORDER_COLUMNS_O}, ru.name AS rider_name, ru.phone AS rider_phone
+      `SELECT ${ORDER_COLUMNS_O}, ru.name AS rider_name, ru.phone AS rider_phone,
+              vd.name AS vendor_name
        FROM orders o
        LEFT JOIN users ru ON ru.id = o.rider_id
+       LEFT JOIN vendors vd ON vd.id = o.vendor_id
        WHERE o.user_id = $1
          AND o.status IN ('PENDING','CONFIRMED','PREPARING','PACKED','OUT_FOR_DELIVERY')
        ORDER BY o.created_at DESC
@@ -364,26 +368,30 @@ export class OrdersRepository {
    * List orders for a user (paginated)
    */
   async findByUser(userId, { limit, offset, status }) {
-    const conditions = ['user_id = $1']
+    // Qualified with the `o.` alias: the list query below also joins
+    // vendors/vendor_slots, which have their own `status` column.
+    const conditions = ['o.user_id = $1']
     const params = [userId]
     let idx = 2
 
     if (status) {
-      conditions.push(`status = $${idx++}`)
+      conditions.push(`o.status = $${idx++}`)
       params.push(status)
     }
 
     const where = conditions.join(' AND ')
 
     const countResult = await query(
-      `SELECT COUNT(*) FROM orders WHERE ${where}`,
+      `SELECT COUNT(*) FROM orders o WHERE ${where}`,
       params
     )
 
     const { rows } = await query(
-      `SELECT ${ORDER_COLUMNS_O}, vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time
+      `SELECT ${ORDER_COLUMNS_O}, vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time,
+              vd.name AS vendor_name
        FROM orders o
        LEFT JOIN vendor_slots vs ON vs.id = o.vendor_slot_id
+       LEFT JOIN vendors vd ON vd.id = o.vendor_id
        WHERE ${where}
        ORDER BY o.created_at DESC
        LIMIT $${idx++} OFFSET $${idx}`,
@@ -584,6 +592,8 @@ export class OrdersRepository {
       orderNumber: row.order_number,
       userId: row.user_id,
       shopId: row.vendor_id || null,
+      // Only the customer-facing reads join vendors; every other caller leaves this null.
+      vendorName: row.vendor_name || null,
       riderId: row.rider_id,
       riderName: row.rider_name || null,
       riderPhone: row.rider_phone || null,

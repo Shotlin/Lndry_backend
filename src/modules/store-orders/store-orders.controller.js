@@ -39,4 +39,10 @@ export class StoreOrdersController {
     const orders = await this.service.listMine(request.user.id)
     return reply.code(200).send(success(orders, 'Store orders fetched'))
   }
+
+  async getMine(request, reply) {
+    const order = await this.service.getMine(request.params.id, request.user.id)
+    if (!order) return reply.code(404).send(error('Order not found', 'NOT_FOUND'))
+    return reply.code(200).send(success(order, 'Store order fetched'))
+  }
 }

@@ -57,6 +57,37 @@ export class StoreOrdersRepository {
     return this._format(rows[0])
   }
 
+  /**
+   * One walk-in order for its own customer — with the vendor's contact
+   * details and every payment taken against it, for the order-details screen.
+   * Returns null for an id that doesn't exist or belongs to someone else, so
+   * the route can't be used to probe other customers' orders.
+   */
+  async findOneForCustomer(id, customerUserId) {
+    const { rows } = await query(
+      `SELECT so.*, v.name AS vendor_name, v.phone AS vendor_phone,
+              concat_ws(', ', v.address_line1, v.address_line2, v.city, v.pincode) AS vendor_address
+       FROM store_orders so
+       JOIN vendors v ON v.id = so.vendor_id
+       WHERE so.id = $1 AND so.customer_user_id = $2`,
+      [id, customerUserId]
+    )
+    if (!rows[0]) return null
+    const { rows: payments } = await query(
+      `SELECT mode, amount_paise, created_at
+       FROM store_order_payments
+       WHERE store_order_id = $1
+       ORDER BY created_at ASC`,
+      [id]
+    )
+    return {
+      ...this._format(rows[0]),
+      vendorPhone: rows[0].vendor_phone ?? null,
+      vendorAddress: rows[0].vendor_address || null,
+      payments: payments.map((p) => ({ mode: p.mode, amountPaise: p.amount_paise, createdAt: p.created_at })),
+    }
+  }
+
   async findByCustomer(customerUserId) {
     const { rows } = await query(
       `SELECT so.*, v.name AS vendor_name
@@ -83,6 +114,14 @@ export class StoreOrdersRepository {
       taxPaise: row.tax_paise,
       totalPaise: row.total_paise,
       paymentMethod: row.payment_method,
+      // Lifecycle (migration 130). Rows pushed by the old desktop sync are
+      // already complete, which is exactly what the column defaults say.
+      status: row.status ?? 'DELIVERED',
+      chargesPaise: row.charges_paise ?? 0,
+      amountPaidPaise: row.amount_paid_paise ?? row.total_paise,
+      expectedDeliveryDate: row.expected_delivery_date ?? null,
+      notes: row.notes ?? null,
+      fulfillmentMode: row.fulfillment_mode ?? null,
       walletAmountPaise: row.wallet_amount_paise,
       walletRedemptionRequestId: row.wallet_redemption_request_id,
       cashShiftId: row.cash_shift_id,
