@@ -63,6 +63,14 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   fastify.get('/orders/:id/payments', { schema: { params: idParams } }, async (request, res) => res.send(success(await service.listPayments(request.vendorId, request.params.id))))
   fastify.post('/orders/:id/payments', { schema: { params: idParams} }, async (request, res) => reply(res, await service.collectPayment(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Payment recorded', 201))
 
+  // (garment, service) -> rate id, for features that reference a price line (service packages)
+  fastify.get('/rates', async (request, res) => {
+    const { rows } = await query(
+      `SELECT r.id, r.garment_type_id, r.vendor_service_id FROM vendor_service_rates r
+       JOIN vendor_services vs ON vs.id = r.vendor_service_id WHERE vs.vendor_id = $1 AND r.is_active = true`, [request.vendorId])
+    return res.send(success(rows.map((r) => ({ id: r.id, garmentTypeId: r.garment_type_id, vendorServiceId: r.vendor_service_id }))))
+  })
+
   // Cross-order tag views
   fastify.get('/garment-units', async (request, res) => res.send(success(await service.listGarmentUnits(request.vendorId, request.query))))
   fastify.get('/containers', async (request, res) => res.send(success(await service.listContainers(request.vendorId, request.query))))
