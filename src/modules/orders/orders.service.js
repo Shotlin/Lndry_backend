@@ -1985,7 +1985,10 @@ export class OrdersService {
 
       return {
         success: true,
-        order,
+        // The response schema only declares camelCase fields, so the raw DB
+        // row's `order_number` was being stripped — the app then showed the
+        // last 8 chars of the UUID instead of the real order number.
+        order: { ...order, orderNumber: order.order_number },
         status: 'WAITING_VENDOR_CONFIRMATION'
       }
     } catch (err) {
