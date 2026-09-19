@@ -86,6 +86,13 @@ export async function startWorkerRuntime() {
   startSlotHoldExpiryWorker(createSlotHoldExpiryProcessor())
 
 
+  // Customer account deletion — anonymizes approved requests once their
+  // 30-day grace period is over (polls hourly).
+  const { startAccountDeletionWorker } = await import(
+    '../workers/account-deletion.worker.js'
+  )
+  startAccountDeletionWorker()
+
   // Event-loop blocking detector (task 13.6) — logs warning when
   // the event loop is blocked for >100ms.
   startEventLoopMonitor()
@@ -144,6 +151,10 @@ export async function startWorkerRuntime() {
 }
 
 export async function closeWorkerRuntime() {
+  const { stopAccountDeletionWorker } = await import(
+    '../workers/account-deletion.worker.js'
+  )
+  stopAccountDeletionWorker()
   await closeBullMQ()
   logger.info('BullMQ queues and workers closed')
 }

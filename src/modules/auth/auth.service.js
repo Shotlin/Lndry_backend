@@ -258,6 +258,13 @@ export class AuthService {
     }
 
     if (!user.is_active) {
+      // Approved for deletion: deactivated during the 30-day grace period.
+      if (user.deletion_scheduled_at) {
+        return {
+          success: false,
+          message: 'This account has been closed and is scheduled for deletion. Contact support if this is a mistake.',
+        }
+      }
       return { success: false, message: 'Your account has been blocked. Contact support.' }
     }
 

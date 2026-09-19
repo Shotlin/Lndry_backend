@@ -12,7 +12,8 @@ export class AuthRepository {
    */
   async findByPhone(phone) {
     const { rows } = await query(
-      `SELECT id, phone, email, name, role, avatar_url, is_active, created_at
+      `SELECT id, phone, email, name, role, avatar_url, is_active, created_at,
+              deletion_scheduled_at
        FROM users WHERE phone = $1`,
       [phone]
     )

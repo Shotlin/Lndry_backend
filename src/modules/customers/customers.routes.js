@@ -2,20 +2,22 @@ import { success, error } from '../../utils/apiResponse.js'
 import { UsersService } from '../users/users.service.js'
 import { UsersRepository } from '../users/users.repository.js'
 import { query } from '../../config/database.js'
+import { HelpFaqsRepository } from '../admin/help-faqs/help-faqs.repository.js'
+import { publicFaqsSchema } from '../admin/help-faqs/help-faqs.schema.js'
+import { customerAccountDeletionRoutes } from '../admin/account-deletion/account-deletion.routes.js'
 
 export default async function customerRoutes(fastify) {
   const repository = new UsersRepository()
   const service = new UsersService(repository)
 
   // GET /support-contact — a small whitelisted slice of app_settings (just
-  // the support phone/email), exposed to authenticated customers. The full
-  // app_settings table stays admin-only via GET /api/v1/admin/settings.
+  // the support phone/email). Public on purpose: it's the number/address
+  // printed on the Help screen, which signed-out visitors can open too. The
+  // full app_settings table stays admin-only via GET /api/v1/admin/settings.
   fastify.get('/support-contact', {
-    preHandler: [fastify.authenticate, fastify.authorize(['CUSTOMER'])],
     schema: {
       tags: ['Customer Profile'],
-      summary: 'Get the customer support phone/email',
-      security: [{ bearerAuth: [] }]
+      summary: 'Get the customer support phone/email'
     }
   }, async (request, reply) => {
     const { rows } = await query(
@@ -27,6 +29,22 @@ export default async function customerRoutes(fastify) {
       email: settings.support_email || null,
     }, 'Support contact fetched successfully'))
   })
+
+  // GET /faqs — the admin-managed Help & FAQs list (dashboard → Help & FAQs).
+  // Public on purpose: the Help screen is reachable before sign-in and holds
+  // nothing but support copy. Only enabled FAQs are returned.
+  const faqsRepository = new HelpFaqsRepository()
+  fastify.get('/faqs', { schema: publicFaqsSchema }, async (request, reply) => {
+    const faqs = await faqsRepository.findAllActive()
+    return reply.code(200).send(success(
+      faqs.map(({ id, question, answer }) => ({ id, question, answer })),
+      'FAQs fetched successfully'
+    ))
+  })
+
+  // POST/GET /account-deletion — customer "Delete Account" request + status.
+  // Approval is an admin decision (dashboard → Deletion Requests).
+  fastify.register(customerAccountDeletionRoutes, { prefix: '/account-deletion' })
 
   // GET /checkout-content — the admin-editable advance-payment / refund copy
   // shown on the payment screen (another small whitelisted slice of
