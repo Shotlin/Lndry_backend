@@ -1,6 +1,7 @@
 import { query } from '../../config/database.js'
 import { success, error } from '../../utils/apiResponse.js'
 import { VendorCounterOrdersService } from './vendor-counter-orders.service.js'
+import { VendorCounterViewsService } from './vendor-counter-views.service.js'
 
 const loose = { type: 'object', additionalProperties: true }
 const idParams = { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } }
@@ -12,6 +13,7 @@ const idParams = { type: 'object', required: ['id'], properties: { id: { type: '
  */
 export default async function vendorCounterOrdersRoutes(fastify) {
   const service = new VendorCounterOrdersService()
+  const views = new VendorCounterViewsService()
 
   fastify.addHook('preHandler', fastify.authenticate)
   fastify.addHook('preHandler', async (request, reply) => {
@@ -63,4 +65,21 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   // Cross-order tag views
   fastify.get('/garment-units', async (request, res) => res.send(success(await service.listGarmentUnits(request.vendorId, request.query))))
   fastify.get('/containers', async (request, res) => res.send(success(await service.listContainers(request.vendorId, request.query))))
+
+  fastify.get('/garment-units/:id', { schema: { params: idParams } }, async (request, res) => {
+    const unit = await views.unitView(request.vendorId, request.params.id)
+    return unit ? res.send(success(unit)) : notFound(res, 'Garment')
+  })
+  fastify.get('/containers/:id', { schema: { params: idParams } }, async (request, res) => {
+    const container = await views.containerView(request.vendorId, request.params.id)
+    return container ? res.send(success(container)) : notFound(res, 'Bag')
+  })
+
+  // Work-queue, claims, returns and print history, joined for display
+  fastify.get('/production-tasks', async (request, res) => res.send(success(await views.productionTasks(request.vendorId, request.query))))
+  fastify.get('/quality-claims', async (request, res) => res.send(success(await views.qualityClaims(request.vendorId))))
+  fastify.get('/quality-analytics', async (request, res) => res.send(success(await views.qualityAnalytics(request.vendorId))))
+  fastify.get('/corrections', async (request, res) => res.send(success(await views.corrections(request.vendorId))))
+  fastify.get('/returns', async (request, res) => res.send(success(await views.returns(request.vendorId))))
+  fastify.get('/print-jobs', async (request, res) => res.send(success(await views.printJobs(request.vendorId, request.query))))
 }
