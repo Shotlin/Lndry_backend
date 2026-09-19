@@ -37,6 +37,7 @@ import adminOlaMapsSettingsRoutes from './ola-maps-settings/ola-maps-settings.ro
 import adminReconciliationProblemTypesRoutes from './reconciliation-problem-types/reconciliation-problem-types.routes.js'
 import adminHelpFaqsRoutes from './help-faqs/help-faqs.routes.js'
 import adminAccountDeletionRoutes from './account-deletion/account-deletion.routes.js'
+import { adminInvoicesRoutes } from '../invoices/invoices.routes.js'
 
 /**
  * Admin routes plugin
@@ -130,4 +131,5 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminReconciliationProblemTypesRoutes, { prefix: '/reconciliation-problem-types' })
   fastify.register(adminHelpFaqsRoutes, { prefix: '/help-faqs' })
   fastify.register(adminAccountDeletionRoutes, { prefix: '/account-deletion-requests' })
+  fastify.register(adminInvoicesRoutes, { prefix: '/invoices' })
 }

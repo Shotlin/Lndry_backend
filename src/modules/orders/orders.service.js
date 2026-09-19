@@ -6,7 +6,7 @@ import { logger } from '../../config/logger.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { ORDER_STATUS, ACTIVE_ORDER_STATUSES } from '../../constants/orderStatus.js'
 import { ORDER_STATUSES, validateTransition, recordOrderEvent } from '../../utils/state-machine.js'
-import { generateInvoicePDF } from '../../utils/invoiceGenerator.js'
+import { InvoicesService, InvoiceError } from '../invoices/invoices.service.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../config/cloudinary.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
@@ -963,28 +963,22 @@ export class OrdersService {
   }
 
   /**
-   * Generate PDF invoice for an order
+   * PDF invoice for one of the customer's orders.
+   *
+   * Kept for older clients that call GET /orders/:id/invoice — it now serves
+   * the same backend-issued, numbered invoice as the /invoices API (the old
+   * version rendered a throw-away PDF from raw order fields, read camelCase
+   * rows with snake_case keys, and so denied every request).
    */
   async getInvoice(userId, orderId) {
-    const order = await this.repo.findById(orderId)
-    if (!order) {
-      return { success: false, statusCode: 404, message: 'Order not found' }
-    }
-
-    // Customers can only access their own invoices
-    if (order.user_id !== userId) {
-      return { success: false, statusCode: 403, message: 'Access denied' }
-    }
-
-    if (order.payment_status !== 'PAID') {
-      return { success: false, statusCode: 400, message: 'Invoice available only for paid orders' }
-    }
-
-    const buffer = await generateInvoicePDF(order)
-    return {
-      success: true,
-      buffer,
-      orderNumber: order.order_number,
+    try {
+      const file = await new InvoicesService().getPdfForCustomer(userId, orderId)
+      return { success: true, buffer: file.buffer, fileName: file.fileName }
+    } catch (err) {
+      if (err instanceof InvoiceError) {
+        return { success: false, statusCode: err.statusCode, message: err.message }
+      }
+      throw err
     }
   }
 

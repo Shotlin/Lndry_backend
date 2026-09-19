@@ -9,6 +9,7 @@ import { cacheDeletePattern } from '../utils/cache.js'
 import { ACTIVE_THEME_CACHE_KEY, LEGACY_TAB_CACHE_KEY } from '../modules/themes/theme-cache.js'
 import { emit as emitAudit } from '../utils/audit-log.js'
 import { VendorOrdersService } from '../modules/vendor-orders/vendor-orders.service.js'
+import { InvoicesService } from '../modules/invoices/invoices.service.js'
 
 const DEFAULT_RIDER_EARNING = 25
 const ASSIGNABLE_ORDER_STATUSES = ['CONFIRMED', 'PREPARING', 'PACKED', 'VENDOR_ACCEPTED']
@@ -465,6 +466,12 @@ async function handleRiderBroadcastTimeout({ orderId, purpose, vendorId }) {
   return service.rebroadcastIfStillOffered(orderId, purpose, vendorId)
 }
 
+async function handleGenerateInvoice({ orderId }) {
+  // Idempotent: returns the existing invoice if one was already issued (for
+  // instance by the customer opening it first).
+  return new InvoicesService().issueIfDelivered(orderId)
+}
+
 async function handleAssignmentTimeout({ assignmentId, orderId }) {
   logger.info(
     { assignmentId, orderId },
@@ -530,6 +537,9 @@ export async function processOrderJob(job) {
 
     case 'rider-broadcast-timeout':
       return handleRiderBroadcastTimeout(job.data)
+
+    case 'generate-invoice':
+      return handleGenerateInvoice(job.data)
 
     default:
       logger.warn({ type, jobId: job.id }, 'Unknown order job type')

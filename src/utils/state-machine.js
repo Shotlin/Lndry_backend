@@ -231,6 +231,14 @@ export async function recordOrderEvent(client, {
      VALUES ($1, $2, $3, $4, $5, NOW())`,
     [orderId, oldStatus, newStatus, actorId, note]
   )
+
+  // Every path that delivers an order records this event, so it is the one
+  // place to start invoice generation. Queued (not run inline) so it happens
+  // after this transaction commits and can never fail the delivery.
+  if (newStatus === ORDER_STATUSES.DELIVERED && oldStatus !== ORDER_STATUSES.DELIVERED) {
+    const { scheduleInvoiceForDeliveredOrder } = await import('../modules/invoices/invoice-jobs.js')
+    scheduleInvoiceForDeliveredOrder(orderId)
+  }
 }
 
 /**

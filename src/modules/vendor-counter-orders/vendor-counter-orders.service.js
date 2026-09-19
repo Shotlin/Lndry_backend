@@ -6,6 +6,7 @@ import { amountForRule } from '../vendor-adjustment-rules/vendor-adjustment-rule
 import { VendorCustomerLedgerService } from '../vendor-customer-ledger/vendor-customer-ledger.service.js'
 import { VendorCashShiftsRepository } from '../vendor-cash-shifts/vendor-cash-shifts.repository.js'
 import { VendorProductionTasksService } from '../vendor-production-tasks/vendor-production-tasks.service.js'
+import { scheduleInvoiceForDeliveredOrder } from '../invoices/invoice-jobs.js'
 
 const PAYMENT_MODES = ['CASH', 'UPI', 'CARD', 'BANK', 'WALLET']
 const PIECE_UNITS = new Set(['piece', 'pc', 'pcs', 'pair'])
@@ -502,6 +503,7 @@ export class VendorCounterOrdersService {
     if (target === 'DELIVERED') {
       await query(`UPDATE vendor_garment_units SET state = 'DELIVERED', updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state IN ('ASSEMBLY','RACKED','DISPATCHED')`, [vendorId, id])
       await query(`UPDATE vendor_laundry_containers SET state = 'DELIVERED', delivered_at = NOW(), updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state IN ('READY','DISPATCHED','PROCESSING')`, [vendorId, id])
+      scheduleInvoiceForDeliveredOrder(id)
     }
     emitAudit('vendor_counter_order_transitioned', {
       actor_user_id: actor.userId, actor_role: actor.role, target_type: 'store_order', target_id: id,

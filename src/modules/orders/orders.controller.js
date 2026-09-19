@@ -113,7 +113,7 @@ export class OrdersController {
     }
     reply
       .header('Content-Type', 'application/pdf')
-      .header('Content-Disposition', `attachment; filename=invoice-${result.orderNumber}.pdf`)
+      .header('Content-Disposition', `attachment; filename="${result.fileName}"`)
     return reply.send(result.buffer)
   }
 

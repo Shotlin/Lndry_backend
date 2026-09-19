@@ -1,6 +1,6 @@
 import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
-import { generateInvoicePDF } from '../../../utils/invoiceGenerator.js'
+import { InvoicesService } from '../../invoices/invoices.service.js'
 import { query as dbQuery } from '../../../config/database.js'
 import ExcelJS from 'exceljs'
 
@@ -141,8 +141,9 @@ export class AdminOrdersService {
   }
 
   async getInvoice(orderId) {
-    const order = await this.findById(orderId)
-    return generateInvoicePDF(order)
+    // Same backend-issued, numbered invoice the customer sees.
+    const file = await new InvoicesService().getPdfForAdmin(orderId)
+    return file.buffer
   }
 
   async getPackingSlip(orderId) {

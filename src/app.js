@@ -194,6 +194,11 @@ export const buildApp = async () => {
     prefix: '/api/v1/wallet',
   })
 
+  // Invoices — backend-generated PDF invoices for delivered orders
+  await app.register(import('./modules/invoices/invoices.routes.js'), {
+    prefix: '/api/v1/invoices',
+  })
+
   // Coupons — fully implemented
   // await app.register(import('./modules/coupons/coupons.routes.js'), {
   //   prefix: '/api/v1/coupons',
