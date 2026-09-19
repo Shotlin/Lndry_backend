@@ -1,5 +1,6 @@
 import { VendorOrdersController } from './vendor-orders.controller.js'
 import { VendorOrdersService } from './vendor-orders.service.js'
+import { requireVendorPermission } from '../../middlewares/vendor-permission.js'
 
 /**
  * Vendor Orders routes plugin
@@ -50,6 +51,7 @@ export default async function vendorOrdersRoutes(fastify) {
 
   // GET / — List vendor orders
   fastify.get('/', {
+    preHandler: [requireVendorPermission('shop_orders.view')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'List orders for this vendor',
@@ -77,6 +79,7 @@ export default async function vendorOrdersRoutes(fastify) {
 
   // GET /stats — Dashboard stats
   fastify.get('/stats', {
+    preHandler: [requireVendorPermission('shop_orders.view', 'shop_reports.view')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Get vendor dashboard order statistics',
@@ -86,6 +89,7 @@ export default async function vendorOrdersRoutes(fastify) {
 
   // GET /:orderId — Order detail
   fastify.get('/:orderId', {
+    preHandler: [requireVendorPermission('shop_orders.view')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Get vendor order details',
@@ -96,6 +100,7 @@ export default async function vendorOrdersRoutes(fastify) {
 
   // POST /:orderId/accept — Accept order
   fastify.post('/:orderId/accept', {
+    preHandler: [requireVendorPermission('shop_orders.accept_reject')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Vendor accepts order',
@@ -106,6 +111,7 @@ export default async function vendorOrdersRoutes(fastify) {
 
   // POST /:orderId/reject — Reject order
   fastify.post('/:orderId/reject', {
+    preHandler: [requireVendorPermission('shop_orders.accept_reject')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Vendor rejects order',
@@ -123,6 +129,7 @@ export default async function vendorOrdersRoutes(fastify) {
   // POST /:orderId/assign-rider — Manually assign/reassign a specific
   // rider or staff member (Phase 1 of the rider-assignment initiative)
   fastify.post('/:orderId/assign-rider', {
+    preHandler: [requireVendorPermission('shop_orders.assign_rider')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Manually assign a specific rider/staff to this order',
@@ -142,6 +149,7 @@ export default async function vendorOrdersRoutes(fastify) {
   // rider/staff — they must accept before it's confirmed theirs (Phase 2
   // of the rider-assignment initiative)
   fastify.post('/:orderId/offer-rider', {
+    preHandler: [requireVendorPermission('shop_orders.assign_rider')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Offer this order to a specific rider/staff, pending their acceptance',
@@ -160,6 +168,7 @@ export default async function vendorOrdersRoutes(fastify) {
   // POST /:orderId/broadcast-rider — Broadcast to every active rider at
   // once; first to accept wins (Phase 3 of the rider-assignment initiative)
   fastify.post('/:orderId/broadcast-rider', {
+    preHandler: [requireVendorPermission('shop_orders.assign_rider')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Broadcast this order to every active rider — first to accept wins',
@@ -170,6 +179,7 @@ export default async function vendorOrdersRoutes(fastify) {
 
   // POST /:orderId/processing-stage — Update processing stage
   fastify.post('/:orderId/processing-stage', {
+    preHandler: [requireVendorPermission('shop_orders.update_status')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Update order processing stage (WASHING, DRYING, IRONING, PACKED)',
@@ -196,6 +206,7 @@ export default async function vendorOrdersRoutes(fastify) {
   // POST /:orderId/reconcile — Vendor's authoritative recalculation, staged
   // pending customer approval (does not apply immediately)
   fastify.post('/:orderId/reconcile', {
+    preHandler: [requireVendorPermission('shop_orders.reevaluate')],
     schema: {
       tags: ['Vendor Orders'],
       summary: 'Propose a recalculated garment count/weight for customer approval',

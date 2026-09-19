@@ -567,8 +567,20 @@ describe('createVendorEmployeeSchema — permissions and role validation', () =>
     role: 'VENDOR_STAFF',
   }
 
-  it('lists exactly the canonical 37 Permission_Strings', () => {
-    expect(PERMISSION_ENUM.length).toBe(37)
+  it('lists exactly the canonical 43 Permission_Strings (37 original + 6 vendor-app additions)', () => {
+    expect(PERMISSION_ENUM.length).toBe(43)
+    // Added with per-module staff permissions: accept/reject and re-evaluation
+    // as their own grants, plus pickup slots and inventory.
+    for (const added of [
+      'shop_orders.accept_reject',
+      'shop_orders.reevaluate',
+      'vendor_slots.view',
+      'vendor_slots.manage',
+      'vendor_inventory.view',
+      'vendor_inventory.manage',
+    ]) {
+      expect(PERMISSION_ENUM).toContain(added)
+    }
     expect(PERMISSION_ENUM).toContain('shop_orders.view')
     expect(PERMISSION_ENUM).toContain('vendor_employees.create')
     expect(PERMISSION_ENUM).toContain('reports.global_view')

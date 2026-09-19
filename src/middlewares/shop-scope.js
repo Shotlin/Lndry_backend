@@ -5,6 +5,7 @@ import { ROLES } from '../constants/roles.js'
 import { HQ_ROLES } from '../utils/permissions.js'
 import { ERROR_CODES } from '../constants/errors.js'
 import { emit as emitAudit } from '../utils/audit-log.js'
+import { invalidateVendorActorCache } from './vendor-permission.js'
 
 /**
  * Shop scope middleware — derives `request.shopId` from the authenticated user's
@@ -87,6 +88,9 @@ export function staffActiveCacheKey(userId, shopId) {
 export async function invalidateStaffActiveCache(userId, shopId) {
   if (!userId || !shopId) return
   await cacheDel(staffActiveCacheKey(userId, shopId))
+  // The vendor-app permission guard caches the same roster record; a change
+  // to it (role, permissions, active flag) must take effect immediately.
+  await invalidateVendorActorCache(userId, shopId)
 }
 
 /**

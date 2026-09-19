@@ -78,6 +78,29 @@ export default async function vendorEmployeesRoutes(fastify) {
     },
   }, controller.create.bind(controller))
 
+  // GET /permission-catalog — the modules/permissions an owner can grant staff.
+  // Registered before '/:id' so it is never read as an id.
+  fastify.get('/permission-catalog', {
+    schema: {
+      tags: ['Vendor Employees'],
+      summary: 'Permissions an owner can grant a staff member [Owner/Staff]',
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: readPreHandlers,
+  }, controller.permissionCatalog.bind(controller))
+
+  // GET /me — the caller's current role + access (fresh from the roster).
+  // Open to every roster role, captains included, so any app session can
+  // learn what it is currently allowed to do.
+  fastify.get('/me', {
+    schema: {
+      tags: ['Vendor Employees'],
+      summary: "The caller's current vendor role and access",
+      security: [{ bearerAuth: [] }],
+    },
+    preHandler: [fastify.authenticate],
+  }, controller.me.bind(controller))
+
   // GET / — List staff (Shop Admin/Manager / Super Admin)
   fastify.get('/', {
     schema: {

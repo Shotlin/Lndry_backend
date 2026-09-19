@@ -1,4 +1,6 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { loadVendorActor } from '../../middlewares/vendor-permission.js'
+import { VENDOR_APP_PERMISSION_MODULES } from '../../utils/permissions.js'
 import {
   createVendorEmployeeSchema,
   updateVendorEmployeeSchema,
@@ -41,6 +43,9 @@ function resolveShopId(request) {
  * Shop Staff controller — thin HTTP layer.
  * Handles request/response shape only and delegates to the service.
  */
+/** Service refusals that are a rule violation (409), not bad input (400). */
+const ROLE_RULE_CODES = new Set(['ROLE_CHANGE_NOT_ALLOWED', 'OWNER_PERMISSIONS_FIXED'])
+
 export class VendorEmployeesController {
   constructor(service) {
     this.service = service
@@ -208,7 +213,12 @@ export class VendorEmployeesController {
     }
 
     if (!result.success) {
-      const statusCode = result.code === 'STAFF_NOT_FOUND' ? 404 : 400
+      const statusCode =
+        result.code === 'STAFF_NOT_FOUND'
+          ? 404
+          : ROLE_RULE_CODES.has(result.code)
+            ? 409
+            : 400
       return reply.code(statusCode).send(error(result.message, result.code))
     }
 
@@ -234,7 +244,12 @@ export class VendorEmployeesController {
     const result = await this.service.delete(paramsParsed.data.id, shopId, request.user.id)
 
     if (!result.success) {
-      const statusCode = result.code === 'STAFF_NOT_FOUND' ? 404 : 400
+      const statusCode =
+        result.code === 'STAFF_NOT_FOUND'
+          ? 404
+          : ROLE_RULE_CODES.has(result.code)
+            ? 409
+            : 400
       return reply.code(statusCode).send(error(result.message, result.code))
     }
 
@@ -298,6 +313,58 @@ export class VendorEmployeesController {
         { temp_password: result.temp_password },
         'Staff password reset — temp password shown exactly once'
       )
+    )
+  }
+
+  /**
+   * GET /permission-catalog — what an owner can grant a staff member, straight
+   * from the backend so the app renders exactly (and only) what is enforced.
+   */
+  async permissionCatalog(request, reply) {
+    return reply.code(200).send(success({ modules: VENDOR_APP_PERMISSION_MODULES }, 'Permission catalog fetched'))
+  }
+
+  /**
+   * GET /me — the caller's own role and CURRENT access, read from the roster
+   * (not the JWT), so a staff session picks up changes the owner just made
+   * without signing out. `allowed_modules` / `allowed_items` are worked out
+   * here from the catalog; the app only shows or hides screens by them.
+   */
+  async me(request, reply) {
+    const actor = await loadVendorActor(request.user.id, request.user.shopId || request.user.vendor_id || null)
+    if (!actor) {
+      return reply.code(404).send(error('Not on a vendor roster', 'NOT_VENDOR'))
+    }
+
+    const isOwner = actor.role === 'VENDOR_OWNER'
+    const held = new Set(actor.permissions)
+    const allowedItems = []
+    const allowedModules = []
+    if (actor.role !== 'VENDOR_RIDER') {
+      for (const mod of VENDOR_APP_PERMISSION_MODULES) {
+        let any = false
+        for (const item of mod.items) {
+          if (isOwner || item.permissions.every((p) => held.has(p))) {
+            allowedItems.push(item.key)
+            any = true
+          }
+        }
+        if (any) allowedModules.push(mod.key)
+      }
+    }
+
+    return reply.code(200).send(
+      success(
+        {
+          vendor_id: actor.vendorId,
+          role: actor.role,
+          is_owner: isOwner,
+          permissions: isOwner ? undefined : actor.permissions,
+          allowed_modules: allowedModules,
+          allowed_items: allowedItems,
+        },
+        'Access fetched',
+      ),
     )
   }
 }

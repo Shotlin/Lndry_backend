@@ -1,6 +1,7 @@
 import { VendorsController } from './vendors.controller.js'
 import { VendorsService } from './vendors.service.js'
 import { VendorsRepository } from './vendors.repository.js'
+import { requireVendorPermission } from '../../middlewares/vendor-permission.js'
 
 /**
  * Vendor onboarding applications & profiles routes
@@ -298,110 +299,110 @@ export default async function vendorApplicationsRoutes(fastify) {
   
   // GET /categories — List laundry categories
   fastify.get('/categories', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.view')],
   }, controller.getVendorCategories.bind(controller))
 
   // GET /services — List services
   fastify.get('/services', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.view')],
   }, controller.getVendorServices.bind(controller))
 
   // POST /services — Create draft service
   fastify.post('/services', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.create')],
   }, controller.createVendorServiceDraft.bind(controller))
 
   // GET /services/catalogue — Flat garment-type list across all this
   // vendor's active services, for the reconciliation move/add-service picker
   fastify.get('/services/catalogue', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.view', 'shop_orders.reevaluate')],
   }, controller.getReconciliationCatalogue.bind(controller))
 
   // GET /services/:serviceId — Full service details (with garment rates)
   fastify.get('/services/:serviceId', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.view')],
   }, controller.getVendorServiceDetails.bind(controller))
 
   // PATCH /services/:serviceId — Update service availability
   fastify.patch('/services/:serviceId', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.update')],
   }, controller.updateVendorService.bind(controller))
 
   // DELETE /services/:serviceId — Soft delete service
   fastify.delete('/services/:serviceId', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.delete')],
   }, controller.deleteVendorService.bind(controller))
 
   // POST /services/:serviceId/garment-rates — Create and link a garment rate
   fastify.post('/services/:serviceId/garment-rates', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.update')],
   }, controller.addGarmentRate.bind(controller))
 
   // PATCH /services/:serviceId/garment-rates/:id — Update garment rate price/availability
   fastify.patch('/services/:serviceId/garment-rates/:id', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.update')],
   }, controller.updateGarmentRate.bind(controller))
 
   // DELETE /services/:serviceId/garment-rates/:id — Deactivate/soft-delete garment rate
   fastify.delete('/services/:serviceId/garment-rates/:id', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.delete')],
   }, controller.deleteGarmentRate.bind(controller))
 
   // POST /services/:serviceId/garment-rates/bulk — Bulk upsert garment rates
   fastify.post('/services/:serviceId/garment-rates/bulk', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.update')],
   }, controller.bulkUpsertGarmentRates.bind(controller))
 
   // POST /services/:serviceId/publish — Publish service
   fastify.post('/services/:serviceId/publish', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.update')],
   }, controller.publishService.bind(controller))
 
   // POST /services/:serviceId/unpublish — Unpublish service
   fastify.post('/services/:serviceId/unpublish', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_services.update')],
   }, controller.unpublishService.bind(controller))
 
   // ─── Capacity & Slots (Section 9) ────────────────────────
   
   // GET /capacity — Get daily limit & slots availability
   fastify.get('/capacity', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.view')],
   }, controller.getCapacity.bind(controller))
 
   // PUT /capacity/daily-limit — Update daily limit
   fastify.put('/capacity/daily-limit', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.manage')],
   }, controller.updateDailyLimit.bind(controller))
 
   // GET /pickup-slots — Get slots
   fastify.get('/pickup-slots', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.view')],
   }, controller.getPickupSlots.bind(controller))
 
   // POST /pickup-slots — Create slot
   fastify.post('/pickup-slots', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.manage')],
   }, controller.createPickupSlot.bind(controller))
 
   // PATCH /pickup-slots/:slotId — Update slot
   fastify.patch('/pickup-slots/:slotId', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.manage')],
   }, controller.updatePickupSlot.bind(controller))
 
   // DELETE /pickup-slots/:slotId — Delete slot
   fastify.delete('/pickup-slots/:slotId', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.manage')],
   }, controller.deletePickupSlot.bind(controller))
 
   // POST /capacity/exceptions — Create capacity exception
   fastify.post('/capacity/exceptions', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.manage')],
   }, controller.createCapacityException.bind(controller))
 
   // DELETE /capacity/exceptions/:id — Delete capacity exception
   fastify.delete('/capacity/exceptions/:id', {
-    preHandler: commonPreHandlers,
+    preHandler: [...commonPreHandlers, requireVendorPermission('vendor_slots.manage')],
   }, controller.deleteCapacityException.bind(controller))
 }
 

@@ -55,9 +55,11 @@ const CANONICAL_PERMISSION_LIST = Object.freeze([
   'shop_financials.export',
   'shop_financials.mark_paid',
   'shop_financials.view',
+  'shop_orders.accept_reject',
   'shop_orders.assign_rider',
   'shop_orders.cancel',
   'shop_orders.export',
+  'shop_orders.reevaluate',
   'shop_orders.refund',
   'shop_orders.update_status',
   'shop_orders.view',
@@ -79,6 +81,13 @@ const CANONICAL_PERMISSION_LIST = Object.freeze([
   'vendors.delete',
   'vendors.update',
   'vendors.view',
+  // Vendor-app modules that had no permission of their own (added with the
+  // Staff-vs-Captain work): order accept/reject and re-evaluation as separate
+  // grants, plus pickup slots and inventory.
+  'vendor_slots.manage',
+  'vendor_slots.view',
+  'vendor_inventory.manage',
+  'vendor_inventory.view',
 ])
 
 /**
@@ -267,4 +276,91 @@ export function assertValidPermissions(arr) {
     }
   }
   return arr
+}
+
+// ─── Vendor-app module catalog ───────────────────────────────────────────────
+//
+// What an owner can grant a STAFF member from the Partner app's Permissions
+// screen. This is the single source of truth: the app fetches it
+// (GET /api/v1/vendor/employees/permission-catalog) and renders exactly this
+// list, and the route guards below enforce exactly these permission strings.
+// Nothing is hardcoded on the client, so adding a module is a change here.
+//
+// `key` is stable (the app maps it to a translated label; `label` is the
+// English fallback). `permissions` are real canonical Permission_Strings.
+//
+// Owner-only areas are deliberately NOT here: managing staff and captains,
+// payouts/financials and store settings stay with the owner.
+export const VENDOR_APP_PERMISSION_MODULES = Object.freeze([
+  {
+    key: 'orders',
+    label: 'Orders',
+    items: [
+      { key: 'orders.view', label: 'View orders', permissions: ['shop_orders.view'] },
+      { key: 'orders.accept_reject', label: 'Accept / reject new orders', permissions: ['shop_orders.accept_reject'] },
+      { key: 'orders.process', label: 'Processing & status updates', permissions: ['shop_orders.update_status'] },
+      { key: 'orders.reevaluate', label: 'Re-evaluation', permissions: ['shop_orders.reevaluate'] },
+      { key: 'orders.assign_captain', label: 'Assign / broadcast to captains', permissions: ['shop_orders.assign_rider'] },
+    ],
+  },
+  {
+    key: 'catalogue',
+    label: 'Catalogue & pricing',
+    items: [
+      { key: 'catalogue.view', label: 'View services & pricing', permissions: ['vendor_services.view'] },
+      {
+        key: 'catalogue.manage',
+        label: 'Manage services & pricing',
+        permissions: ['vendor_services.create', 'vendor_services.update', 'vendor_services.delete'],
+      },
+    ],
+  },
+  {
+    key: 'inventory',
+    label: 'Inventory',
+    items: [
+      { key: 'inventory.view', label: 'View inventory', permissions: ['vendor_inventory.view'] },
+      { key: 'inventory.manage', label: 'Manage inventory', permissions: ['vendor_inventory.manage'] },
+    ],
+  },
+  {
+    key: 'slots',
+    label: 'Pickup slots',
+    items: [
+      { key: 'slots.view', label: 'View pickup slots', permissions: ['vendor_slots.view'] },
+      { key: 'slots.manage', label: 'Manage pickup slots & capacity', permissions: ['vendor_slots.manage'] },
+    ],
+  },
+  {
+    key: 'analytics',
+    label: 'Analytics',
+    items: [
+      { key: 'analytics.view', label: 'View analytics', permissions: ['shop_reports.view'] },
+    ],
+  },
+])
+
+/**
+ * A stronger permission needs its "view" — an accept/reject grant is useless
+ * (and confusing) if the staff member can't open the order list.
+ */
+const PERMISSION_IMPLIES = Object.freeze({
+  'shop_orders.accept_reject': ['shop_orders.view'],
+  'shop_orders.update_status': ['shop_orders.view'],
+  'shop_orders.reevaluate': ['shop_orders.view'],
+  'shop_orders.assign_rider': ['shop_orders.view'],
+  'vendor_services.create': ['vendor_services.view'],
+  'vendor_services.update': ['vendor_services.view'],
+  'vendor_services.delete': ['vendor_services.view'],
+  'vendor_inventory.manage': ['vendor_inventory.view'],
+  'vendor_slots.manage': ['vendor_slots.view'],
+})
+
+/** Adds the implied "view" permissions and de-duplicates. Order-stable. */
+export function withImpliedPermissions(perms) {
+  const out = new Set(perms)
+  for (const p of perms) {
+    for (const implied of PERMISSION_IMPLIES[p] || []) out.add(implied)
+  }
+  return [...out]
 }

@@ -13,6 +13,7 @@ import {
   assertValidPermissions,
   HQ_ROLES,
   SHOP_ROLE_DEFAULT_PERMISSIONS,
+  withImpliedPermissions,
 } from '../../utils/permissions.js'
 import { ERROR_CODES } from '../../constants/errors.js'
 import { VendorOrdersService } from '../vendor-orders/vendor-orders.service.js'
@@ -110,6 +111,32 @@ function makeServiceError(statusCode, code, message) {
   err.statusCode = statusCode
   err.code = code
   return err
+}
+
+/**
+ * Resolves the permission list to store for a roster record of [role].
+ *
+ * Staff (VENDOR_STAFF) and captains (VENDOR_RIDER) are different account
+ * types, and permissions only make sense for staff:
+ *   - a captain never carries vendor-app permissions (they use the captain
+ *     jobs screen) — a non-empty list is refused rather than silently kept;
+ *   - a staff member's list gets the "view" each stronger grant needs, so an
+ *     accept/reject grant can't leave someone unable to open the order list.
+ * (Every string was already validated against the canonical vocabulary.)
+ */
+function resolveStoredPermissions(role, supplied) {
+  if (role === 'VENDOR_RIDER') {
+    if (Array.isArray(supplied) && supplied.length > 0) {
+      throw makeServiceError(
+        400,
+        ERROR_CODES.PERMISSION_INVALID,
+        'Captains do not have staff permissions',
+      )
+    }
+    return []
+  }
+  if (role !== 'VENDOR_STAFF') return supplied
+  return withImpliedPermissions(supplied)
 }
 
 /**
@@ -327,8 +354,9 @@ export class VendorEmployeesService {
           err.message,
         )
       }
-      permissions = data.permissions
+      permissions = resolveStoredPermissions(role, data.permissions)
     }
+    if (role === 'VENDOR_RIDER') permissions = []
 
     // ── 4. Branch by body shape ────────────────────────────────────
     const result = isNewUserShape
@@ -963,10 +991,34 @@ export class VendorEmployeesService {
       }
     }
 
+    // ── 3b. Keep staff and captains separate ───────────────────────
+    // A roster record's role is fixed once created: a staff member can't be
+    // turned into a captain (or the reverse), and nobody is promoted to
+    // owner through this endpoint. Change of role = remove and re-add.
+    if (data.role !== undefined && data.role !== existing.role) {
+      return {
+        success: false,
+        message: `A ${existing.role === 'VENDOR_RIDER' ? 'captain' : 'staff member'} can't be changed to a different account type. Remove them and add a new account instead.`,
+        code: 'ROLE_CHANGE_NOT_ALLOWED',
+      }
+    }
+    if (existing.role === 'VENDOR_OWNER' && data.permissions !== undefined) {
+      return {
+        success: false,
+        message: "The owner's access can't be restricted.",
+        code: 'OWNER_PERMISSIONS_FIXED',
+      }
+    }
+    // Store only what the record's role can hold (validated + view-implied).
+    const patch = { ...data }
+    if (data.permissions !== undefined) {
+      patch.permissions = resolveStoredPermissions(existing.role, data.permissions)
+    }
+
     // ── 4. Apply patch ─────────────────────────────────────────────
     // Repository already implements PATCH semantics: only fields
     // whose value is not `undefined` appear in the SET clause.
-    const updated = await this.repo.update(id, shopId, data)
+    const updated = await this.repo.update(id, shopId, patch)
     if (!updated) {
       return {
         success: false,
@@ -1098,6 +1150,13 @@ export class VendorEmployeesService {
     // NULL` so a concurrent delete between this lookup and the UPDATE
     // is still surfaced as STAFF_NOT_FOUND (no double-rollback path).
     const existing = await this.repo.findById(id, shopId)
+    if (existing && existing.role === 'VENDOR_OWNER') {
+      return {
+        success: false,
+        message: "The shop owner can't be removed.",
+        code: 'OWNER_PERMISSIONS_FIXED',
+      }
+    }
     if (!existing) {
       return {
         success: false,
