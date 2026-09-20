@@ -314,7 +314,7 @@ async function buildFromStoreOrder(ref) {
   const { rows } = await query(
     `SELECT id, order_number, customer_user_id, vendor_id, status, items, subtotal_paise, charges_paise,
             discount_paise, tax_paise, tax_rate_bps, total_paise, payment_method, amount_paid_paise,
-            delivery_address, source, placed_at, updated_at
+            delivery_address, source, placed_at, updated_at, price_breakdown
        FROM store_orders WHERE id = $1`,
     [ref.id]
   )
@@ -349,6 +349,12 @@ async function buildFromStoreOrder(ref) {
   const taxPaise = int(o.tax_paise)
   const discountPaise = int(o.discount_paise)
   const adjustmentPaise = totalPaise - (subtotalPaise + platformFeePaise + taxPaise - discountPaise)
+  // The labelled lines the counter quote produced at booking (e.g. "Discount (10%)"); orders booked
+  // before they were stored are shown from their totals, with plain labels.
+  const stored = parseJson(o.price_breakdown, null)
+  const asLines = (list) => (Array.isArray(list) ? list.map((l) => ({ label: String(l.label || ''), amountPaise: int(l.amountPaise) })).filter((l) => l.label && l.amountPaise > 0) : [])
+  const chargeLines = stored ? asLines(stored.charges) : platformFeePaise > 0 ? [{ label: 'Additional Charge', amountPaise: platformFeePaise }] : []
+  const discountLines = stored ? asLines(stored.discounts) : discountPaise > 0 ? [{ label: 'Discount', amountPaise: discountPaise }] : []
 
   let payments = paymentsRes.rows.map((p) => ({
     purpose: 'FULL',
@@ -387,8 +393,10 @@ async function buildFromStoreOrder(ref) {
       subtotalPaise,
       deliveryFeePaise: 0,
       platformFeePaise,
+      chargeLines,
       expressFeePaise: 0,
       discountPaise,
+      discountLines,
       couponCode: null,
       taxPaise,
       taxLabel: 'GST',

@@ -201,13 +201,17 @@ function drawInvoice(doc, data) {
   // ── Totals (right) + Payment summary (left) ───────────────────────────────
   const totalRows = [['Subtotal', totals.subtotalPaise, false]]
   if (totals.deliveryFeePaise) totalRows.push(['Delivery fee', totals.deliveryFeePaise, false])
-  if (totals.platformFeePaise) totalRows.push(['Platform / service fee', totals.platformFeePaise, false])
+  // A counter order carries its own labelled lines ("Additional Charge (5%)", "Discount (10%)"); an
+  // app order has the fixed fee rows.
+  if (totals.chargeLines?.length) totals.chargeLines.forEach((line) => totalRows.push([line.label, line.amountPaise, false]))
+  else if (totals.platformFeePaise) totalRows.push(['Platform / service fee', totals.platformFeePaise, false])
   if (totals.expressFeePaise) totalRows.push(['Express pickup fee', totals.expressFeePaise, false])
-  if (totals.discountPaise) {
+  if (totals.discountLines?.length) totals.discountLines.forEach((line) => totalRows.push([line.label, -line.amountPaise, false]))
+  else if (totals.discountPaise) {
     totalRows.push([`Discount${totals.couponCode ? ` (${totals.couponCode})` : ''}`, -totals.discountPaise, false])
   }
   if (totals.taxPaise) {
-    const rate = totals.taxRatePercent ? ` @ ${totals.taxRatePercent}%` : ''
+    const rate = totals.taxRatePercent ? ` (${totals.taxRatePercent}%)` : ''
     totalRows.push([`${totals.taxLabel || 'GST'}${rate}`, totals.taxPaise, false])
   }
   if (totals.adjustmentPaise) totalRows.push(['Adjustment', totals.adjustmentPaise, false])

@@ -35,6 +35,8 @@ const digits = (value) => String(value ?? '').replace(/\D/g, '')
 const tag = (prefix) => `${prefix}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 const referralCode = () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join('')
 const fail = (message, code = 'VALIDATION_ERROR', status = 400) => ({ success: false, message, code, status })
+// 10 -> "10", 7.5 -> "7.5", 2.333 -> "2.33"
+const percentText = (percent) => String(Number(Number(percent).toFixed(2)))
 
 export function paymentStatus(totalPaise, paidPaise) {
   if (paidPaise <= 0) return 'UNPAID'
@@ -47,7 +49,7 @@ const ORDER_SELECT = `
   so.payment_method, so.amount_paid_paise, so.payment_reference, so.wallet_amount_paise, so.wallet_redemption_request_id,
   so.status, so.version, so.source, so.order_date, so.expected_delivery_date, so.fulfillment_mode,
   so.delivery_address, so.service_zone, so.notes, so.photo_path, so.cancel_reason, so.cash_shift_id,
-  so.pickup_rider_employee_id, so.delivery_rider_employee_id, so.placed_at, so.updated_at,
+  so.pickup_rider_employee_id, so.delivery_rider_employee_id, so.placed_at, so.updated_at, so.price_breakdown,
   u.name AS customer_name, u.phone AS customer_phone,
   pr.name AS pickup_rider_name, pru.phone AS pickup_rider_phone,
   dr.name AS delivery_rider_name, dru.phone AS delivery_rider_phone`
@@ -75,6 +77,7 @@ function presentOrder(row) {
     taxRateBps: row.tax_rate_bps,
     taxPaise: row.tax_paise,
     totalPaise: row.total_paise,
+    priceBreakdown: row.price_breakdown || null,
     paymentMode: row.payment_method,
     amountPaidPaise: paid,
     paymentStatus: paymentStatus(row.total_paise, paid),
@@ -268,6 +271,19 @@ export class VendorCounterOrdersService {
     return { success: true, priced, subtotalPaise }
   }
 
+  /**
+   * THE price calculation for a counter order — the POS summary, the payment, the stored order, the
+   * receipt and the invoice all use exactly this, and it returns the labelled lines with it.
+   *
+   *   subtotal
+   *   + additional charges  (each rule: a % of the subtotal, or a flat amount; plus a manual amount)
+   *   − discounts           (each rule: a % of the SUBTOTAL, or a flat amount; plus a manual amount)
+   *   = taxable amount
+   *   + GST                 (the chosen rate on the taxable amount)
+   *   = grand total
+   *
+   * Everything is whole paise, each line rounded once; the total is the sum of the lines shown.
+   */
   async quote(vendorId, input, customerUserId = input.customer?.id || input.customerId || null) {
     const items = await this._priceItems(vendorId, input.items, customerUserId)
     if (!items.success) return items
@@ -278,16 +294,48 @@ export class VendorCounterOrdersService {
       discountIds.length ? this.adjustmentRules.findByIds(vendorId, discountIds) : [],
     ])
     const subtotal = items.subtotalPaise
-    const configuredCharges = chargeRules.filter((r) => r.kind === 'CHARGE').reduce((sum, rule) => sum + amountForRule(rule, subtotal), 0)
-    const chargesPaise = Math.max(0, configuredCharges + Math.round((Number(input.chargesPaise) || 0)))
-    const configuredDiscounts = discountRules.filter((r) => r.kind === 'DISCOUNT').reduce((sum, rule) => sum + amountForRule(rule, subtotal + chargesPaise), 0)
-    const discountsPaise = Math.min(configuredDiscounts + Math.round(Number(input.discountsPaise) || 0), subtotal + chargesPaise)
+    // Lines appear in the order the operator picked the rules, not in whatever order the database returns them.
+    const inPickedOrder = (picked) => (a, b) => picked.indexOf(a.id) - picked.indexOf(b.id)
+
+    const ruleLine = (rule, base, name) => {
+      const percent = rule.type === 'PERCENTAGE' ? rule.percentageBps / 100 : null
+      return {
+        label: percent === null ? name : `${name} (${percentText(percent)}%)`,
+        percent,
+        amountPaise: amountForRule(rule, base),
+        ruleId: rule.id,
+      }
+    }
+    const charges = chargeRules.filter((r) => r.kind === 'CHARGE').sort(inPickedOrder(chargeIds)).map((rule) => ruleLine(rule, subtotal, 'Additional Charge'))
+    const manualCharge = Math.max(0, Math.round(Number(input.chargesPaise) || 0))
+    if (manualCharge > 0) charges.push({ label: 'Additional Charge', percent: null, amountPaise: manualCharge })
+    const chargeLines = charges.filter((line) => line.amountPaise > 0)
+    const chargesPaise = chargeLines.reduce((sum, line) => sum + line.amountPaise, 0)
+
+    const discounts = discountRules.filter((r) => r.kind === 'DISCOUNT').sort(inPickedOrder(discountIds)).map((rule) => ruleLine(rule, subtotal, 'Discount'))
+    const manualDiscount = Math.max(0, Math.round(Number(input.discountsPaise) || 0))
+    if (manualDiscount > 0) discounts.push({ label: 'Discount', percent: null, amountPaise: manualDiscount })
+    // A discount can never take the bill below zero: later lines are trimmed first.
+    let room = subtotal + chargesPaise
+    const discountLines = []
+    for (const line of discounts) {
+      const amountPaise = Math.min(line.amountPaise, room)
+      room -= amountPaise
+      if (amountPaise > 0) discountLines.push({ ...line, amountPaise })
+    }
+    const discountsPaise = discountLines.reduce((sum, line) => sum + line.amountPaise, 0)
+
     const taxablePaise = subtotal + chargesPaise - discountsPaise
     const taxRateBps = Math.max(0, Math.min(10000, Math.round((Number(input.taxRatePercent) || 0) * 100)))
     const taxPaise = Math.round(taxablePaise * taxRateBps / 10000)
+    const breakdown = {
+      charges: chargeLines,
+      discounts: discountLines,
+      tax: taxRateBps > 0 ? { label: 'GST', percent: taxRateBps / 100, amountPaise: taxPaise } : null,
+    }
     return {
       success: true,
-      quote: { items: items.priced, subtotalPaise: subtotal, chargesPaise, discountsPaise, taxablePaise, taxRateBps, taxPaise, totalPaise: taxablePaise + taxPaise },
+      quote: { items: items.priced, subtotalPaise: subtotal, chargesPaise, discountsPaise, taxablePaise, taxRateBps, taxPaise, totalPaise: taxablePaise + taxPaise, breakdown },
     }
   }
 
@@ -363,9 +411,9 @@ export class VendorCounterOrdersService {
            subtotal_paise, discount_paise, charges_paise, tax_paise, tax_rate_bps, total_paise,
            payment_method, amount_paid_paise, payment_reference, wallet_amount_paise, wallet_redemption_request_id,
            cash_shift_id, status, source, order_date, expected_delivery_date, fulfillment_mode, delivery_address,
-           service_zone, notes, photo_path, app_synced
+           service_zone, notes, photo_path, app_synced, price_breakdown
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'BOOKED','COUNTER',$19,$20,$21,$22,$23,$24,$25,
-           COALESCE((SELECT v.vendor_type IN ('PARTNER', 'EXCLUSIVE') FROM vendors v WHERE v.id = $2), FALSE))
+           COALESCE((SELECT v.vendor_type IN ('PARTNER', 'EXCLUSIVE') FROM vendors v WHERE v.id = $2), FALSE), $26)
          RETURNING id`,
         [
           orderId, vendorId, customerId, String(input.idempotencyKey || `CO-${orderId}`), orderNumber, JSON.stringify(q.items),
@@ -374,6 +422,7 @@ export class VendorCounterOrdersService {
           walletPaise, walletRequestId, cashShiftId,
           input.orderDate || new Date().toISOString().slice(0, 10), input.expectedDeliveryDate, input.fulfillmentMode || null,
           input.deliveryAddress || null, input.serviceZone || null, input.notes ? String(input.notes).slice(0, 1000) : null, input.photoPath || null,
+          JSON.stringify(q.breakdown),
         ]
       )
 
