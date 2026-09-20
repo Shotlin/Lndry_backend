@@ -1528,9 +1528,10 @@ export class VendorsService {
   }
 
   /**
-   * Admin-only: how much of the LNDRY ecosystem this vendor's counter is
-   * connected to (STANDARD / PARTNER / EXCLUSIVE). Takes effect on the vendor's
-   * very next request — nothing is cached and no redeploy is involved.
+   * Admin-only: how deeply this vendor's POS walk-in sales connect to the LNDRY
+   * ecosystem (STANDARD / PARTNER / EXCLUSIVE) — order sync + wallet at the
+   * counter. It never limits the vendor's marketplace business. Takes effect on
+   * the vendor's very next request — nothing is cached and no redeploy is involved.
    */
   async adminSetVendorType(id, vendorType, adminUserId, actor = {}) {
     const type = normalizeVendorType(vendorType)

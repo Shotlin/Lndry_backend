@@ -276,7 +276,7 @@ export default async function vendorRoutes(fastify) {
     preHandler: adminPreHandlers,
     schema: {
       tags: ['Admin Vendors'],
-      summary: 'Set a vendor\'s type — STANDARD (POS only) / PARTNER / EXCLUSIVE (connected to LNDRY) [Admin]',
+      summary: 'Set a vendor\'s type — STANDARD / PARTNER / EXCLUSIVE. Controls only how deeply their POS walk-in sales connect to LNDRY (order sync + wallet); never limits marketplace access [Admin]',
       params: {
         type: 'object',
         required: ['id'],

@@ -1,12 +1,25 @@
 import { query } from '../../config/database.js'
 
 /**
- * Vendor Type (migration 143) — how much of the LNDRY ecosystem a vendor's
- * counter is connected to. The single place that turns a type into
- * capabilities, so every enforcement point asks the same question.
+ * Vendor Type (migration 143) — how deeply a vendor's POS (the in-store /
+ * walk-in counter) is connected to the LNDRY customer ecosystem. The single
+ * place that turns a type into capabilities, so every enforcement point asks
+ * the same question.
  *
- *   STANDARD          POS only — no customer-app sync, no LNDRY wallet
- *   PARTNER/EXCLUSIVE POS + customer-app sync + LNDRY wallet
+ * EVERY vendor type is a full LNDRY marketplace vendor: Vendor App, services
+ * listed in the customer app, online orders, normal app payments (including
+ * the customer's LNDRY wallet at app checkout). The type NEVER limits any of
+ * that — nothing in the marketplace code reads it (a unit test guards this).
+ *
+ * It only governs POS walk-in transactions:
+ *   STANDARD          walk-in POS sales stay the vendor's own (not synced to the
+ *                     customer's LNDRY app); the POS cannot view or use the
+ *                     customer's LNDRY wallet
+ *   PARTNER/EXCLUSIVE connected POS: walk-in sales sync to the customer's LNDRY
+ *                     app and the POS can view / use the LNDRY wallet
+ *
+ * (`appSync` = POS walk-in sale sync + LNDRY-account lookup by phone;
+ *  `walletAccess` = LNDRY wallet at the POS counter.)
  */
 export const VENDOR_TYPES = ['STANDARD', 'PARTNER', 'EXCLUSIVE']
 
@@ -33,8 +46,8 @@ export async function getVendorCapabilities(vendorId, db = { query }) {
   return capabilitiesFor(normalizeVendorType(rows[0]?.vendor_type) || 'STANDARD')
 }
 
-export const WALLET_RESTRICTED_MESSAGE = 'LNDRY wallet is available to Partner and Exclusive vendors only.'
-export const SYNC_RESTRICTED_MESSAGE = 'Linking counter sales to LNDRY customer accounts is available to Partner and Exclusive vendors only.'
+export const WALLET_RESTRICTED_MESSAGE = 'Using the LNDRY wallet at the POS counter is available to Partner and Exclusive vendors only.'
+export const SYNC_RESTRICTED_MESSAGE = 'Linking POS walk-in sales to LNDRY customer accounts is available to Partner and Exclusive vendors only.'
 
 /** Throwable in the `{ statusCode, message, code }` shape the services use. */
 export function tierError(message) {
@@ -48,7 +61,7 @@ export async function requireWalletAccess(vendorId) {
   return caps
 }
 
-/** Throws unless the vendor's counter is linked to the customer app. */
+/** Throws unless the vendor's POS is connected to LNDRY customer accounts (walk-in sale sync + account lookup). */
 export async function requireAppSync(vendorId) {
   const caps = await getVendorCapabilities(vendorId)
   if (!caps.appSync) throw tierError(SYNC_RESTRICTED_MESSAGE)

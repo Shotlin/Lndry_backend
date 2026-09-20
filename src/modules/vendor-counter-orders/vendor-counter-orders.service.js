@@ -163,7 +163,7 @@ export class VendorCounterOrdersService {
       const row = existing.rows[0]
       const caps = await getVendorCapabilities(vendorId)
       if (!caps.appSync) {
-        // Standard vendor: an existing LNDRY account is invisible to them. Until they have
+        // Standard vendor's POS: an existing LNDRY account is invisible to it. Until the vendor has
         // dealt with this person themselves it behaves exactly like a brand-new customer —
         // the vendor supplies the name, the account's own name is never shown or changed.
         if (!(await this._hasHistory(vendorId, row.id))) {
@@ -308,7 +308,8 @@ export class VendorCounterOrdersService {
     if (!quoted.success) return quoted
     const q = quoted.quote
 
-    // The LNDRY wallet is a Partner/Exclusive feature; a Standard vendor can neither redeem
+    // Using the LNDRY wallet at the POS counter is a Partner/Exclusive feature (app checkout is
+    // unaffected); a Standard vendor's POS can neither redeem
     // from it nor record a sale as paid by it.
     if ((input.walletRedemption?.requestId || mode === 'WALLET') && !(await getVendorCapabilities(vendorId)).walletAccess) {
       return fail(WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED, 403)

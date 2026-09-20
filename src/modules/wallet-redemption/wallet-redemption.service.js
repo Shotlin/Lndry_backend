@@ -33,7 +33,8 @@ export class WalletRedemptionService {
    * outcome, same treatment as store-orders' resolve-phone.
    */
   async lookupByPhone(phone, actor) {
-    // Standard vendors have no LNDRY-wallet access — refused before the lookup
+    // A Standard vendor's POS has no LNDRY-wallet access (customers still pay with
+    // their wallet in the app as usual) — refused before the lookup
     // happens, so a balance (or even the existence of an account) never leaks.
     await requireWalletAccess(actor?.vendorId)
     const user = await this.repo.findUserByPhone(phone)

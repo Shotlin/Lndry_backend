@@ -19,8 +19,8 @@ export class StoreOrdersService {
    * audit-logged here on every call regardless of outcome.
    */
   async resolvePhone(phone, actor) {
-    // Matching a phone to a real LNDRY account is an ecosystem feature — a
-    // Standard vendor must not be able to learn who is (or isn't) on LNDRY.
+    // Matching a phone to a real LNDRY account is a connected-POS feature — a
+    // Standard vendor's POS must not be able to learn who is (or isn't) on LNDRY.
     await requireAppSync(actor?.vendorId)
     const customer = await this.repo.findByPhone(phone)
     emitAudit('store_order_phone_lookup', {

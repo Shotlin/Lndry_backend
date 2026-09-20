@@ -1,14 +1,18 @@
 -- 143_vendor_types.sql
 --
--- Vendor Type: how much of the LNDRY ecosystem a vendor's counter (POS) is
--- connected to. Set by an admin, enforced by the backend.
+-- Vendor Type: how deeply a vendor's POS (in-store / walk-in counter) is
+-- connected to the LNDRY customer ecosystem. Set by an admin, enforced by the
+-- backend. EVERY type is a full LNDRY marketplace vendor (Vendor App, services in
+-- the customer app, online orders, normal app payments incl. the customer's
+-- wallet at app checkout) — the type never limits any of that. It only governs
+-- POS walk-in transactions:
 --
---   STANDARD   POS only. Counter sales stay in the vendor's own POS: they never
---              reach the customer app, and the vendor has no access to LNDRY
---              wallets (no balance lookup, no redemption, no wallet payment).
---   PARTNER    Fully connected: counter sales appear in the customer's LNDRY
---              app (same verified phone) and the LNDRY wallet is usable.
---   EXCLUSIVE  Same ecosystem access as PARTNER (kept separate for its own
+--   STANDARD   Walk-in POS sales stay the vendor's own: they are not synced to
+--              the customer's LNDRY app, and the POS cannot view or use the
+--              customer's LNDRY wallet (no lookup, no redemption, no payment).
+--   PARTNER    Connected POS: walk-in sales appear in the customer's LNDRY app
+--              (same verified phone) and the POS can view / use the LNDRY wallet.
+--   EXCLUSIVE  Same connected-POS access as PARTNER (kept separate for its own
 --              business meaning / branding).
 --
 -- Vendors that exist today already sync their counter sales and use the wallet,

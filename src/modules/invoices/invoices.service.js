@@ -46,7 +46,8 @@ export class InvoicesService {
   async _ownedOrder(userId, orderId) {
     const ref = await resolveOrderRef(orderId)
     if (!ref || ref.customerId !== userId) throw notFound()
-    // A counter sale from a Standard vendor is not part of the customer's LNDRY history.
+    // A POS walk-in sale from a Standard vendor is not part of the customer's LNDRY app history
+    // (the customer's normal LNDRY orders and invoices are unaffected).
     if (ref.type === 'STORE_ORDER' && !ref.appSynced) throw notFound()
     return ref
   }
