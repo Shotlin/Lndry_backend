@@ -186,6 +186,52 @@ function allowedTargetRoles({ invitedByPlatformRole, invitedByRole }) {
  *   - bcrypt cost 12 + Temp_Password    (R20.3, R20.10, R20.11, R20.12)
  *   - staff_created audit               (R20.10 / R28.4)
  */
+/** The DB backstop's name (migration 139): one active captain per user. */
+const ONE_ACTIVE_CAPTAIN_INDEX = 'uq_vendor_employees_one_active_captain'
+
+/**
+ * A captain belongs to exactly one vendor. Given the role being added and the
+ * person's active records at OTHER vendors, returns the refusal to give (or
+ * null if there is no conflict). Two cases matter:
+ *   • the number is being added as a captain but is already on another
+ *     vendor's roster in any role, and
+ *   • the number is being added in a non-captain role but is already a
+ *     captain somewhere.
+ * Either would leave them with two active records and a login that cannot tell
+ * which vendor they mean.
+ */
+function assignmentConflict(role, elsewhere) {
+  if (!elsewhere || elsewhere.length === 0) return null
+  const captainElsewhere = elsewhere.some((a) => a.role === 'VENDOR_RIDER')
+  if (captainElsewhere) {
+    return {
+      success: false,
+      code: 'CAPTAIN_ASSIGNED_ELSEWHERE',
+      message: 'This mobile number is already registered as a captain with another vendor.',
+    }
+  }
+  if (role === 'VENDOR_RIDER') {
+    return {
+      success: false,
+      code: 'NUMBER_ASSOCIATED_ELSEWHERE',
+      message: 'This number is already associated with another vendor.',
+    }
+  }
+  return null
+}
+
+/** A unique-index violation from the captain backstop, as a service refusal. */
+function captainIndexViolation(err) {
+  if (err?.code === '23505' && err?.constraint === ONE_ACTIVE_CAPTAIN_INDEX) {
+    return {
+      success: false,
+      code: 'CAPTAIN_ASSIGNED_ELSEWHERE',
+      message: 'This mobile number is already registered as a captain with another vendor.',
+    }
+  }
+  return null
+}
+
 export class VendorEmployeesService {
   constructor(repository) {
     this.repo = repository
@@ -359,9 +405,18 @@ export class VendorEmployeesService {
     if (role === 'VENDOR_RIDER') permissions = []
 
     // ── 4. Branch by body shape ────────────────────────────────────
-    const result = isNewUserShape
-      ? await this._createWithNewUser({ data, ctx, shopId, role, permissions })
-      : await this._createWithExistingUser({ data, ctx, shopId, role, permissions })
+    let result
+    try {
+      result = isNewUserShape
+        ? await this._createWithNewUser({ data, ctx, shopId, role, permissions })
+        : await this._createWithExistingUser({ data, ctx, shopId, role, permissions })
+    } catch (err) {
+      // Two vendors adding the same captain at the same instant both pass the
+      // checks below; the unique index lets exactly one win.
+      const conflict = captainIndexViolation(err)
+      if (conflict) return conflict
+      throw err
+    }
 
     // A person removed earlier and now re-added (reactivated) may have a cached
     // "not active here" answer from the moment they were removed, which would
@@ -443,6 +498,15 @@ export class VendorEmployeesService {
         message: 'User is already assigned to this shop',
         code: 'STAFF_ALREADY_ASSIGNED',
       }
+    }
+
+    // A captain belongs to one vendor only (see assignmentConflict).
+    if (typeof this.repo.findActiveAssignmentsElsewhere === 'function') {
+      const conflict = assignmentConflict(
+        role,
+        await this.repo.findActiveAssignmentsElsewhere(null, userId, shopId)
+      )
+      if (conflict) return conflict
     }
 
     // Requirement 2.5 — max 50 active staff per shop.
@@ -628,6 +692,9 @@ export class VendorEmployeesService {
             await client.query('ROLLBACK')
             // Say WHO they already are — "already a captain" and "already
             // staff" are different problems for the person adding them.
+            if (existingAssignment.role === 'VENDOR_RIDER' && role === 'VENDOR_RIDER') {
+              return { success: false, message: 'Captain already added.', code: 'CAPTAIN_ALREADY_ADDED' }
+            }
             const alreadyAs =
               existingAssignment.role === 'VENDOR_RIDER'
                 ? 'a captain'
@@ -638,6 +705,22 @@ export class VendorEmployeesService {
               success: false,
               message: `This phone number is already added to your shop as ${alreadyAs}.`,
               code: 'STAFF_ALREADY_ASSIGNED',
+            }
+          }
+
+          // A captain belongs to ONE vendor: whether this is a fresh attach or a
+          // reactivation of a record removed earlier, refuse it while the person
+          // is still active with another vendor (and vice versa for a captain
+          // being added in another role). Once they are no longer active there,
+          // the normal reactivation / attach rules below apply.
+          {
+            const conflict = assignmentConflict(
+              role,
+              await this.repo.findActiveAssignmentsElsewhere(client, dup.id, shopId)
+            )
+            if (conflict) {
+              await client.query('ROLLBACK')
+              return conflict
             }
           }
 
@@ -1038,7 +1121,29 @@ export class VendorEmployeesService {
     // ── 4. Apply patch ─────────────────────────────────────────────
     // Repository already implements PATCH semantics: only fields
     // whose value is not `undefined` appear in the SET clause.
-    const updated = await this.repo.update(id, shopId, patch)
+    // Switching a captain back ON while they are active with another vendor
+    // would create the two-vendor conflict this rule exists to prevent.
+    if (
+      patch.is_active === true &&
+      existing.role === 'VENDOR_RIDER' &&
+      existing.is_active === false &&
+      typeof this.repo.findActiveAssignmentsElsewhere === 'function'
+    ) {
+      const conflict = assignmentConflict(
+        existing.role,
+        await this.repo.findActiveAssignmentsElsewhere(null, existing.user_id, shopId)
+      )
+      if (conflict) return conflict
+    }
+
+    let updated
+    try {
+      updated = await this.repo.update(id, shopId, patch)
+    } catch (err) {
+      const conflict = captainIndexViolation(err)
+      if (conflict) return conflict
+      throw err
+    }
     if (!updated) {
       return {
         success: false,

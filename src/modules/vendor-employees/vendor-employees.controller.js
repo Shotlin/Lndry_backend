@@ -44,7 +44,14 @@ function resolveShopId(request) {
  * Handles request/response shape only and delegates to the service.
  */
 /** Service refusals that are a rule violation (409), not bad input (400). */
-const ROLE_RULE_CODES = new Set(['ROLE_CHANGE_NOT_ALLOWED', 'OWNER_PERMISSIONS_FIXED'])
+const ROLE_RULE_CODES = new Set([
+  'ROLE_CHANGE_NOT_ALLOWED',
+  'OWNER_PERMISSIONS_FIXED',
+  'STAFF_ALREADY_ASSIGNED',
+  'CAPTAIN_ALREADY_ADDED',
+  'CAPTAIN_ASSIGNED_ELSEWHERE',
+  'NUMBER_ASSOCIATED_ELSEWHERE',
+])
 
 export class VendorEmployeesController {
   constructor(service) {
@@ -94,7 +101,8 @@ export class VendorEmployeesController {
     )
 
     if (!result.success) {
-      const statusCode = result.code === 'STAFF_NOT_FOUND' ? 404 : 400
+      const statusCode =
+        result.code === 'STAFF_NOT_FOUND' ? 404 : ROLE_RULE_CODES.has(result.code) ? 409 : 400
       return reply.code(statusCode).send(error(result.message, result.code))
     }
 

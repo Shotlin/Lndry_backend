@@ -1,3 +1,4 @@
+import { resolveShopAssignments } from './shop-assignment.js'
 import crypto from 'node:crypto'
 import { generateOTP, storeOTP, verifyOTP } from '../../utils/otp.js'
 import { sendSmsOtp, verifySmsOtp } from '../../utils/sms.js'
@@ -285,7 +286,9 @@ export class AuthService {
     let staffAssignments = []
     if (user.role !== 'RIDER') {
       try {
-        staffAssignments = await this.repo.findActiveShopStaffByUserId(user.id)
+        staffAssignments = resolveShopAssignments(
+          await this.repo.findActiveShopStaffByUserId(user.id)
+        )
         for (const assign of staffAssignments) {
           if (!roles.includes(assign.role)) {
             roles.push(assign.role)
@@ -463,7 +466,9 @@ export class AuthService {
       let accessToken
       let staffAssignments = []
       try {
-        staffAssignments = await this.repo.findActiveShopStaffByUserId(user.id)
+        staffAssignments = resolveShopAssignments(
+          await this.repo.findActiveShopStaffByUserId(user.id)
+        )
       } catch (err) {
         logger.warn({ err: err.message, userId: user.id }, 'Shop staff lookup failed during refresh')
       }

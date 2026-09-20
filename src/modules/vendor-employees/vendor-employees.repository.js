@@ -218,6 +218,31 @@ export class VendorEmployeesRepository {
    * @param {string} shopId
    * @returns {Promise<{id: string, deleted_at: string|null, is_active: boolean}|null>}
    */
+  /**
+   * The user's ACTIVE roster records at vendors OTHER than [shopId] (active =
+   * on and not removed, at a vendor that is itself live) — the same meaning of
+   * "active" the login lookup uses. Used to keep a captain with one vendor.
+   *
+   * @param {import('pg').PoolClient|null} client inside a transaction, or null for the pool
+   * @returns {Promise<Array<{id: string, vendor_id: string, role: string}>>}
+   */
+  async findActiveAssignmentsElsewhere(client, userId, shopId) {
+    const run = client && typeof client.query === 'function' ? client.query.bind(client) : query
+    const { rows } = await run(
+      `SELECT ve.id, ve.vendor_id, ve.role
+         FROM vendor_employees ve
+         JOIN vendors v ON v.id = ve.vendor_id
+        WHERE ve.user_id = $1
+          AND ve.vendor_id <> $2
+          AND ve.is_active = true
+          AND ve.deleted_at IS NULL
+          AND v.is_active = true
+          AND v.deleted_at IS NULL`,
+      [userId, shopId]
+    )
+    return rows
+  }
+
   async findAssignmentByUserAndShopAnyStatus(client, userId, shopId) {
     if (!client || typeof client.query !== 'function') {
       throw new Error(
