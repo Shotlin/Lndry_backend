@@ -67,7 +67,7 @@ export class VendorsRepository {
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
         requested_service_radius_km, approved_service_radius_km,
-        express_pickup_available
+        express_pickup_available, vendor_type
       FROM vendors
       WHERE id = $1 AND deleted_at IS NULL`,
       [id]
@@ -85,7 +85,7 @@ export class VendorsRepository {
         v.gst_number, v.pan_number, v.created_by, v.created_at, v.updated_at,
         v.vendor_approved, v.account_enabled, v.marketplace_published,
         v.requested_service_radius_km, v.approved_service_radius_km,
-        v.express_pickup_available
+        v.express_pickup_available, v.vendor_type
       FROM vendors v
       LEFT JOIN vendor_employees ve ON ve.vendor_id = v.id
       WHERE (v.created_by = $1 OR ve.user_id = $1) AND v.deleted_at IS NULL
@@ -163,8 +163,22 @@ export class VendorsRepository {
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
         requested_service_radius_km, approved_service_radius_km,
-        express_pickup_available`,
+        express_pickup_available, vendor_type`,
       params
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Deliberately NOT part of update()'s field map: vendor_type is an admin-only
+   * setting, and update() also backs the vendor's own profile edits.
+   */
+  async setVendorType(id, vendorType) {
+    const { rows } = await query(
+      `UPDATE vendors SET vendor_type = $2, updated_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, vendor_type`,
+      [id, vendorType]
     )
     return rows[0] || null
   }
@@ -230,6 +244,7 @@ export class VendorsRepository {
         `SELECT v.id, v.name, v.slug, v.branch_code, v.description, v.logo_url, v.banner_url,
           v.phone, v.email, v.address_line1, v.address_line2, v.city, v.state, v.pincode,
           v.lat, v.lng, v.delivery_radius_km, v.is_active, v.is_open, v.status, v.created_at,
+          v.vendor_type,
           u.name AS owner_name,
           (SELECT COUNT(*)::int FROM vendor_services vs WHERE vs.vendor_id = v.id AND vs.deleted_at IS NULL AND vs.is_available = true) AS services_count,
           (SELECT COUNT(*)::int FROM vendor_slots vs WHERE vs.vendor_id = v.id AND vs.is_active = true) AS slots_count,

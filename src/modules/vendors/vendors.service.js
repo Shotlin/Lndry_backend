@@ -5,6 +5,7 @@ import { env } from '../../config/env.js'
 import { WatermarkService } from '../watermark/watermark.service.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { autoPublishAfterChange } from './vendor-publishing.js'
+import { normalizeVendorType, capabilitiesFor, VENDOR_TYPES } from './vendor-tier.js'
 
 // Single source of truth for which onboarding documents block submission —
 // previously duplicated as three separate hardcoded arrays across
@@ -64,6 +65,7 @@ export class VendorsService {
     delete data.status
     delete data.is_active
     delete data.created_by
+    delete data.vendor_type // admin-only — see adminSetVendorType
     return this.repo.update(vendor.id, data)
   }
 
@@ -1523,6 +1525,36 @@ export class VendorsService {
     const vendorId = await this._requireAdminVendorId(id)
     const vendor = await this.repo.update(vendorId, { express_pickup_available: available })
     return { express_pickup_available: vendor.express_pickup_available }
+  }
+
+  /**
+   * Admin-only: how much of the LNDRY ecosystem this vendor's counter is
+   * connected to (STANDARD / PARTNER / EXCLUSIVE). Takes effect on the vendor's
+   * very next request — nothing is cached and no redeploy is involved.
+   */
+  async adminSetVendorType(id, vendorType, adminUserId, actor = {}) {
+    const type = normalizeVendorType(vendorType)
+    if (!type) {
+      throw { statusCode: 400, message: `vendor_type must be one of ${VENDOR_TYPES.join(', ')}`, code: 'VALIDATION_ERROR' }
+    }
+    const vendorId = await this._requireAdminVendorId(id)
+    const before = await this.repo.findById(vendorId)
+    const updated = await this.repo.setVendorType(vendorId, type)
+    if (!updated) throw { statusCode: 404, message: 'Approved vendor not found' }
+    if (before?.vendor_type !== type) {
+      emitAudit('vendor_type_changed', {
+        actor_user_id: adminUserId ?? null,
+        actor_role: 'ADMIN',
+        target_type: 'vendor',
+        target_id: vendorId,
+        before: { vendor_type: before?.vendor_type ?? null },
+        after: { vendor_type: type },
+        ip_address: actor.ip ?? null,
+        user_agent: actor.userAgent ?? null,
+      })
+      logger.info({ vendorId, from: before?.vendor_type, to: type, adminUserId }, 'Vendor type changed')
+    }
+    return { vendor_type: updated.vendor_type, ...capabilitiesFor(updated.vendor_type) }
   }
 
   async createCapacityException(userId, data) {

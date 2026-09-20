@@ -1,6 +1,7 @@
 import { logger } from '../../config/logger.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { StoreOrdersRepository } from './store-orders.repository.js'
+import { requireAppSync } from '../vendors/vendor-tier.js'
 
 /**
  * Store Orders service — the vendor-desktop side resolves a walk-in
@@ -18,6 +19,9 @@ export class StoreOrdersService {
    * audit-logged here on every call regardless of outcome.
    */
   async resolvePhone(phone, actor) {
+    // Matching a phone to a real LNDRY account is an ecosystem feature — a
+    // Standard vendor must not be able to learn who is (or isn't) on LNDRY.
+    await requireAppSync(actor?.vendorId)
     const customer = await this.repo.findByPhone(phone)
     emitAudit('store_order_phone_lookup', {
       actor_user_id: actor?.userId ?? null,
@@ -33,6 +37,7 @@ export class StoreOrdersService {
   }
 
   async pushOrder(data, actor) {
+    await requireAppSync(actor?.vendorId)
     if (!data.customerUserId || !data.posOrderId || data.totalPaise == null) {
       return { success: false, message: 'customerUserId, posOrderId and totalPaise are required' }
     }

@@ -42,6 +42,13 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   }
   const notFound = (res, what) => res.code(404).send(error(`${what} not found`, 'NOT_FOUND'))
 
+  // The vendor's current type and what it allows (customer-app sync, LNDRY wallet). The POS
+  // reads this at login/session load and whenever the window regains focus.
+  fastify.get('/access', async (request, res) => {
+    res.header('Cache-Control', 'no-store')
+    return res.send(success(await service.access(request.vendorId)))
+  })
+
   // Customers
   fastify.get('/customers', async (request, res) => res.send(success(await service.listCustomers(request.vendorId, request.query.search))))
   fastify.post('/customers', async (request, res) => reply(res, await service.findOrCreateCustomer(request.vendorId, actorOf(request), request.body || {}), 'Customer ready', 201))

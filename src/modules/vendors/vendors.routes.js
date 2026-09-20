@@ -272,6 +272,24 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.adminSetDailyCapacity.bind(controller))
 
+  fastify.put('/admin/:id/vendor-type', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Set a vendor\'s type — STANDARD (POS only) / PARTNER / EXCLUSIVE (connected to LNDRY) [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        required: ['vendor_type'],
+        properties: { vendor_type: { type: 'string', enum: ['STANDARD', 'PARTNER', 'EXCLUSIVE'] } }
+      }
+    }
+  }, controller.adminSetVendorType.bind(controller))
+
   fastify.put('/admin/:id/express-pickup', {
     preHandler: adminPreHandlers,
     schema: {

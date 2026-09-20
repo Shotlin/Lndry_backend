@@ -18,14 +18,19 @@ export class StoreOrdersRepository {
     return rows[0] || null
   }
 
-  /** Upsert on (vendor_id, pos_order_id) so a retried push from the desktop is idempotent. */
+  /**
+   * Upsert on (vendor_id, pos_order_id) so a retried push from the desktop is idempotent.
+   * app_synced (whether the customer's app may show this sale) is decided here from
+   * the vendor's type at the moment of creation, and never changed by a retry.
+   */
   async upsert(data) {
     const { rows } = await query(
       `INSERT INTO store_orders (
          vendor_id, customer_user_id, pos_order_id, order_number, items,
          subtotal_paise, discount_paise, tax_paise, total_paise, payment_method,
-         wallet_amount_paise, wallet_redemption_request_id, cash_shift_id
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         wallet_amount_paise, wallet_redemption_request_id, cash_shift_id, app_synced
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+         COALESCE((SELECT v.vendor_type IN ('PARTNER', 'EXCLUSIVE') FROM vendors v WHERE v.id = $1), FALSE))
        ON CONFLICT (vendor_id, pos_order_id) DO UPDATE SET
          order_number = EXCLUDED.order_number,
          items = EXCLUDED.items,
@@ -69,7 +74,7 @@ export class StoreOrdersRepository {
               concat_ws(', ', v.address_line1, v.address_line2, v.city, v.pincode) AS vendor_address
        FROM store_orders so
        JOIN vendors v ON v.id = so.vendor_id
-       WHERE so.id = $1 AND so.customer_user_id = $2`,
+       WHERE so.id = $1 AND so.customer_user_id = $2 AND so.app_synced = TRUE`,
       [id, customerUserId]
     )
     if (!rows[0]) return null
@@ -93,7 +98,7 @@ export class StoreOrdersRepository {
       `SELECT so.*, v.name AS vendor_name
        FROM store_orders so
        JOIN vendors v ON v.id = so.vendor_id
-       WHERE so.customer_user_id = $1
+       WHERE so.customer_user_id = $1 AND so.app_synced = TRUE
        ORDER BY so.placed_at DESC`,
       [customerUserId]
     )

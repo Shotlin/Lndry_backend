@@ -170,12 +170,12 @@ export async function resolveOrderRef(orderId) {
     return { type: 'ORDER', id: r.id, customerId: r.user_id, vendorId: r.vendor_id, status: r.status }
   }
   const store = await query(
-    `SELECT id, customer_user_id, vendor_id, status FROM store_orders WHERE id = $1`,
+    `SELECT id, customer_user_id, vendor_id, status, app_synced FROM store_orders WHERE id = $1`,
     [orderId]
   )
   if (store.rows[0]) {
     const r = store.rows[0]
-    return { type: 'STORE_ORDER', id: r.id, customerId: r.customer_user_id, vendorId: r.vendor_id, status: r.status }
+    return { type: 'STORE_ORDER', id: r.id, customerId: r.customer_user_id, vendorId: r.vendor_id, status: r.status, appSynced: r.app_synced }
   }
   return null
 }

@@ -535,6 +535,20 @@ export class VendorsController {
     }
   }
 
+  async adminSetVendorType(request, reply) {
+    const { id } = request.params
+    const { vendor_type: vendorType } = request.body || {}
+    try {
+      const res = await this.service.adminSetVendorType(id, vendorType, request.user.id, {
+        ip: request.ip ?? null,
+        userAgent: request.headers?.['user-agent'] ?? null,
+      })
+      return reply.send(success(res, 'Vendor type updated'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update vendor type', err.code))
+    }
+  }
+
   async adminSetExpressPickup(request, reply) {
     const { id } = request.params
     const { available } = request.body || {}

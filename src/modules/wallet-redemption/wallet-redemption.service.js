@@ -5,6 +5,7 @@ import { logger } from '../../config/logger.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { WalletRedemptionRepository } from './wallet-redemption.repository.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
+import { requireWalletAccess } from '../vendors/vendor-tier.js'
 
 const EXPIRY_MS = 5 * 60 * 1000 // 5 minutes — a real in-person handoff needs some time, but a long-lived pending approval is itself a small confusion/abuse surface
 const MAX_ATTEMPTS = 5
@@ -32,6 +33,9 @@ export class WalletRedemptionService {
    * outcome, same treatment as store-orders' resolve-phone.
    */
   async lookupByPhone(phone, actor) {
+    // Standard vendors have no LNDRY-wallet access — refused before the lookup
+    // happens, so a balance (or even the existence of an account) never leaks.
+    await requireWalletAccess(actor?.vendorId)
     const user = await this.repo.findUserByPhone(phone)
     let balancePaise
     if (user) {
@@ -53,6 +57,7 @@ export class WalletRedemptionService {
   }
 
   async createRequest(vendorId, requestedByUserId, { customerUserId, amountPaise }, actor) {
+    await requireWalletAccess(vendorId)
     if (!customerUserId || !Number.isFinite(amountPaise) || amountPaise <= 0) {
       throw { statusCode: 400, message: 'customerUserId and a positive amountPaise are required', code: 'VALIDATION_ERROR' }
     }
@@ -133,6 +138,9 @@ export class WalletRedemptionService {
   }
 
   async confirmRequest(requestId, vendorId, rawOtp, actor) {
+    // Re-checked at confirm time: a vendor moved to Standard while a request was
+    // pending must not be able to finish the debit.
+    await requireWalletAccess(vendorId)
     if (!rawOtp || typeof rawOtp !== 'string') {
       throw { statusCode: 400, message: 'otp is required', code: 'VALIDATION_ERROR' }
     }

@@ -8,6 +8,7 @@ import { VendorCashShiftsRepository } from '../vendor-cash-shifts/vendor-cash-sh
 import { VendorProductionTasksService } from '../vendor-production-tasks/vendor-production-tasks.service.js'
 import { VendorPosCatalogueService } from '../vendor-pos-catalogue/vendor-pos-catalogue.service.js'
 import { scheduleInvoiceForDeliveredOrder } from '../invoices/invoice-jobs.js'
+import { getVendorCapabilities, WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED } from '../vendors/vendor-tier.js'
 
 const PAYMENT_MODES = ['CASH', 'UPI', 'CARD', 'BANK', 'WALLET']
 const PIECE_UNITS = new Set(['piece', 'pc', 'pcs', 'pair'])
@@ -118,6 +119,11 @@ export class VendorCounterOrdersService {
     this.posCatalogue = posCatalogue
   }
 
+  /** What this vendor's counter may do with the LNDRY ecosystem, from its CURRENT type. */
+  async access(vendorId) {
+    return getVendorCapabilities(vendorId)
+  }
+
   // ── Customers ────────────────────────────────────────────────────────────
 
   /** People this vendor has dealt with, optionally narrowed by name/phone. */
@@ -155,6 +161,17 @@ export class VendorCounterOrdersService {
     const existing = await query('SELECT id, name, phone FROM users WHERE phone = $1 OR phone = $2 OR phone = $3 LIMIT 1', [clean, `+91${clean}`, `91${clean}`])
     if (existing.rows[0]) {
       const row = existing.rows[0]
+      const caps = await getVendorCapabilities(vendorId)
+      if (!caps.appSync) {
+        // Standard vendor: an existing LNDRY account is invisible to them. Until they have
+        // dealt with this person themselves it behaves exactly like a brand-new customer —
+        // the vendor supplies the name, the account's own name is never shown or changed.
+        if (!(await this._hasHistory(vendorId, row.id))) {
+          if (!display) return fail('Customer name is required for a new customer')
+          return { success: true, customer: { id: row.id, name: display, phone: clean }, created: true }
+        }
+        return { success: true, customer: { id: row.id, name: row.name || display, phone: row.phone }, created: false }
+      }
       if (!row.name && display) await query('UPDATE users SET name = $2, updated_at = NOW() WHERE id = $1', [row.id, display])
       return { success: true, customer: { id: row.id, name: row.name || display, phone: row.phone }, created: false }
     }
@@ -170,9 +187,23 @@ export class VendorCounterOrdersService {
     return { success: true, customer: rows[0], created: true }
   }
 
+  /** Has this vendor already dealt with the person (a counter sale, an app order, or a ledger entry)? */
+  async _hasHistory(vendorId, userId) {
+    const { rows } = await query(
+      `SELECT 1 FROM store_orders WHERE vendor_id = $1 AND customer_user_id = $2
+       UNION ALL SELECT 1 FROM orders WHERE vendor_id = $1 AND user_id = $2
+       UNION ALL SELECT 1 FROM vendor_customer_ledger WHERE vendor_id = $1 AND customer_user_id = $2
+       LIMIT 1`,
+      [vendorId, userId]
+    )
+    return rows.length > 0
+  }
+
   async customerProfile(vendorId, customerId) {
     const { rows } = await query('SELECT id, name, phone, email FROM users WHERE id = $1', [customerId])
     if (!rows[0]) return null
+    // A Standard vendor never receives an LNDRY account's e-mail address.
+    if (!(await getVendorCapabilities(vendorId)).appSync) rows[0].email = null
     const orders = await this.listOrders(vendorId, { customerId, limit: 100 })
     const balance = await query(
       `SELECT COALESCE(SUM(debit_paise - credit_paise), 0)::bigint AS balance FROM vendor_customer_ledger WHERE vendor_id = $1 AND customer_user_id = $2`,
@@ -277,6 +308,12 @@ export class VendorCounterOrdersService {
     if (!quoted.success) return quoted
     const q = quoted.quote
 
+    // The LNDRY wallet is a Partner/Exclusive feature; a Standard vendor can neither redeem
+    // from it nor record a sale as paid by it.
+    if ((input.walletRedemption?.requestId || mode === 'WALLET') && !(await getVendorCapabilities(vendorId)).walletAccess) {
+      return fail(WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED, 403)
+    }
+
     // Wallet leg: the redemption request was already OTP-confirmed and the wallet debited.
     let walletPaise = 0
     let walletRequestId = null
@@ -293,6 +330,9 @@ export class VendorCounterOrdersService {
       walletPaise = Math.min(request.amount_paise, q.totalPaise)
       walletRequestId = request.id
     }
+    // 'WALLET' as the payment mode is only real when a confirmed redemption covers the whole sale;
+    // otherwise it would record a wallet payment that no wallet was ever debited for.
+    if (mode === 'WALLET' && walletPaise < q.totalPaise) return fail('Pay with the wallet only after the customer has confirmed a redemption that covers the full amount.', 'WALLET_NOT_CONFIRMED')
     const cashPaise = mode === 'PAY_LATER' ? 0 : Math.max(0, q.totalPaise - walletPaise)
     const paidPaise = walletPaise + cashPaise
 
@@ -319,8 +359,9 @@ export class VendorCounterOrdersService {
            subtotal_paise, discount_paise, charges_paise, tax_paise, tax_rate_bps, total_paise,
            payment_method, amount_paid_paise, payment_reference, wallet_amount_paise, wallet_redemption_request_id,
            cash_shift_id, status, source, order_date, expected_delivery_date, fulfillment_mode, delivery_address,
-           service_zone, notes, photo_path
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'BOOKED','COUNTER',$19,$20,$21,$22,$23,$24,$25)
+           service_zone, notes, photo_path, app_synced
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'BOOKED','COUNTER',$19,$20,$21,$22,$23,$24,$25,
+           COALESCE((SELECT v.vendor_type IN ('PARTNER', 'EXCLUSIVE') FROM vendors v WHERE v.id = $2), FALSE))
          RETURNING id`,
         [
           orderId, vendorId, customerId, String(input.idempotencyKey || `CO-${orderId}`), orderNumber, JSON.stringify(q.items),
