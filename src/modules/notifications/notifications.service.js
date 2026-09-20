@@ -77,10 +77,19 @@ export class NotificationsService {
    * destination is inferred from those so every existing notification is
    * tappable without touching its call site.
    */
-  async sendNotification(userId, { title, body, type = 'general', data = {}, imageUrl, link } = {}) {
+  async sendNotification(userId, opts = {}) {
+    return (await this.sendRich(userId, opts)).notification
+  }
+
+  /**
+   * Same as sendNotification but also returns what happened to the push
+   * ({ configured, devices, sent, failed, invalid }), which the lifecycle
+   * engine records in its audit trail.
+   */
+  async sendRich(userId, { title, body, type = 'general', data = {}, imageUrl, link } = {}) {
     const resolvedLink = link || inferLink(type, data)
 
-    // 1. Create in-app notification
+    // 1. Create in-app notification (the inbox keeps the event, order and link)
     const notification = await this.repository.createNotification(userId, {
       title, body, type, data: { ...data, link: resolvedLink },
     })
@@ -95,17 +104,19 @@ export class NotificationsService {
     }
 
     // 3. Push to all of the user's devices
+    let push = { configured: true, devices: 0, sent: 0, failed: 0, invalid: 0 }
     try {
-      await this.dispatcher.sendToUsers(
+      push = await this.dispatcher.sendToUsers(
         [userId],
         { title, body, imageUrl, link: resolvedLink, legacyType: type, data },
         { kind: 'TRANSACTIONAL', notificationIds: new Map([[userId, notification.id]]) }
       )
     } catch (err) {
       logger.error({ err, userId }, 'FCM push notification failed')
+      push = { configured: true, devices: 0, sent: 0, failed: 1, invalid: 0 }
     }
 
-    return notification
+    return { notification, push }
   }
 
   // Alias for backward compatibility

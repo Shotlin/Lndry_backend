@@ -85,6 +85,10 @@ export class OrderOtpService {
       // Delete from Redis
       await redis.del(`order_otp:${orderId}:${purpose}`)
 
+      // The code is spent: blank it (and older ones) in the notification inbox.
+      const { lifecycleNotifications } = await import('../lifecycle-notifications/lifecycle-notifications.service.js')
+      await lifecycleNotifications().redactOtpNotifications(orderId, purpose)
+
       return { success: true }
     } else {
       // Incorrect OTP: Increment attempts

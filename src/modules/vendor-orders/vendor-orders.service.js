@@ -9,6 +9,13 @@ import { NotificationsService } from '../notifications/notifications.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { emitJobOfferedToRiders } from '../../plugins/socketio.plugin.js'
 import { RiderAssignmentSettingsService } from '../rider-assignment-settings/rider-assignment-settings.service.js'
+import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
+import { createHash } from 'node:crypto'
+
+/** Distinct per generated code, without storing the code itself as the key. */
+function otpDedupe(orderId, otp) {
+  return `otp:${createHash('sha256').update(`${orderId}:${otp}`).digest('hex').slice(0, 24)}`
+}
 
 function round2(value) {
   return Math.round((Number(value) + Number.EPSILON) * 100) / 100
@@ -350,9 +357,10 @@ export class VendorOrdersService {
         logger.warn({ err: err.message, orderId }, 'Auto-assign pickup employee failed (non-critical)')
       }
 
-      // Generate pickup OTP
+      // Generate pickup OTP and push it to the order's customer (only)
       try {
-        await this.otpService.generateOtp(orderId, 'PICKUP')
+        const otp = await this.otpService.generateOtp(orderId, 'PICKUP')
+        await emitLifecycleEvent('PICKUP_OTP', { orderId, dedupe: otpDedupe(orderId, otp), extra: { otp } })
       } catch (err) {
         logger.warn({ err: err.message, orderId }, 'Pickup OTP generation failed (non-critical)')
       }
@@ -369,18 +377,7 @@ export class VendorOrdersService {
           logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
         }
       }
-      if (this.notificationsService && order.user_id) {
-        try {
-          await this.notificationsService.sendNotification(order.user_id, {
-            title: 'Order accepted',
-            body: 'The vendor has accepted your order and will pick it up soon.',
-            type: 'order_vendor_accepted',
-            data: { orderId },
-          })
-        } catch (err) {
-          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of vendor acceptance (non-critical)')
-        }
-      }
+      // (Customer notification: sent by the lifecycle engine from the status change.)
 
       return { orderId, status: ORDER_STATUSES.VENDOR_ACCEPTED }
     } catch (err) {
@@ -470,18 +467,7 @@ export class VendorOrdersService {
           logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
         }
       }
-      if (this.notificationsService && order.user_id) {
-        try {
-          await this.notificationsService.sendNotification(order.user_id, {
-            title: 'Order rejected',
-            body: reason || 'The vendor was unable to accept your order. A refund is on the way.',
-            type: 'order_vendor_rejected',
-            data: { orderId },
-          })
-        } catch (err) {
-          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of vendor rejection (non-critical)')
-        }
-      }
+      // (Customer notification: sent by the lifecycle engine from the status change.)
 
       return { orderId, status: ORDER_STATUSES.VENDOR_REJECTED }
     } catch (err) {
@@ -591,7 +577,8 @@ export class VendorOrdersService {
           logger.warn({ err: err.message, orderId }, 'Auto-assign delivery employee failed (non-critical)')
         }
         try {
-          await this.otpService.generateOtp(orderId, 'DELIVERY')
+          const otp = await this.otpService.generateOtp(orderId, 'DELIVERY')
+          await emitLifecycleEvent('DELIVERY_OTP', { orderId, dedupe: otpDedupe(orderId, otp), extra: { otp } })
         } catch (err) {
           logger.warn({ err: err.message, orderId }, 'Delivery OTP generation failed (non-critical)')
         }
@@ -859,18 +846,7 @@ export class VendorOrdersService {
           logger.warn({ err: err.message, orderId }, 'Failed to emit order update (non-critical)')
         }
       }
-      if (this.notificationsService && order.user_id) {
-        try {
-          await this.notificationsService.sendNotification(order.user_id, {
-            title: 'Your order total was updated',
-            body: 'The vendor found a difference after weighing your items. Review the new total in the app.',
-            type: 'order_reconciliation_proposed',
-            data: { orderId, reconciliationId },
-          })
-        } catch (err) {
-          logger.warn({ err: err.message, orderId }, 'Failed to notify customer of reconciliation proposal (non-critical)')
-        }
-      }
+      // (Customer approval request: sent by the lifecycle engine from the status change.)
 
       return {
         orderId,

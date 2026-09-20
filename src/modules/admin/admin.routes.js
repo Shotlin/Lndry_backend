@@ -20,6 +20,7 @@ import adminCustomerRoutes from './customers/customers.routes.js'
 import adminRiderRoutes from './riders/riders.routes.js'
 import adminPaymentsRoutes from './payments/payments.routes.js'
 import adminNotificationRoutes from './notifications/notifications.routes.js'
+import adminLifecycleRoutes from './lifecycle-notifications/lifecycle-notifications.routes.js'
 import adminAnalyticsRoutes from './analytics/analytics.routes.js'
 import adminBannerRoutes from './banners/banners.routes.js'
 import adminActivityLogRoutes from './activity-log/activity-log.routes.js'
@@ -113,6 +114,7 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminRiderRoutes, { prefix: '/riders' })
   fastify.register(adminPaymentsRoutes, { prefix: '/payments' })
   fastify.register(adminNotificationRoutes, { prefix: '/notifications' })
+  fastify.register(adminLifecycleRoutes, { prefix: '/notification-lifecycle' })
   fastify.register(adminAnalyticsRoutes, { prefix: '/analytics' })
   fastify.register(adminBannerRoutes, { prefix: '/banners' })
   fastify.register(adminActivityLogRoutes, { prefix: '/activity-log' })

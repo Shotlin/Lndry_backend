@@ -30,6 +30,7 @@ import { OrderSplitterService } from './order-splitter.service.js'
 import { prepareReorder } from './reorder.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from '../../../archived_modules/cart/totals-engine.service.js'
+import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -479,15 +480,9 @@ export class OrdersService {
       // - WALLET: notification sent after wallet deduction succeeds
       // This prevents false "Order placed" notifications when payment fails.
       if (normalizedPaymentMethod !== 'ONLINE' && normalizedPaymentMethod !== 'WALLET') {
-        await this._sendCustomerOrderNotification(
-          userId,
-          buildCustomerOrderEventNotification({
-            orderId: order.id,
-            orderNumber: order.orderNumber,
-            timelineType: 'ORDER_PLACED',
-            status: order.status,
-          })
-        )
+        // Customer + laundry notifications (idempotent: a second call is a no-op).
+        await emitLifecycleEvent('ORDER_PLACED', { orderId: order.id })
+        await emitLifecycleEvent('VENDOR_NEW_ORDER', { orderId: order.id })
         // Queue auto-reject job for COD orders immediately
         await this._queueAutoReject(order.id)
       }
@@ -770,18 +765,7 @@ export class OrdersService {
 
       await client.query('COMMIT')
 
-      if (this.notificationsService && reconciliation.proposed_by) {
-        try {
-          await this.notificationsService.sendNotification(reconciliation.proposed_by, {
-            title: 'Customer accepted the revised total',
-            body: 'Processing can continue.',
-            type: 'order_reconciliation_accepted',
-            data: { orderId },
-          })
-        } catch (err) {
-          logger.warn({ err: err.message, orderId }, 'Failed to notify vendor of reconciliation acceptance (non-critical)')
-        }
-      }
+      // (Laundry notification: sent by the lifecycle engine from the status change.)
 
       return { orderId, status: ORDER_STATUSES.PROCESSING }
     } catch (err) {
@@ -844,18 +828,7 @@ export class OrdersService {
 
       await client.query('COMMIT')
 
-      if (this.notificationsService && reconciliation.proposed_by) {
-        try {
-          await this.notificationsService.sendNotification(reconciliation.proposed_by, {
-            title: 'Customer rejected the revised total',
-            body: reason || 'The customer disputed the recalculation — please contact them or support.',
-            type: 'order_reconciliation_rejected',
-            data: { orderId },
-          })
-        } catch (err) {
-          logger.warn({ err: err.message, orderId }, 'Failed to notify vendor of reconciliation rejection (non-critical)')
-        }
-      }
+      // (Laundry notification: sent by the lifecycle engine from the status change.)
 
       const supportRes = await query(`SELECT value FROM app_settings WHERE key = 'support_phone'`)
       const supportPhone = supportRes.rows[0]?.value ?? null

@@ -75,7 +75,11 @@ export function buildMessage(fcmToken, { title, body, imageUrl, deepLink, data =
         sound: 'default',
         channelId: 'lndry_notifications',
         imageUrl: image,
-        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+        // No `clickAction` on purpose: with one set, Android builds the tap
+        // intent from that action and — unless the app declares an activity
+        // for it — the tap opens nothing when the app is closed or in the
+        // background. Without it FCM launches the app's normal launch
+        // activity and hands the `data` to the app.
       },
     },
     apns: {

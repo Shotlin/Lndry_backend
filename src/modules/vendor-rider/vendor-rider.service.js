@@ -14,6 +14,8 @@ import { orderQueue } from '../../config/bullmq.js'
  * Distinct from the unrelated platform-wide gig-rider system in
  * src/modules/delivery/ (RIDER role, no vendor_id, commission/payouts).
  */
+import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
+
 export class VendorRiderService {
   constructor({ fastify, otpService } = {}) {
     this.otpService = otpService || new OrderOtpService()
@@ -583,17 +585,11 @@ export class VendorRiderService {
     )
     await query(`UPDATE orders SET payment_status = 'PAID', updated_at = NOW() WHERE id = $1`, [orderId])
 
-    if (this.notificationsService && order.user_id) {
-      try {
-        await this.notificationsService.sendNotification(order.user_id, {
-          title: 'Balance payment received',
-          body: `Your remaining balance of ₹${(balancePaise / 100).toFixed(2)} was collected in cash.`,
-          type: 'order_balance_paid',
-          data: { orderId },
-        })
-      } catch (err) {
-        logger.warn({ err: err.message, orderId }, 'Balance-collected notification failed (non-critical)')
-      }
+    {
+      const extra = { amountPaise: balancePaise }
+      const dedupe = `cash:${orderId}:${balancePaise}`
+      await emitLifecycleEvent('BALANCE_PAID', { orderId, dedupe, extra })
+      await emitLifecycleEvent('VENDOR_PAYMENT_UPDATE', { orderId, dedupe, extra })
     }
 
     return { orderId, balance_collected_paise: balancePaise }

@@ -664,6 +664,12 @@ export class DeliveryService {
   }
 
   async _queueNotification(userId, notif) {
+    // Customer order notifications are sent by the lifecycle engine (one wording,
+    // editable from the dashboard, never duplicated). Kept as a no-op so the
+    // call sites in this legacy flow stay valid.
+    if (notif?.data?.timelineType || notif?.type === 'ORDER_STATUS') {
+      return
+    }
     if (!this.notificationsService || !userId || !notif) {
       return
     }

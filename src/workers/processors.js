@@ -106,7 +106,34 @@ async function handleInAppNotification({ userId, title, body, notificationType, 
   )
 }
 
-async function handleOrderStatusNotification({ orderId, userId, status, orderNumber }) {
+async function handleLifecycleNotify({ orderId, oldStatus, newStatus }) {
+  const { lifecycleNotifications } = await import('../modules/lifecycle-notifications/lifecycle-notifications.service.js')
+  await lifecycleNotifications().handleStatusChange(orderId, oldStatus, newStatus)
+}
+
+/**
+ * Status pushes that predate the lifecycle engine (admin-driven status changes
+ * enqueue these). They now go through the same engine — same wording the admin
+ * edits, and never a second copy of a notification already sent.
+ */
+async function handleOrderStatusNotification({ orderId, status }) {
+  const equivalent = {
+    CONFIRMED: 'VENDOR_ACCEPTED',
+    PREPARING: 'PROCESSING',
+    PACKED: 'PACKED',
+    OUT_FOR_DELIVERY: 'OUT_FOR_DELIVERY',
+    DELIVERED: 'DELIVERED',
+    CANCELLED: 'CUSTOMER_CANCELLED',
+    AUTO_REJECTED: 'AUTO_REJECTED',
+  }[status]
+  if (!equivalent || !orderId) return
+  const { lifecycleNotifications } = await import('../modules/lifecycle-notifications/lifecycle-notifications.service.js')
+  await lifecycleNotifications().handleStatusChange(orderId, null, equivalent, { verify: false })
+}
+
+/** Legacy implementation, no longer reached (kept only for reference). */
+// eslint-disable-next-line no-unused-vars
+async function legacyOrderStatusNotification({ orderId, userId, status, orderNumber }) {
   const messages = {
     CONFIRMED: { title: 'Order Confirmed! 🎉', body: `Your order ${orderNumber} has been confirmed.` },
     PREPARING: { title: 'Order Being Prepared 🍳', body: `Your order ${orderNumber} is being prepared.` },
@@ -540,6 +567,9 @@ export async function processOrderJob(job) {
 
     case 'generate-invoice':
       return handleGenerateInvoice(job.data)
+
+    case 'lifecycle-notify':
+      return handleLifecycleNotify(job.data)
 
     default:
       logger.warn({ type, jobId: job.id }, 'Unknown order job type')

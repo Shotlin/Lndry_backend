@@ -15,7 +15,20 @@ const INLINE_AUTO_ASSIGN_IN_NON_PROD =
 /**
  * Payments service — Razorpay integration + payment management
  */
+import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
+
 export class PaymentsService {
+  /**
+   * A payment on the balance leg cleared: tell the customer, the laundry and the
+   * delivery captain (who can now complete the delivery). Idempotent per payment.
+   */
+  async _announceBalancePaid(orderId, amountPaise, key) {
+    const extra = { amountPaise }
+    await emitLifecycleEvent('BALANCE_PAID', { orderId, dedupe: key, extra })
+    await emitLifecycleEvent('VENDOR_PAYMENT_UPDATE', { orderId, dedupe: key, extra })
+    await emitLifecycleEvent('CAPTAIN_PAYMENT_COMPLETED', { orderId, dedupe: key, extra })
+  }
+
   constructor(repository) {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
@@ -315,19 +328,7 @@ export class PaymentsService {
     // by the client, exactly like after a Razorpay verify) does the rest.
     if (orderId && purpose === 'BALANCE') {
       await this.ordersRepo.updateStatus(orderId, undefined, { paymentStatus: 'PAID' })
-      try {
-        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
-        const { NotificationsService } = await import('../notifications/notifications.service.js')
-        const notifService = new NotificationsService(new NotificationsRepository(), null)
-        await notifService.sendNotification(userId, {
-          title: 'Balance payment received',
-          body: `Your remaining balance of ₹${amountRupees} has been received.`,
-          type: 'order_balance_paid',
-          data: { orderId },
-        })
-      } catch (err) {
-        logger.warn({ err: err.message, orderId }, 'Balance-paid notification failed (non-critical)')
-      }
+      await this._announceBalancePaid(orderId, Math.round(Number(amountRupees) * 100), `wallet:${amountRupees}`)
     } else if (orderId && purpose === 'FULL') {
       await this.ordersRepo.updateStatus(orderId, 'WAITING_VENDOR_CONFIRMATION', { paymentStatus: 'PAID' })
       try {
@@ -339,23 +340,9 @@ export class PaymentsService {
       } catch (err) {
         logger.warn({ err: err.message, orderId }, 'Failed to queue auto-reject on wallet payment')
       }
-      try {
-        const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
-        if (order) {
-          const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
-          const { NotificationsService } = await import('../notifications/notifications.service.js')
-          const { buildCustomerOrderEventNotification } = await import('../notifications/customer-order-event.helper.js')
-          const notifService = new NotificationsService(new NotificationsRepository(), null)
-          await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
-            orderId: order.id,
-            orderNumber: order.orderNumber || order.order_number,
-            timelineType: 'ORDER_PLACED',
-            status: 'CONFIRMED',
-          }))
-        }
-      } catch (err) {
-        logger.warn({ err: err.message, orderId }, 'Order notification after wallet payment failed (non-critical)')
-      }
+      // Customer + laundry notifications (idempotent with the status-change path).
+      await emitLifecycleEvent('ORDER_PLACED', { orderId })
+      await emitLifecycleEvent('VENDOR_NEW_ORDER', { orderId })
     }
 
     if (purpose !== 'BALANCE') {
@@ -457,19 +444,7 @@ export class PaymentsService {
       await this.ordersRepo.updateStatus(payment.orderId, undefined, {
         paymentStatus: 'PAID',
       })
-      try {
-        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
-        const { NotificationsService } = await import('../notifications/notifications.service.js')
-        const notifService = new NotificationsService(new NotificationsRepository(), null)
-        await notifService.sendNotification(userId, {
-          title: 'Balance payment received',
-          body: `Your remaining balance of ₹${updated.amount} has been received.`,
-          type: 'order_balance_paid',
-          data: { orderId: payment.orderId },
-        })
-      } catch (err) {
-        logger.warn({ err: err.message, orderId: payment.orderId }, 'Balance-paid notification failed (non-critical)')
-      }
+      await this._announceBalancePaid(payment.orderId, Math.round(Number(updated.amount) * 100), `payment:${payment.id}`)
     } else if (payment.orderId && payment.purpose === 'FULL') {
       // Update order payment status (legacy path)
       await this.ordersRepo.updateStatus(payment.orderId, 'WAITING_VENDOR_CONFIRMATION', {
@@ -493,23 +468,9 @@ export class PaymentsService {
       }
 
       // Send order placed notification after confirmed payment
-      try {
-        const order = await this.ordersRepo.findByIdAndUser(payment.orderId, userId)
-        if (order) {
-          const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
-          const { NotificationsService } = await import('../notifications/notifications.service.js')
-          const { buildCustomerOrderEventNotification } = await import('../notifications/customer-order-event.helper.js')
-          const notifService = new NotificationsService(new NotificationsRepository(), null)
-          await notifService.sendNotification(userId, buildCustomerOrderEventNotification({
-            orderId: order.id,
-            orderNumber: order.orderNumber || order.order_number,
-            timelineType: 'ORDER_PLACED',
-            status: 'CONFIRMED',
-          }))
-        }
-      } catch (err) {
-        logger.warn({ err: err.message, orderId: payment.orderId }, 'Order notification after payment verify failed (non-critical)')
-      }
+      // Customer + laundry notifications (idempotent with the status-change path).
+      await emitLifecycleEvent('ORDER_PLACED', { orderId: payment.orderId })
+      await emitLifecycleEvent('VENDOR_NEW_ORDER', { orderId: payment.orderId })
     }
     // payment.purpose === 'ADVANCE' never reaches here with payment.orderId
     // set — at this point only order_draft_id is set, the order doesn't

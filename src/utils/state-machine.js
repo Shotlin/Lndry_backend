@@ -239,6 +239,14 @@ export async function recordOrderEvent(client, {
     const { scheduleInvoiceForDeliveredOrder } = await import('../modules/invoices/invoice-jobs.js')
     scheduleInvoiceForDeliveredOrder(orderId)
   }
+
+  // Every status change is also a lifecycle notification moment (customer,
+  // laundry and captain messages). Queued, not sent inline: it runs after this
+  // transaction commits and can never fail the status change.
+  if (newStatus !== oldStatus) {
+    const { scheduleLifecycleNotification } = await import('../modules/lifecycle-notifications/lifecycle-jobs.js')
+    scheduleLifecycleNotification(orderId, oldStatus, newStatus)
+  }
 }
 
 /**
