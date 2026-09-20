@@ -2,6 +2,7 @@ import { query, getClient } from '../../../config/database.js'
 
 const TEMPLATE_COLS = `
   id, name, title, body, type, variables, image_url, deep_link,
+  deep_link_type, deep_link_params,
   is_active, created_by, created_at, updated_at
 `
 
@@ -11,7 +12,15 @@ const CAMPAIGN_COLS = `
   nc.opened_count, nc.failed_count, nc.failure_summary,
   nc.status, nc.template_id, nc.scheduled_at, nc.expires_at,
   nc.sent_at, nc.created_by, nc.created_at, nc.updated_at,
+  nc.audience, nc.target_app, nc.deep_link_type, nc.deep_link_params, nc.device_count,
   u.name AS created_by_name
+`
+
+const CAMPAIGN_RETURN = `
+  id, title, body, image_url, deep_link, type, target_type, segment, target_count, sent_count,
+  opened_count, failed_count, failure_summary, status, template_id, scheduled_at, expires_at,
+  sent_at, created_by, created_at, updated_at, audience, target_app, deep_link_type,
+  deep_link_params, device_count
 `
 
 export class AdminNotificationsRepository {
@@ -32,24 +41,26 @@ export class AdminNotificationsRepository {
     return t || null
   }
 
-  async createTemplate({ name, title, body, type = 'PUSH', variables, image_url, deep_link }) {
+  async createTemplate({ name, title, body, type = 'PUSH', variables, image_url, deep_link, deep_link_type, deep_link_params }) {
     const { rows: [t] } = await query(
       `INSERT INTO notification_templates
-         (name, title, body, type, variables, image_url, deep_link)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+         (name, title, body, type, variables, image_url, deep_link, deep_link_type, deep_link_params)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING ${TEMPLATE_COLS}`,
-      [name, title, body, type, JSON.stringify(variables || []), image_url || null, deep_link || null]
+      [name, title, body, type, JSON.stringify(variables || []), image_url || null, deep_link || null,
+        deep_link_type || null, JSON.stringify(deep_link_params || {})]
     )
     return t
   }
 
   async updateTemplate(id, updates) {
-    const allowed = ['name', 'title', 'body', 'type', 'variables', 'image_url', 'deep_link', 'is_active']
+    const allowed = ['name', 'title', 'body', 'type', 'variables', 'image_url', 'deep_link',
+      'deep_link_type', 'deep_link_params', 'is_active']
     const sets = []; const params = []; let idx = 1
     for (const key of allowed) {
       if (updates[key] !== undefined) {
         sets.push(`${key} = $${idx++}`)
-        params.push(key === 'variables' ? JSON.stringify(updates[key]) : updates[key])
+        params.push(['variables', 'deep_link_params'].includes(key) ? JSON.stringify(updates[key]) : updates[key])
       }
     }
     if (sets.length === 0) return this.findTemplateById(id)
@@ -72,38 +83,153 @@ export class AdminNotificationsRepository {
 
   /* ── Campaigns ── */
 
-  async createCampaign({ title, body, type, segment, segmentValue, image_url, deep_link, expires_at, template_id, scheduledAt, createdBy, targetCount = 0 }) {
-    // Map canonical segment names to DB target_type CHECK constraint values
-    const segmentToTargetType = {
-      all_customers: 'all_customers',
-      specific_user: 'custom_list',
-      store_customers: 'all_customers',
-      inactive_customers: 'no_order_30_days',
-      cart_not_empty: 'wishlist_users',
-      all: 'all_customers',
-      new: 'all_customers',
-      inactive: 'no_order_30_days',
-      high_value: 'high_value',
-    }
-    const targetType = segmentToTargetType[segment] || 'all_customers'
-    const status = scheduledAt ? 'SCHEDULED' : 'SENDING'
-
+  /**
+   * Create a campaign row. `status` is DRAFT, SCHEDULED or SENDING; the audience
+   * spec and deep link are stored so a scheduled send is exact.
+   */
+  async createCampaign({
+    title, body, type, image_url, link, deepLinkText, audience, targetApp, expires_at, template_id,
+    scheduledAt, status, createdBy, targetCount = 0, deviceCount = 0,
+  }) {
     const { rows: [c] } = await query(
       `INSERT INTO notification_campaigns
-         (title, body, type, target_type, segment, image_url, deep_link,
-          expires_at, template_id, target_count, scheduled_at, status, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-       RETURNING id, title, body, type, target_type, segment, image_url, deep_link,
-         expires_at, template_id, target_count, sent_count, failed_count,
-         status, scheduled_at, created_by, created_at`,
+         (title, body, type, target_type, segment, image_url, deep_link, deep_link_type, deep_link_params,
+          audience, target_app, expires_at, template_id, target_count, device_count,
+          scheduled_at, status, created_by)
+       VALUES ($1, $2, $3, 'by_role', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+       RETURNING ${CAMPAIGN_RETURN}`,
       [
-        title, body, type || 'general', targetType, segment,
-        image_url || null, deep_link || null,
-        expires_at || null, template_id || null,
-        targetCount, scheduledAt || null, status, createdBy,
+        title, body, type || 'general', audience?.kind || null,
+        image_url || null, deepLinkText || null, link?.type || null, JSON.stringify(link?.params || {}),
+        JSON.stringify(audience), targetApp || null, expires_at || null, template_id || null,
+        targetCount, deviceCount, scheduledAt || null, status, createdBy,
       ]
     )
     return c
+  }
+
+  /** Edit a draft in place. Only DRAFT campaigns can be edited. */
+  async updateDraft(id, fields) {
+    const map = {
+      title: 'title', body: 'body', type: 'type', image_url: 'image_url',
+      deepLinkText: 'deep_link', expires_at: 'expires_at', template_id: 'template_id',
+      targetApp: 'target_app', targetCount: 'target_count', deviceCount: 'device_count',
+    }
+    const sets = []; const params = []; let idx = 1
+    for (const [k, col] of Object.entries(map)) {
+      if (fields[k] !== undefined) { sets.push(`${col} = $${idx++}`); params.push(fields[k]) }
+    }
+    if (fields.link !== undefined) {
+      sets.push(`deep_link_type = $${idx++}`, `deep_link_params = $${idx++}`)
+      params.push(fields.link?.type || null, JSON.stringify(fields.link?.params || {}))
+    }
+    if (fields.audience !== undefined) {
+      sets.push(`audience = $${idx++}`, `segment = $${idx++}`)
+      params.push(JSON.stringify(fields.audience), fields.audience?.kind || null)
+    }
+    if (!sets.length) return this.findCampaignById(id)
+    sets.push('updated_at = NOW()')
+    params.push(id)
+    const { rows: [c] } = await query(
+      `UPDATE notification_campaigns SET ${sets.join(', ')}
+        WHERE id = $${idx} AND status = 'DRAFT' RETURNING ${CAMPAIGN_RETURN}`,
+      params
+    )
+    return c || null
+  }
+
+  /** Move a DRAFT to SCHEDULED or SENDING. */
+  async activateDraft(id, { status, scheduledAt, targetCount, deviceCount }) {
+    const { rows: [c] } = await query(
+      `UPDATE notification_campaigns
+          SET status = $2, scheduled_at = $3, target_count = $4, device_count = $5, updated_at = NOW()
+        WHERE id = $1 AND status = 'DRAFT' RETURNING ${CAMPAIGN_RETURN}`,
+      [id, status, scheduledAt || null, targetCount, deviceCount]
+    )
+    return c || null
+  }
+
+  async deleteCampaign(id) {
+    const { rowCount } = await query(
+      `DELETE FROM notification_campaigns WHERE id = $1 AND status IN ('DRAFT', 'CANCELLED')`,
+      [id]
+    )
+    return rowCount > 0
+  }
+
+  /** Per-app / per-status breakdown for the campaign detail view. */
+  async getCampaignBreakdown(id) {
+    const { rows } = await query(
+      `SELECT app_type, status, COUNT(*)::int AS count,
+              COUNT(opened_at)::int AS opened
+         FROM notification_deliveries WHERE campaign_id = $1
+        GROUP BY app_type, status`,
+      [id]
+    )
+    return rows
+  }
+
+  /** Recent failure reasons for a campaign (for the detail view). */
+  async getCampaignErrors(id) {
+    const { rows } = await query(
+      `SELECT error_code, COUNT(*)::int AS count FROM notification_deliveries
+        WHERE campaign_id = $1 AND status <> 'SENT' GROUP BY error_code ORDER BY count DESC LIMIT 10`,
+      [id]
+    )
+    return rows
+  }
+
+  async insertInboxItems(userIds, { title, body, type, data }) {
+    if (!userIds.length) return new Map()
+    const { rows } = await query(
+      `INSERT INTO notifications (user_id, title, body, type, data)
+       SELECT uid, $2, $3, $4, $5::jsonb FROM unnest($1::uuid[]) AS uid
+       RETURNING id, user_id`,
+      [userIds, title, body, type, JSON.stringify(data || {})]
+    )
+    return new Map(rows.map((r) => [r.user_id, r.id]))
+  }
+
+  /** People (or vendors) matching a name / phone / email fragment, with live device counts. */
+  async searchRecipients({ q, type, limit = 15 }) {
+    const term = `%${String(q || '').trim().replace(/[%_]/g, '')}%`
+    if (type === 'vendor') {
+      const { rows } = await query(
+        `SELECT v.id, v.name, v.city, v.pincode,
+                (SELECT COUNT(*)::int FROM fcm_tokens ft
+                   JOIN vendor_employees ve ON ve.user_id = ft.user_id
+                  WHERE ve.vendor_id = v.id AND ve.is_active AND ve.deleted_at IS NULL
+                    AND ve.role IN ('VENDOR_OWNER','VENDOR_STAFF') AND ft.is_active) AS devices
+           FROM vendors v
+          WHERE v.deleted_at IS NULL AND (v.name ILIKE $1 OR v.city ILIKE $1 OR v.pincode ILIKE $1)
+          ORDER BY v.name LIMIT ${Number(limit)}`,
+        [term]
+      )
+      return rows
+    }
+    const roleFilter = type === 'captain'
+      ? `AND EXISTS (SELECT 1 FROM vendor_employees ve WHERE ve.user_id = u.id AND ve.role = 'VENDOR_RIDER' AND ve.is_active AND ve.deleted_at IS NULL)`
+      : type === 'customer'
+        ? `AND NOT EXISTS (SELECT 1 FROM vendor_employees ve WHERE ve.user_id = u.id AND ve.is_active AND ve.deleted_at IS NULL)`
+        : ''
+    const { rows } = await query(
+      `SELECT u.id, u.name, u.phone, u.email,
+              (SELECT COUNT(*)::int FROM fcm_tokens ft WHERE ft.user_id = u.id AND ft.is_active) AS devices
+         FROM users u
+        WHERE u.is_active = true ${roleFilter}
+          AND (u.name ILIKE $1 OR u.phone ILIKE $1 OR u.email ILIKE $1)
+        ORDER BY u.name NULLS LAST LIMIT ${Number(limit)}`,
+      [term]
+    )
+    return rows
+  }
+
+  /** Current devices for one user (test send + recipient preview). */
+  async findUserBasic(userId) {
+    const { rows: [u] } = await query(
+      `SELECT id, name, phone, is_active FROM users WHERE id = $1`, [userId]
+    )
+    return u || null
   }
 
   async findAllCampaigns({ offset, limit, status }) {
@@ -142,13 +268,32 @@ export class AdminNotificationsRepository {
 
   async findDueScheduledCampaigns() {
     const { rows } = await query(
-      `SELECT id, title, body, type, segment, image_url, deep_link, expires_at, template_id
-       FROM notification_campaigns
-       WHERE status = 'SCHEDULED' AND scheduled_at <= NOW()
-       ORDER BY scheduled_at ASC
-       LIMIT 20`
+      `SELECT id FROM notification_campaigns
+        WHERE status = 'SCHEDULED' AND scheduled_at <= NOW()
+        ORDER BY scheduled_at ASC
+        LIMIT 20`
     )
     return rows
+  }
+
+  /** A worker crash mid-send leaves SENDING forever; surface those as FAILED. */
+  async failStuckSending(olderThanMinutes = 30) {
+    const { rows } = await query(
+      `UPDATE notification_campaigns
+          SET status = 'FAILED', updated_at = NOW(),
+              failure_summary = COALESCE(failure_summary, '{}'::jsonb) || '{"reason":"Send did not finish (server restarted)"}'::jsonb
+        WHERE status = 'SENDING' AND updated_at < NOW() - ($1 || ' minutes')::interval
+        RETURNING id`,
+      [String(olderThanMinutes)]
+    )
+    return rows
+  }
+
+  async getCampaignForSend(id) {
+    const { rows: [c] } = await query(
+      `SELECT ${CAMPAIGN_RETURN} FROM notification_campaigns nc WHERE id = $1`, [id]
+    )
+    return c || null
   }
 
   async lockAndMarkSending(id) {
@@ -177,7 +322,7 @@ export class AdminNotificationsRepository {
     }
   }
 
-  async updateCampaignStatus(id, status, { sentCount, failedCount, failureSummary } = {}) {
+  async updateCampaignStatus(id, status, { sentCount, failedCount, failureSummary, targetCount, deviceCount } = {}) {
     const sets = ['status = $1', 'updated_at = NOW()']
     const params = [status]
     let idx = 2
@@ -189,6 +334,14 @@ export class AdminNotificationsRepository {
     if (failedCount !== undefined) {
       sets.push(`failed_count = $${idx++}`)
       params.push(failedCount)
+    }
+    if (targetCount !== undefined) {
+      sets.push(`target_count = $${idx++}`)
+      params.push(targetCount)
+    }
+    if (deviceCount !== undefined) {
+      sets.push(`device_count = $${idx++}`)
+      params.push(deviceCount)
     }
     if (failureSummary !== undefined) {
       sets.push(`failure_summary = $${idx++}`)
@@ -252,7 +405,7 @@ export class AdminNotificationsRepository {
   }
 }
 
-function buildSegmentWhere(segment, segmentValue) {
+export function buildSegmentWhere(segment, segmentValue) {
   const customerBaseWhere = "u.role = 'CUSTOMER' AND u.is_active = true"
   const params = []
 

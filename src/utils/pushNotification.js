@@ -4,6 +4,9 @@ import { logger } from '../config/logger.js'
 let firebaseApp = null
 let _admin = null
 
+/** FCM `sendEach` accepts at most 500 messages per call. */
+const FCM_BATCH_LIMIT = 500
+
 /**
  * Initialize Firebase Admin SDK (lazy singleton — safe to call multiple times)
  */
@@ -42,6 +45,98 @@ async function getFirebaseApp() {
 }
 
 /**
+ * Build one FCM message. Every push — transactional, campaign or test — goes
+ * through here so channel, priority and image handling stay identical.
+ */
+export function buildMessage(fcmToken, { title, body, imageUrl, deepLink, data = {}, ttlSeconds }) {
+  const stringData = Object.fromEntries(
+    Object.entries({
+      ...data,
+      ...(deepLink && !data.deepLink ? { deepLink } : {}),
+      ...(imageUrl ? { imageUrl } : {}),
+    })
+      .filter(([, v]) => v !== null && v !== undefined)
+      .map(([k, v]) => [k, String(v)])
+  )
+  const image = imageUrl && isValidHttpsUrl(imageUrl) ? imageUrl : undefined
+
+  return {
+    token: fcmToken,
+    notification: {
+      title,
+      body,
+      ...(image ? { imageUrl: image } : {}),
+    },
+    data: stringData,
+    android: {
+      priority: 'high',
+      ...(ttlSeconds > 0 ? { ttl: Math.min(Math.floor(ttlSeconds), 2419200) * 1000 } : {}),
+      notification: {
+        sound: 'default',
+        channelId: 'lndry_notifications',
+        imageUrl: image,
+        clickAction: 'FLUTTER_NOTIFICATION_CLICK',
+      },
+    },
+    apns: {
+      payload: { aps: { sound: 'default', badge: 1, ...(image ? { mutableContent: true } : {}) } },
+      fcmOptions: image ? { imageUrl: image } : undefined,
+    },
+  }
+}
+
+/**
+ * Send a list of individually built messages (each may carry its own data),
+ * in chunks of 500. Returns one result per input message, in order:
+ *   { token, success, messageId?, errorCode?, tokenInvalid }
+ * Never throws for a per-message failure; if FCM itself is not configured every
+ * result is `{ success:false, errorCode:'FCM_NOT_CONFIGURED' }`.
+ */
+export async function sendPushMessages(messages) {
+  if (!messages?.length) return { configured: true, results: [] }
+
+  const app = await getFirebaseApp()
+  if (!app) {
+    return {
+      configured: false,
+      results: messages.map((m) => ({
+        token: m.token, success: false, errorCode: 'FCM_NOT_CONFIGURED', tokenInvalid: false,
+      })),
+    }
+  }
+
+  const admin = _admin || (await import('firebase-admin')).default
+  const results = []
+
+  for (let i = 0; i < messages.length; i += FCM_BATCH_LIMIT) {
+    const chunk = messages.slice(i, i + FCM_BATCH_LIMIT)
+    try {
+      const res = await admin.messaging().sendEach(chunk)
+      res.responses.forEach((r, idx) => {
+        const token = chunk[idx].token
+        if (r.success) {
+          results.push({ token, success: true, messageId: r.messageId, tokenInvalid: false })
+        } else {
+          results.push({
+            token,
+            success: false,
+            errorCode: r.error?.code || r.error?.errorInfo?.code || 'UNKNOWN',
+            tokenInvalid: isTokenInvalidError(r.error),
+          })
+        }
+      })
+    } catch (err) {
+      logger.error({ err: err.message }, 'FCM sendEach chunk failed')
+      chunk.forEach((m) => results.push({
+        token: m.token, success: false, errorCode: err.code || 'SEND_FAILED', tokenInvalid: false,
+      }))
+    }
+  }
+
+  return { configured: true, results }
+}
+
+/**
  * Send push notification to a single device token.
  * Returns { success, messageId } or { success: false, reason, tokenInvalid }
  */
@@ -54,42 +149,7 @@ export async function sendPush(fcmToken, { title, body, imageUrl, deepLink, data
 
   try {
     const admin = _admin || (await import('firebase-admin')).default
-    const stringData = Object.fromEntries(
-      Object.entries({
-        ...data,
-        ...(deepLink ? { deepLink } : {}),
-        ...(imageUrl ? { imageUrl } : {}),
-      })
-        .filter(([, v]) => v !== null && v !== undefined)
-        .map(([k, v]) => [k, String(v)])
-    )
-
-    const message = {
-      token: fcmToken,
-      notification: {
-        title,
-        body,
-        ...(imageUrl && isValidHttpsUrl(imageUrl) ? { imageUrl } : {}),
-      },
-      data: stringData,
-      android: {
-        priority: 'high',
-        notification: {
-          sound: 'default',
-          channelId: 'lndry_notifications',
-          imageUrl: imageUrl && isValidHttpsUrl(imageUrl) ? imageUrl : undefined,
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-        },
-      },
-      apns: {
-        payload: { aps: { sound: 'default', badge: 1 } },
-        fcmOptions: imageUrl && isValidHttpsUrl(imageUrl)
-          ? { imageUrl }
-          : undefined,
-      },
-    }
-
-    const result = await admin.messaging().send(message)
+    const result = await admin.messaging().send(buildMessage(fcmToken, { title, body, imageUrl, deepLink, data }))
     logger.info({ messageId: result, title }, 'Push notification sent')
     return { success: true, messageId: result }
   } catch (err) {
@@ -100,76 +160,25 @@ export async function sendPush(fcmToken, { title, body, imageUrl, deepLink, data
 }
 
 /**
- * Send push to multiple tokens with partial failure handling.
- * Deactivates invalid tokens in bulk.
+ * Send the same push to many tokens (chunked). Kept for existing callers;
+ * new code should use the notification dispatcher, which also records
+ * per-device delivery results.
  */
 export async function sendPushBatch(fcmTokens, { title, body, imageUrl, deepLink, data = {} }) {
   if (!fcmTokens?.length) return { success: false, reason: 'No tokens', sent: 0, failed: 0 }
 
-  const app = await getFirebaseApp()
-  if (!app) {
+  const { configured, results } = await sendPushMessages(
+    fcmTokens.map((t) => buildMessage(t, { title, body, imageUrl, deepLink, data }))
+  )
+  if (!configured) {
     logger.debug({ title }, 'FCM not configured — skipping batch push')
     return { success: false, reason: 'FCM not configured', sent: 0, failed: 0 }
   }
 
-  try {
-    const admin = _admin || (await import('firebase-admin')).default
-    const stringData = Object.fromEntries(
-      Object.entries({
-        ...data,
-        ...(deepLink ? { deepLink } : {}),
-        ...(imageUrl ? { imageUrl } : {}),
-      })
-        .filter(([, v]) => v !== null && v !== undefined)
-        .map(([k, v]) => [k, String(v)])
-    )
-
-    const messages = fcmTokens.map((token) => ({
-      token,
-      notification: {
-        title,
-        body,
-        ...(imageUrl && isValidHttpsUrl(imageUrl) ? { imageUrl } : {}),
-      },
-      data: stringData,
-      android: {
-        priority: 'high',
-        notification: {
-          sound: 'default',
-          channelId: 'lndry_notifications',
-          imageUrl: imageUrl && isValidHttpsUrl(imageUrl) ? imageUrl : undefined,
-          clickAction: 'FLUTTER_NOTIFICATION_CLICK',
-        },
-      },
-      apns: {
-        payload: { aps: { sound: 'default', badge: 1 } },
-        fcmOptions: imageUrl && isValidHttpsUrl(imageUrl)
-          ? { imageUrl }
-          : undefined,
-      },
-    }))
-
-    const result = await admin.messaging().sendEach(messages)
-    logger.info({ title, sent: result.successCount, failed: result.failureCount }, 'Batch push complete')
-
-    // Collect invalid token indices
-    const invalidTokens = []
-    result.responses.forEach((r, i) => {
-      if (!r.success && isTokenInvalidError(r.error)) {
-        invalidTokens.push(fcmTokens[i])
-      }
-    })
-
-    return {
-      success: true,
-      sent: result.successCount,
-      failed: result.failureCount,
-      invalidTokens,
-    }
-  } catch (err) {
-    logger.error({ err: err.message, title }, 'Batch push failed')
-    return { success: false, reason: err.message, sent: 0, failed: 0, invalidTokens: [] }
-  }
+  const sent = results.filter((r) => r.success).length
+  const invalidTokens = results.filter((r) => r.tokenInvalid).map((r) => r.token)
+  logger.info({ title, sent, failed: results.length - sent }, 'Batch push complete')
+  return { success: true, sent, failed: results.length - sent, invalidTokens }
 }
 
 // Export a getter for messaging instance (used by firebase.js re-export)

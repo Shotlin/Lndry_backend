@@ -9,6 +9,8 @@ import {
   getPreferencesSchema,
   updatePreferencesSchema,
   registerTokenSchema,
+  unregisterTokenSchema,
+  markOpenedSchema,
 } from './notifications.schema.js'
 
 /**
@@ -61,4 +63,16 @@ export default async function notificationsRoutes(fastify) {
     schema: registerTokenSchema,
     preHandler: [fastify.authenticate],
   }, controller.registerToken.bind(controller))
+
+  // POST /tokens/unregister — Detach this device (logout)
+  fastify.post('/tokens/unregister', {
+    schema: unregisterTokenSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.unregisterToken.bind(controller))
+
+  // POST /opened — A push notification was tapped
+  fastify.post('/opened', {
+    schema: markOpenedSchema,
+    preHandler: [fastify.authenticate],
+  }, controller.markOpened.bind(controller))
 }

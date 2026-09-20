@@ -1,6 +1,6 @@
 /**
  * Campaign Scheduler Worker
- * Polls DB every 60 seconds for SCHEDULED campaigns that are due.
+ * Polls DB every 20 seconds for SCHEDULED campaigns that are due.
  * Uses SELECT FOR UPDATE SKIP LOCKED to prevent duplicate sends if
  * multiple backend instances are running.
  *
@@ -15,12 +15,12 @@ const repo = new AdminNotificationsRepository()
 const svc = new AdminNotificationsService()
 
 let _intervalHandle = null
-const POLL_INTERVAL_MS = 60_000
+const POLL_INTERVAL_MS = 20_000
 
 export function startCampaignScheduler() {
   if (_intervalHandle) return
 
-  logger.info('Campaign scheduler started (polling every 60s)')
+  logger.info('Campaign scheduler started (polling every 20s)')
 
   _intervalHandle = setInterval(async () => {
     try {
@@ -45,6 +45,10 @@ export function stopCampaignScheduler() {
 }
 
 async function _processDueCampaigns() {
+  // A crash mid-send would leave a campaign in SENDING forever.
+  const stuck = await repo.failStuckSending(30)
+  if (stuck.length) logger.warn({ ids: stuck.map((c) => c.id) }, 'Marked stuck campaigns as FAILED')
+
   const due = await repo.findDueScheduledCampaigns()
   if (!due.length) return
 
@@ -57,17 +61,11 @@ async function _processDueCampaigns() {
       continue
     }
 
-    logger.info({ campaignId: campaign.id, title: campaign.title }, 'Executing scheduled campaign')
+    logger.info({ campaignId: campaign.id }, 'Executing scheduled campaign')
     try {
-      await svc.executeScheduledCampaign(campaign.id, {
-        title: campaign.title,
-        body: campaign.body,
-        segment: campaign.segment || 'all_customers',
-        image_url: campaign.image_url,
-        deep_link: campaign.deep_link,
-        type: campaign.type,
-        expires_at: campaign.expires_at,
-      })
+      // The executor reads the stored audience, content and link from the row,
+      // so the send matches exactly what the admin scheduled.
+      await svc.executeScheduledCampaign(campaign.id)
     } catch (err) {
       logger.error({ err: err.message, campaignId: campaign.id }, 'Scheduled campaign execution failed')
       await repo.updateCampaignStatus(campaign.id, 'FAILED', {

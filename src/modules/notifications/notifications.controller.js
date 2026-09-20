@@ -64,11 +64,34 @@ export class NotificationsController {
   }
 
   /**
-   * POST /tokens — Register FCM/device token
+   * POST /tokens — Register FCM/device token (multi-device)
    */
   async registerToken(request, reply) {
-    const { token, platform } = request.body
-    await this.service.registerToken(request.user.id, token, platform)
+    const { token, platform, app_type, device_id, device_model, app_version } = request.body
+    await this.service.registerToken(request.user.id, {
+      token, platform, appType: app_type, deviceId: device_id,
+      deviceModel: device_model, appVersion: app_version,
+    })
     return reply.code(200).send(success(null, 'Token registered successfully'))
+  }
+
+  /**
+   * POST /tokens/unregister — detach this device on logout
+   */
+  async unregisterToken(request, reply) {
+    const { token, device_id } = request.body || {}
+    const removed = await this.service.unregisterToken(request.user.id, { token, deviceId: device_id })
+    return reply.code(200).send(success({ removed }, 'Device detached'))
+  }
+
+  /**
+   * POST /opened — the user tapped a push
+   */
+  async markOpened(request, reply) {
+    const { delivery_id, notification_id, campaign_id } = request.body || {}
+    const updated = await this.service.markOpened(request.user.id, {
+      deliveryId: delivery_id, notificationId: notification_id, campaignId: campaign_id,
+    })
+    return reply.code(200).send(success({ updated }, 'Recorded'))
   }
 }
