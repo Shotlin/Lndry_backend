@@ -68,10 +68,15 @@ export class WalletRepository {
    * Returns { wallet, transaction }
    */
   async debit(client, walletId, amount, description, referenceId) {
-    // Update balance (CHECK constraint enforces >= 0)
+    // The balance must cover the debit AND every live reservation on this wallet (an in-store redemption the
+    // customer approved but whose sale is not booked yet) — otherwise the same money could be promised twice.
     const { rows: walletRows } = await client.query(
       `UPDATE wallets SET balance = balance - $1, updated_at = NOW()
-       WHERE id = $2 AND balance >= $1 RETURNING *`,
+       WHERE id = $2 AND balance - $1 >= COALESCE((
+         SELECT SUM(r.amount_paise) FROM wallet_redemption_requests r
+         WHERE r.customer_user_id = wallets.user_id AND r.status = 'AUTHORIZED' AND r.hold_expires_at > NOW()
+       ), 0) / 100.0
+       RETURNING *`,
       [amount, walletId]
     )
 

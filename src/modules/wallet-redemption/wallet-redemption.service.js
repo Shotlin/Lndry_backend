@@ -7,6 +7,9 @@ import { WalletRedemptionRepository } from './wallet-redemption.repository.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
 import { requireWalletAccess } from '../vendors/vendor-tier.js'
 
+// How long an approved-but-not-yet-booked redemption stays RESERVED on the customer's wallet. Nothing is debited during
+// this time; if no sale is booked the reservation just lapses.
+const HOLD_MS = 15 * 60 * 1000
 const EXPIRY_MS = 5 * 60 * 1000 // 5 minutes — a real in-person handoff needs some time, but a long-lived pending approval is itself a small confusion/abuse surface
 const MAX_ATTEMPTS = 5
 const OTP_REDIS_PREFIX = 'wallet_redemption_otp:'
@@ -40,8 +43,10 @@ export class WalletRedemptionService {
     const user = await this.repo.findUserByPhone(phone)
     let balancePaise
     if (user) {
-      const wallet = await this.walletRepo.getOrCreate(user.id)
-      balancePaise = Math.round(wallet.balance * 100)
+      await this.walletRepo.getOrCreate(user.id)
+      await this.repo.expirePendingForCustomer(user.id)
+      // What is actually spendable: balance minus amounts reserved for other in-store sales not yet booked.
+      balancePaise = (await this.repo.availablePaise(user.id)).availablePaise
     }
     emitAudit('wallet_redemption_phone_lookup', {
       actor_user_id: actor?.userId ?? null,
@@ -63,15 +68,16 @@ export class WalletRedemptionService {
       throw { statusCode: 400, message: 'customerUserId and a positive amountPaise are required', code: 'VALIDATION_ERROR' }
     }
 
-    const wallet = await this.walletRepo.getOrCreate(customerUserId)
-    const amountRupees = amountPaise / 100
-    if (wallet.balance < amountRupees) {
-      throw { statusCode: 400, message: `Insufficient wallet balance. Requested ₹${amountRupees}, available ₹${wallet.balance}`, code: 'INSUFFICIENT_BALANCE' }
-    }
-
-    // Lazy-expiry sweep for this customer before the insert — see repo comment.
+    await this.walletRepo.getOrCreate(customerUserId)
+    // Lazy-expiry sweep for this customer — see repo comment. Then this vendor's own earlier request / unused
+    // reservation for the customer is replaced by this new one (before the balance check, so it does not count against it).
     await this.repo.expirePendingForCustomer(customerUserId)
     for (const staleId of await this.repo.cancelPendingForVendor(vendorId, customerUserId)) await redis.del(redisKey(staleId))
+    const amountRupees = amountPaise / 100
+    const { availablePaise } = await this.repo.availablePaise(customerUserId)
+    if (availablePaise < amountPaise) {
+      throw { statusCode: 400, message: `Insufficient wallet balance. Requested ₹${amountRupees}, available ₹${availablePaise / 100}`, code: 'INSUFFICIENT_BALANCE' }
+    }
 
     const rawOtp = Math.floor(100000 + Math.random() * 900000).toString()
     const otpHash = await bcrypt.hash(rawOtp, 12)
@@ -176,44 +182,41 @@ export class WalletRedemptionService {
       throw { statusCode: 400, message: `Invalid code. ${remaining} attempt(s) remaining.`, code: 'INVALID_OTP', attemptsRemaining: remaining }
     }
 
-    // Correct code — atomic claim + debit, all in one transaction.
+    // Correct code — RESERVE the amount. The wallet is not debited here: the money moves only when the sale is
+    // booked (see captureInTransaction), so an approval that is never followed by a sale costs the customer nothing.
     const client = await getClient()
     try {
       await client.query('BEGIN')
 
-      const claimed = await this.repo.claimForConfirm(client, requestId, vendorId)
+      const holdExpiresAt = new Date(Date.now() + HOLD_MS)
+      const claimed = await this.repo.claimForConfirm(client, requestId, vendorId, holdExpiresAt)
       if (!claimed) {
         await client.query('ROLLBACK')
         throw { statusCode: 409, message: 'This request is no longer pending', code: 'REQUEST_ALREADY_DECIDED_OR_EXPIRED' }
       }
 
+      // Lock the wallet so two approvals (or an approval and an app payment) cannot promise the same money twice.
       const wallet = await this.walletRepo.getForUpdate(client, claimed.customerUserId)
       if (!wallet) {
         await client.query('ROLLBACK')
         throw { statusCode: 404, message: 'Wallet not found', code: 'WALLET_NOT_FOUND' }
       }
-
-      const amountRupees = claimed.amountPaise / 100
-      let debitResult
-      try {
-        debitResult = await this.walletRepo.debit(client, wallet.id, amountRupees, `Wallet redemption at Laundry Store`, requestId)
-      } catch (err) {
+      const { availablePaise } = await this.repo.availablePaise(claimed.customerUserId, client, { excludeRequestId: requestId })
+      if (availablePaise < claimed.amountPaise) {
         await client.query('ROLLBACK')
         throw { statusCode: 409, message: 'Insufficient wallet balance', code: 'INSUFFICIENT_BALANCE' }
       }
-
-      await this.repo.attachWalletTransaction(client, requestId, debitResult.transaction.id)
       await client.query('COMMIT')
 
       await redis.del(redisKey(requestId))
 
-      emitAudit('wallet_redemption_confirmed', {
+      emitAudit('wallet_redemption_authorized', {
         actor_user_id: actor?.userId ?? null,
         actor_role: actor?.role ?? null,
         target_type: 'wallet_redemption_request',
         target_id: requestId,
         before: null,
-        after: { customer_user_id: claimed.customerUserId, vendor_id: vendorId, amount_paise: claimed.amountPaise, wallet_transaction_id: debitResult.transaction.id },
+        after: { customer_user_id: claimed.customerUserId, vendor_id: vendorId, amount_paise: claimed.amountPaise, hold_expires_at: holdExpiresAt.toISOString() },
         ip_address: actor?.ip ?? null,
         user_agent: actor?.userAgent ?? null,
       })
@@ -221,12 +224,84 @@ export class WalletRedemptionService {
       return {
         requestId,
         amountPaise: claimed.amountPaise,
-        walletTransactionId: debitResult.transaction.id,
-        newBalance: debitResult.wallet.balance,
+        holdExpiresAt: holdExpiresAt.toISOString(),
+        walletTransactionId: null, // nothing has been debited yet
+        newBalance: (availablePaise - claimed.amountPaise) / 100, // what is still spendable while the reservation lasts
       }
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * Turns an approved reservation into the actual wallet payment. Called by the booking code INSIDE the transaction
+   * that creates the order, with that transaction's `client`: the order, the request and the wallet debit commit
+   * together or not at all. `applyPaise` is what the sale actually uses (never more than was approved).
+   */
+  async captureInTransaction(client, { requestId, vendorId, customerUserId, applyPaise }) {
+    const request = await this.repo.capture(client, { id: requestId, vendorId, customerUserId, capturedPaise: applyPaise })
+    if (!request) return { ok: false, code: 'WALLET_AUTHORIZATION_EXPIRED', message: 'The wallet approval expired or was already used. Ask the customer to approve the wallet payment again.' }
+    if (applyPaise <= 0 || applyPaise > request.amountPaise) return { ok: false, code: 'WALLET_NOT_CONFIRMED', message: 'The wallet amount for this sale is not valid.' }
+    const wallet = await this.walletRepo.getForUpdate(client, customerUserId)
+    if (!wallet) return { ok: false, code: 'WALLET_NOT_FOUND', message: 'Wallet not found' }
+    let debit
+    try {
+      debit = await this.walletRepo.debit(client, wallet.id, applyPaise / 100, 'Wallet redemption at Laundry Store', requestId)
+    } catch {
+      return { ok: false, code: 'INSUFFICIENT_BALANCE', message: 'The customer\'s wallet no longer has enough balance for this payment.' }
+    }
+    await this.repo.attachWalletTransaction(client, requestId, debit.transaction.id)
+    return { ok: true, walletTransactionId: debit.transaction.id, newBalance: debit.wallet.balance }
+  }
+
+  /**
+   * Safety net: returns money that left a wallet for a redemption no sale ever used. This is what happened before the
+   * reservation model (the wallet was debited the moment the customer approved). Idempotent — each redemption is
+   * refunded once (status REFUNDED) — and audit-logged; the customer is notified.
+   */
+  async refundStranded({ minutes = 30 } = {}) {
+    const stranded = await this.repo.listStranded(minutes)
+    const refunded = []
+    for (const request of stranded) {
+      const client = await getClient()
+      try {
+        await client.query('BEGIN')
+        const claimed = await this.repo.claimRefund(client, request.id)
+        if (!claimed) { await client.query('ROLLBACK'); continue }
+        const wallet = await this.walletRepo.getForUpdate(client, claimed.customerUserId)
+        if (!wallet) { await client.query('ROLLBACK'); continue }
+        const amountPaise = claimed.capturedPaise ?? claimed.amountPaise
+        await this.walletRepo.credit(client, wallet.id, amountPaise / 100, 'Refund: wallet redemption at Laundry Store was not used for a sale', claimed.id)
+        await client.query('COMMIT')
+        refunded.push({ requestId: claimed.id, customerUserId: claimed.customerUserId, amountPaise })
+        emitAudit('wallet_redemption_refunded', {
+          actor_user_id: null, actor_role: 'SYSTEM', target_type: 'wallet_redemption_request', target_id: claimed.id,
+          before: { status: 'CONFIRMED' }, after: { status: 'REFUNDED', amount_paise: amountPaise, customer_user_id: claimed.customerUserId },
+          ip_address: null, user_agent: 'wallet-reconcile',
+        })
+      } catch (err) {
+        await client.query('ROLLBACK').catch(() => {})
+        logger.error({ err: err.message, requestId: request.id }, 'Refunding a stranded wallet redemption failed')
+      } finally {
+        client.release()
+      }
+    }
+    for (const item of refunded) {
+      try {
+        const { NotificationsRepository } = await import('../notifications/notifications.repository.js')
+        const { NotificationsService } = await import('../notifications/notifications.service.js')
+        await new NotificationsService(new NotificationsRepository(), null).sendNotification(item.customerUserId, {
+          title: 'Wallet amount returned',
+          body: `₹${item.amountPaise / 100} was returned to your LNDRY wallet — an in-store wallet approval was not used for a sale.`,
+          type: 'WALLET_REFUND',
+          data: { requestId: item.requestId },
+        })
+      } catch (err) {
+        logger.warn({ err: err.message }, 'Wallet refund notification failed (non-critical)')
+      }
+    }
+    if (refunded.length) logger.info({ count: refunded.length, totalPaise: refunded.reduce((sum, item) => sum + item.amountPaise, 0) }, 'Stranded wallet redemptions refunded')
+    return refunded
   }
 
   async cancelRequest(requestId, vendorId) {

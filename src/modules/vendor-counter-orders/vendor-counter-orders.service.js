@@ -11,6 +11,7 @@ import { scheduleInvoiceForDeliveredOrder } from '../invoices/invoice-jobs.js'
 import { VendorGarmentUnitsRepository } from '../vendor-garment-units/vendor-garment-units.repository.js'
 import { VendorLaundryContainersRepository } from '../vendor-laundry-containers/vendor-laundry-containers.repository.js'
 import { logger } from '../../config/logger.js'
+import { WalletRedemptionService } from '../wallet-redemption/wallet-redemption.service.js'
 import { getVendorCapabilities, WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED } from '../vendors/vendor-tier.js'
 
 const PAYMENT_MODES = ['CASH', 'UPI', 'CARD', 'BANK', 'WALLET']
@@ -135,8 +136,10 @@ export class VendorCounterOrdersService {
     productionTasks = new VendorProductionTasksService(),
     posCatalogue = new VendorPosCatalogueService(),
     garmentUnitsRepo = new VendorGarmentUnitsRepository(),
-    containersRepo = new VendorLaundryContainersRepository()
+    containersRepo = new VendorLaundryContainersRepository(),
+    walletRedemption = new WalletRedemptionService()
   ) {
+    this.walletRedemption = walletRedemption
     this.garmentUnitsRepo = garmentUnitsRepo
     this.containersRepo = containersRepo
     this.adjustmentRules = adjustmentRulesRepo
@@ -391,27 +394,36 @@ export class VendorCounterOrdersService {
     // pocket for a sale that cannot be booked). Anything new needs wallet access right now.
     const redemptionId = input.walletRedemption?.requestId
     const confirmedEarlier = redemptionId
-      ? (await query(`SELECT 1 FROM wallet_redemption_requests WHERE id = $1 AND vendor_id = $2 AND status = 'CONFIRMED'`, [redemptionId, vendorId])).rows.length > 0
+      ? (await query(`SELECT 1 FROM wallet_redemption_requests WHERE id = $1 AND vendor_id = $2 AND status IN ('AUTHORIZED', 'CONFIRMED')`, [redemptionId, vendorId])).rows.length > 0
       : false
     if ((redemptionId || mode === 'WALLET') && !confirmedEarlier && !(await getVendorCapabilities(vendorId)).walletAccess) {
       return fail(WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED, 403)
     }
 
-    // Wallet leg: the redemption request was already OTP-confirmed and the wallet debited.
+    // Wallet leg. The customer approved with the one-time code, which RESERVED the amount (AUTHORIZED). The wallet is
+    // debited below, INSIDE the transaction that creates the order — so the money moves only if the order exists.
+    // (Older redemptions, CONFIRMED before that model, were already debited at approval and are just linked.)
     let walletPaise = 0
     let walletRequestId = null
+    let walletNeedsCapture = false
     if (input.walletRedemption?.requestId) {
       const { rows } = await query(
-        `SELECT id, amount_paise, status, customer_user_id FROM wallet_redemption_requests WHERE id = $1 AND vendor_id = $2`,
+        `SELECT id, amount_paise, status, customer_user_id, hold_expires_at, wallet_transaction_id FROM wallet_redemption_requests WHERE id = $1 AND vendor_id = $2`,
         [input.walletRedemption.requestId, vendorId]
       )
       const request = rows[0]
-      if (!request || request.status !== 'CONFIRMED') return fail('The wallet redemption was not confirmed by the customer.', 'WALLET_NOT_CONFIRMED')
+      const alreadyDebited = request?.status === 'CONFIRMED' && Boolean(request.wallet_transaction_id)
+      const reserved = request?.status === 'AUTHORIZED' && new Date(request.hold_expires_at) > new Date()
+      if (request && !alreadyDebited && !reserved && ['AUTHORIZED', 'EXPIRED'].includes(request.status)) {
+        return fail('The wallet approval expired. Ask the customer to approve the wallet payment again — nothing was taken from their wallet.', 'WALLET_AUTHORIZATION_EXPIRED', 409)
+      }
+      if (!request || (!alreadyDebited && !reserved)) return fail('The wallet redemption was not confirmed by the customer.', 'WALLET_NOT_CONFIRMED')
       if (request.customer_user_id !== customerId) return fail('The wallet redemption belongs to a different customer.', 'WALLET_CUSTOMER_MISMATCH')
       const used = await query('SELECT 1 FROM store_orders WHERE wallet_redemption_request_id = $1 LIMIT 1', [request.id])
       if (used.rows.length) return fail('This wallet redemption was already applied to an order.', 'WALLET_ALREADY_USED')
       walletPaise = Math.min(request.amount_paise, q.totalPaise)
       walletRequestId = request.id
+      walletNeedsCapture = reserved
     }
     // 'WALLET' as the payment mode is only real when a confirmed redemption covers the whole sale;
     // otherwise it would record a wallet payment that no wallet was ever debited for.
@@ -461,6 +473,10 @@ export class VendorCounterOrdersService {
         `INSERT INTO store_order_status_events (store_order_id, vendor_id, from_status, to_status, actor_user_id) VALUES ($1,$2,NULL,'BOOKED',$3)`,
         [orderId, vendorId, actor.userId]
       )
+      if (walletNeedsCapture) {
+        const captured = await this.walletRedemption.captureInTransaction(client, { requestId: walletRequestId, vendorId, customerUserId: customerId, applyPaise: walletPaise })
+        if (!captured.ok) throw Object.assign(new Error(captured.message), { walletCapture: captured })
+      }
 
       if (walletPaise > 0) {
         await client.query(
@@ -522,6 +538,9 @@ export class VendorCounterOrdersService {
       void insert
     } catch (error) {
       await client.query('ROLLBACK')
+      // The wallet could not be charged (the approval lapsed, or the balance is no longer there): the whole booking is
+      // undone — no order, no wallet debit — and the operator is told why.
+      if (error.walletCapture) return fail(error.walletCapture.message, error.walletCapture.code, 409)
       throw error
     } finally {
       client.release()

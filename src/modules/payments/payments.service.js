@@ -6,6 +6,7 @@ import { orderQueue } from '../../config/bullmq.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
+import { WalletRedemptionRepository } from '../wallet-redemption/wallet-redemption.repository.js'
 import { query, getClient } from '../../config/database.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
@@ -280,9 +281,16 @@ export class PaymentsService {
         await client.query('ROLLBACK')
         return { success: false, message: 'Wallet not found' }
       }
-      if (wallet.balance < amountRupees) {
+      // What can be spent right now = balance minus any amount reserved for an in-store sale the customer approved.
+      const { availablePaise, heldPaise } = await new WalletRedemptionRepository().availablePaise(userId, client)
+      if (availablePaise < amountPaise) {
         await client.query('ROLLBACK')
-        return { success: false, message: `Insufficient wallet balance. Need ₹${amountRupees}, have ₹${wallet.balance}` }
+        return {
+          success: false,
+          message: heldPaise > 0
+            ? `Insufficient wallet balance. ₹${heldPaise / 100} of your wallet is reserved for an in-store payment you approved (it is released within 15 minutes if the sale is not completed). Available: ₹${Math.max(0, availablePaise) / 100}, needed: ₹${amountRupees}.`
+            : `Insufficient wallet balance. Need ₹${amountRupees}, have ₹${wallet.balance}`,
+        }
       }
 
       await this.walletRepo.debit(

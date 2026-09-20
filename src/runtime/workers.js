@@ -101,6 +101,12 @@ export async function startWorkerRuntime() {
   )
   startVendorPublishWorker()
 
+  // Returns any wallet money that left a customer's wallet for an in-store redemption no sale ever used.
+  const { startWalletReconcileWorker } = await import(
+    '../workers/wallet-reconcile.worker.js'
+  )
+  startWalletReconcileWorker()
+
   // Event-loop blocking detector (task 13.6) — logs warning when
   // the event loop is blocked for >100ms.
   startEventLoopMonitor()
