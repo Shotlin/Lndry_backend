@@ -6,6 +6,7 @@ import { amountForRule } from '../vendor-adjustment-rules/vendor-adjustment-rule
 import { VendorCustomerLedgerService } from '../vendor-customer-ledger/vendor-customer-ledger.service.js'
 import { VendorCashShiftsRepository } from '../vendor-cash-shifts/vendor-cash-shifts.repository.js'
 import { VendorProductionTasksService } from '../vendor-production-tasks/vendor-production-tasks.service.js'
+import { VendorPosCatalogueService } from '../vendor-pos-catalogue/vendor-pos-catalogue.service.js'
 import { scheduleInvoiceForDeliveredOrder } from '../invoices/invoice-jobs.js'
 
 const PAYMENT_MODES = ['CASH', 'UPI', 'CARD', 'BANK', 'WALLET']
@@ -107,12 +108,14 @@ export class VendorCounterOrdersService {
     adjustmentRulesRepo = new VendorAdjustmentRulesRepository(),
     ledger = new VendorCustomerLedgerService(),
     cashShifts = new VendorCashShiftsRepository(),
-    productionTasks = new VendorProductionTasksService()
+    productionTasks = new VendorProductionTasksService(),
+    posCatalogue = new VendorPosCatalogueService()
   ) {
     this.adjustmentRules = adjustmentRulesRepo
     this.ledger = ledger
     this.cashShifts = cashShifts
     this.productionTasks = productionTasks
+    this.posCatalogue = posCatalogue
   }
 
   // ── Customers ────────────────────────────────────────────────────────────
@@ -180,46 +183,59 @@ export class VendorCounterOrdersService {
 
   // ── Pricing ──────────────────────────────────────────────────────────────
 
-  async _priceItems(vendorId, items) {
+  /**
+   * Prices counter lines from the vendor's POS catalogue (pos_prices) — never from the marketplace
+   * rates, so a POS price of ₹90 is used even when the app price is ₹80. Lines name a POS garment
+   * and POS service; ids from before the POS catalogue existed (the LNDRY garment/service ids a
+   * saved draft may still hold) are matched through the link kept on the imported rows.
+   */
+  async _priceItems(vendorId, items, customerUserId = null) {
     if (!Array.isArray(items) || !items.length) return fail('Select at least one garment.')
+    const wanted = items.map((item) => ({ garment: item.garmentId ?? item.garmentTypeId, service: item.serviceId ?? item.vendorServiceId, qty: item.qty }))
+    const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+    if (wanted.some((line) => !uuid.test(String(line.garment)) || !uuid.test(String(line.service)))) return fail('Each garment line needs a garment and a service.')
     const seen = new Set()
-    for (const item of items) {
-      const key = `${item.garmentTypeId}:${item.vendorServiceId}`
+    for (const line of wanted) {
+      const key = `${line.garment}:${line.service}`
       if (seen.has(key)) return fail('Duplicate garment and service lines must be combined.')
       seen.add(key)
     }
+    await this.posCatalogue.ensureFresh(vendorId, { maxAgeMs: 10_000 })
     const { rows } = await query(
-      `SELECT r.rate_paise, r.is_active, vs.id AS vendor_service_id, vs.name AS service_name,
-              gt.id AS garment_type_id, gt.name AS garment_name, gt.unit
-       FROM unnest($2::uuid[], $3::uuid[]) AS want(service_id, garment_id)
-       JOIN vendor_service_rates r ON r.vendor_service_id = want.service_id AND r.garment_type_id = want.garment_id
-       JOIN vendor_services vs ON vs.id = r.vendor_service_id
-       JOIN garment_types gt ON gt.id = r.garment_type_id
-       WHERE vs.vendor_id = $1`,
-      [vendorId, items.map((i) => i.vendorServiceId), items.map((i) => i.garmentTypeId)]
+      `SELECT p.rate_paise, p.customer_user_id, p.active AS price_active,
+              g.id AS garment_id, g.name AS garment_name, g.unit, g.active AS garment_active, g.marketplace_garment_type_id,
+              s.id AS service_id, s.name AS service_name, s.active AS service_active, s.marketplace_service_id
+       FROM pos_prices p
+       JOIN pos_garments g ON g.id = p.garment_id AND g.vendor_id = p.vendor_id
+       JOIN pos_services s ON s.id = p.service_id AND s.vendor_id = p.vendor_id
+       WHERE p.vendor_id = $1 AND (p.customer_user_id IS NULL OR p.customer_user_id = $4)
+         AND (g.id = ANY($2::uuid[]) OR g.marketplace_garment_type_id = ANY($2::uuid[]))
+         AND (s.id = ANY($3::uuid[]) OR s.marketplace_service_id = ANY($3::uuid[]))`,
+      [vendorId, wanted.map((l) => l.garment), wanted.map((l) => l.service), customerUserId]
     )
-    const byKey = new Map(rows.map((r) => [`${r.garment_type_id}:${r.vendor_service_id}`, r]))
     const priced = []
     let subtotalPaise = 0
-    for (const item of items) {
-      const rate = byKey.get(`${item.garmentTypeId}:${item.vendorServiceId}`)
-      if (!rate || !rate.is_active) return fail('No active price exists for this garment and service.')
-      const qty = Number(item.qty)
+    for (const line of wanted) {
+      const matches = rows.filter((r) => (r.garment_id === line.garment || r.marketplace_garment_type_id === line.garment) && (r.service_id === line.service || r.marketplace_service_id === line.service))
+      // A price set for this customer wins over the general price.
+      const rate = matches.find((r) => r.customer_user_id && r.price_active && r.garment_active && r.service_active) || matches.find((r) => !r.customer_user_id && r.price_active && r.garment_active && r.service_active)
+      if (!rate) return fail('No active price exists for this garment and service.')
+      const qty = Number(line.qty)
       if (!Number.isFinite(qty) || qty <= 0) return fail('Each garment line needs a positive quantity.')
-      const isPiece = PIECE_UNITS.has(String(rate.unit).toLowerCase())
-      if (isPiece && !Number.isInteger(qty)) return fail(`${rate.garment_name} must be a whole number of pieces.`)
+      if (PIECE_UNITS.has(String(rate.unit).toLowerCase()) && !Number.isInteger(qty)) return fail(`${rate.garment_name} must be a whole number of pieces.`)
       const amountPaise = Math.round(rate.rate_paise * qty)
       subtotalPaise += amountPaise
       priced.push({
-        garmentTypeId: rate.garment_type_id, vendorServiceId: rate.vendor_service_id,
+        garmentId: rate.garment_id, serviceId: rate.service_id,
+        garmentTypeId: rate.marketplace_garment_type_id || null, vendorServiceId: rate.marketplace_service_id || null,
         name: rate.garment_name, serviceName: rate.service_name, unit: rate.unit, qty, ratePaise: rate.rate_paise, amountPaise,
       })
     }
     return { success: true, priced, subtotalPaise }
   }
 
-  async quote(vendorId, input) {
-    const items = await this._priceItems(vendorId, input.items)
+  async quote(vendorId, input, customerUserId = input.customer?.id || input.customerId || null) {
+    const items = await this._priceItems(vendorId, input.items, customerUserId)
     if (!items.success) return items
     const chargeIds = input.chargeRuleIds || []
     const discountIds = input.discountRuleIds || []
@@ -257,7 +273,7 @@ export class VendorCounterOrdersService {
     const customer = (await query('SELECT id, name, phone FROM users WHERE id = $1', [customerId])).rows[0]
     if (!customer) return fail('Customer not found', 'NOT_FOUND', 404)
 
-    const quoted = await this.quote(vendorId, input)
+    const quoted = await this.quote(vendorId, input, customerId)
     if (!quoted.success) return quoted
     const q = quoted.quote
 
@@ -336,9 +352,9 @@ export class VendorCounterOrdersService {
         for (let sequence = 1; sequence <= line.qty; sequence += 1) {
           const tagCode = tag('ELT')
           const unit = (await client.query(
-            `INSERT INTO vendor_garment_units (vendor_id, order_id, order_line_id, store_line_index, customer_user_id, garment_type_id, sequence, active_tag_code, created_by)
-             VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8) RETURNING id`,
-            [vendorId, orderId, index, customerId, line.garmentTypeId, sequence, tagCode, actor.userId]
+            `INSERT INTO vendor_garment_units (vendor_id, order_id, order_line_id, store_line_index, customer_user_id, garment_type_id, garment_name, sequence, active_tag_code, created_by)
+             VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+            [vendorId, orderId, index, customerId, line.garmentTypeId, line.name, sequence, tagCode, actor.userId]
           )).rows[0]
           await client.query('INSERT INTO vendor_garment_tag_history (unit_id, tag_code, issued_by) VALUES ($1,$2,$3)', [unit.id, tagCode, actor.userId])
           await client.query(
@@ -433,8 +449,8 @@ export class VendorCounterOrdersService {
     if (!order) return null
     const [units, containers, payments] = await Promise.all([
       query(
-        `SELECT gu.id, gu.active_tag_code, gu.sequence, gu.store_line_index, gu.state, gu.location, gu.condition, gu.created_at, gu.updated_at, gt.name AS garment_name
-         FROM vendor_garment_units gu JOIN garment_types gt ON gt.id = gu.garment_type_id
+        `SELECT gu.id, gu.active_tag_code, gu.sequence, gu.store_line_index, gu.state, gu.location, gu.condition, gu.created_at, gu.updated_at, COALESCE(gu.garment_name, gt.name) AS garment_name
+         FROM vendor_garment_units gu LEFT JOIN garment_types gt ON gt.id = gu.garment_type_id
          WHERE gu.vendor_id = $1 AND gu.order_id = $2 ORDER BY gu.store_line_index, gu.sequence`, [vendorId, id]),
       query(
         `SELECT id, tag_code, sequence, total_count, weight_kg, state, location, condition, created_at, updated_at, delivered_at
@@ -580,13 +596,13 @@ export class VendorCounterOrdersService {
     const where = ['gu.vendor_id = $1']
     if (orderId) { params.push(orderId); where.push(`gu.order_id = $${params.length}`) }
     if (state) { params.push(String(state).toUpperCase()); where.push(`gu.state = $${params.length}`) }
-    if (search) { params.push(`%${String(search).toLowerCase()}%`); where.push(`(lower(gu.active_tag_code) LIKE $${params.length} OR lower(gt.name) LIKE $${params.length})`) }
+    if (search) { params.push(`%${String(search).toLowerCase()}%`); where.push(`(lower(gu.active_tag_code) LIKE $${params.length} OR lower(COALESCE(gu.garment_name, gt.name, '')) LIKE $${params.length})`) }
     params.push(Math.min(Number(limit) || 300, 1000))
     const { rows } = await query(
       `SELECT gu.id, gu.order_id, gu.active_tag_code, gu.sequence, gu.store_line_index, gu.state, gu.location, gu.condition, gu.created_at, gu.updated_at,
-              gt.name AS garment_name, so.order_number, so.expected_delivery_date, so.items, cu.name AS customer_name, cu.phone AS customer_phone
+              COALESCE(gu.garment_name, gt.name) AS garment_name, so.order_number, so.expected_delivery_date, so.items, cu.name AS customer_name, cu.phone AS customer_phone
        FROM vendor_garment_units gu
-       JOIN garment_types gt ON gt.id = gu.garment_type_id
+       LEFT JOIN garment_types gt ON gt.id = gu.garment_type_id
        LEFT JOIN store_orders so ON so.id = gu.order_id
        LEFT JOIN users cu ON cu.id = gu.customer_user_id
        WHERE ${where.join(' AND ')} ORDER BY gu.created_at DESC, gu.sequence LIMIT $${params.length}`,

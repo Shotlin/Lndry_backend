@@ -12,14 +12,14 @@ export class VendorCounterViewsService {
   async unitView(vendorId, id) {
     const { rows } = await query(
       `SELECT gu.id, gu.order_id, gu.active_tag_code, gu.sequence, gu.store_line_index, gu.state, gu.location, gu.condition,
-              gt.name AS garment_name, gt.unit AS garment_unit,
+              COALESCE(gu.garment_name, gt.name) AS garment_name, gt.unit AS garment_unit,
               COALESCE(so.order_number, o.order_number) AS order_number,
               COALESCE(so.expected_delivery_date::text, NULL) AS expected_delivery_date, so.items,
               cu.name AS customer_name, cu.phone AS customer_phone,
               (SELECT COUNT(*)::int FROM vendor_garment_unit_events e WHERE e.unit_id = gu.id) AS event_count,
               (SELECT COUNT(*)::int FROM vendor_garment_unit_events e WHERE e.unit_id = gu.id AND e.event_type IN ('TAG_REPRINTED','TAG_REPLACED')) AS reprint_count
        FROM vendor_garment_units gu
-       JOIN garment_types gt ON gt.id = gu.garment_type_id
+       LEFT JOIN garment_types gt ON gt.id = gu.garment_type_id
        LEFT JOIN store_orders so ON so.id = gu.order_id
        LEFT JOIN orders o ON o.id = gu.order_id
        LEFT JOIN users cu ON cu.id = gu.customer_user_id
@@ -78,7 +78,7 @@ export class VendorCounterViewsService {
     if (status) { params.push(String(status).toUpperCase().replace(/\s+/g, '_')); where.push(`t.status = $${params.length}`) }
     const { rows } = await query(
       `SELECT t.id, t.garment_unit_id, t.station, t.kind, t.status, t.priority, t.reason, t.created_at, t.completed_at,
-              gu.active_tag_code, gt.name AS garment_name, COALESCE(so.order_number, o.order_number) AS order_number,
+              gu.active_tag_code, COALESCE(gu.garment_name, gt.name) AS garment_name, COALESCE(so.order_number, o.order_number) AS order_number,
               so.expected_delivery_date::text AS due, au.name AS assigned_name, t.assigned_to
        FROM vendor_production_tasks t
        LEFT JOIN vendor_garment_units gu ON gu.id = t.garment_unit_id
@@ -99,7 +99,7 @@ export class VendorCounterViewsService {
   async qualityClaims(vendorId) {
     const { rows } = await query(
       `SELECT q.id, q.garment_unit_id, q.category, q.severity, q.status, q.description, q.opened_at, q.decision, q.resolution_note,
-              gu.active_tag_code, gu.state, gt.name AS garment_name, COALESCE(so.order_number, o.order_number) AS order_number, ou.name AS opened_by_name,
+              gu.active_tag_code, gu.state, COALESCE(gu.garment_name, gt.name) AS garment_name, COALESCE(so.order_number, o.order_number) AS order_number, ou.name AS opened_by_name,
               c.id AS correction_id, c.summary AS correction_summary, c.customer_message, c.issued_at
        FROM vendor_quality_claims q
        LEFT JOIN vendor_garment_units gu ON gu.id = q.garment_unit_id

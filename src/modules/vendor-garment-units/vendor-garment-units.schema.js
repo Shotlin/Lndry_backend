@@ -4,7 +4,7 @@ const unitProperties = {
   orderId: { type: 'string' },
   orderLineId: { type: 'string' },
   customerUserId: { type: 'string' },
-  garmentTypeId: { type: 'string' },
+  garmentTypeId: { type: ['string', 'null'] },
   sequence: { type: 'integer' },
   activeTagCode: { type: 'string' },
   state: { type: 'string' },

@@ -2,6 +2,7 @@ import { query } from '../../config/database.js'
 import { success, error } from '../../utils/apiResponse.js'
 import { VendorCounterOrdersService } from './vendor-counter-orders.service.js'
 import { VendorCounterViewsService } from './vendor-counter-views.service.js'
+import { VendorPosCatalogueService } from '../vendor-pos-catalogue/vendor-pos-catalogue.service.js'
 
 // No body schemas on purpose: this app's AJV runs with removeAdditional:'all', which would strip every
 // field of a free-form body. Inputs are validated in the service instead.
@@ -15,6 +16,7 @@ const idParams = { type: 'object', required: ['id'], properties: { id: { type: '
 export default async function vendorCounterOrdersRoutes(fastify) {
   const service = new VendorCounterOrdersService()
   const views = new VendorCounterViewsService()
+  const posCatalogue = new VendorPosCatalogueService()
 
   fastify.addHook('preHandler', fastify.authenticate)
   fastify.addHook('preHandler', async (request, reply) => {
@@ -63,13 +65,8 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   fastify.get('/orders/:id/payments', { schema: { params: idParams } }, async (request, res) => res.send(success(await service.listPayments(request.vendorId, request.params.id))))
   fastify.post('/orders/:id/payments', { schema: { params: idParams} }, async (request, res) => reply(res, await service.collectPayment(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Payment recorded', 201))
 
-  // (garment, service) -> rate id, for features that reference a price line (service packages)
-  fastify.get('/rates', async (request, res) => {
-    const { rows } = await query(
-      `SELECT r.id, r.garment_type_id, r.vendor_service_id FROM vendor_service_rates r
-       JOIN vendor_services vs ON vs.id = r.vendor_service_id WHERE vs.vendor_id = $1 AND r.is_active = true`, [request.vendorId])
-    return res.send(success(rows.map((r) => ({ id: r.id, garmentTypeId: r.garment_type_id, vendorServiceId: r.vendor_service_id }))))
-  })
+  // (POS garment, POS service) -> LNDRY rate id, for features that reference a marketplace price line (service packages)
+  fastify.get('/rates', async (request, res) => res.send(success(await posCatalogue.listMarketplaceLinkedRates(request.vendorId))))
 
   // Cross-order tag views
   fastify.get('/garment-units', async (request, res) => res.send(success(await service.listGarmentUnits(request.vendorId, request.query))))
