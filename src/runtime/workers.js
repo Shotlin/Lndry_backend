@@ -93,6 +93,14 @@ export async function startWorkerRuntime() {
   )
   startAccountDeletionWorker()
 
+  // Publishes vendors to the customer marketplace as soon as they are
+  // service-ready (approved + services + slots + location) — see
+  // modules/vendors/vendor-publishing.js.
+  const { startVendorPublishWorker } = await import(
+    '../workers/vendor-publish.worker.js'
+  )
+  startVendorPublishWorker()
+
   // Event-loop blocking detector (task 13.6) — logs warning when
   // the event loop is blocked for >100ms.
   startEventLoopMonitor()

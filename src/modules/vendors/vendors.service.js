@@ -4,6 +4,7 @@ import { logger } from '../../config/logger.js'
 import { env } from '../../config/env.js'
 import { WatermarkService } from '../watermark/watermark.service.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
+import { autoPublishAfterChange } from './vendor-publishing.js'
 
 // Single source of truth for which onboarding documents block submission —
 // previously duplicated as three separate hardcoded arrays across
@@ -503,7 +504,14 @@ export class VendorsService {
       throw { statusCode: 400, message: 'Cannot publish vendor without at least one active service' }
     }
 
-    return this.repo.update(vendor.id, { is_active: true, marketplace_published: true })
+    const published = await this.repo.update(vendor.id, { is_active: true, marketplace_published: true })
+    // A vendor that has published themselves has used the one automatic
+    // publish, so an admin who unpublishes them later is not overruled.
+    await query(
+      `UPDATE vendors SET marketplace_auto_published_at = COALESCE(marketplace_auto_published_at, NOW()) WHERE id = $1`,
+      [vendor.id]
+    )
+    return published
   }
 
   async getPublicPreview(userId) {
@@ -1132,10 +1140,12 @@ export class VendorsService {
       `UPDATE vendor_services
        SET approval_status = 'APPROVED', approved_at = NOW(), approved_by = $2, rejection_reason = NULL, updated_at = NOW()
        WHERE id = $1 AND deleted_at IS NULL
-       RETURNING id, approval_status, approved_at`,
+       RETURNING id, vendor_id, approval_status, approved_at`,
       [serviceId, adminUserId]
     )
     if (!rows[0]) throw { statusCode: 404, message: 'Vendor service not found' }
+    // An approved service can be what makes the vendor service-ready.
+    autoPublishAfterChange(rows[0].vendor_id)
 
     // Approval resolves any earlier price-recalculation note — the price
     // is now signed off, so it shouldn't keep showing as an unresolved flag.
@@ -1368,6 +1378,8 @@ export class VendorsService {
        RETURNING id, day_of_week, start_time, end_time, max_orders, is_active`,
       [vendorId, data.day_of_week, data.start, data.end, data.max_orders || 5]
     )
+    // The first active slot can be what makes a vendor service-ready.
+    autoPublishAfterChange(vendorId)
     return rows[0]
   }
 
@@ -1417,6 +1429,7 @@ export class VendorsService {
        RETURNING id, day_of_week, start_time, end_time, max_orders, is_active`,
       params
     )
+    if (rows[0]) autoPublishAfterChange(vendorId)
     return rows[0] || null
   }
 
