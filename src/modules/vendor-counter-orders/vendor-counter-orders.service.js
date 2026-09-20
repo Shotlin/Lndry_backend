@@ -235,10 +235,13 @@ export class VendorCounterOrdersService {
     const { rows } = await query(
       `SELECT p.rate_paise, p.customer_user_id, p.active AS price_active,
               g.id AS garment_id, g.name AS garment_name, g.unit, g.active AS garment_active, g.marketplace_garment_type_id,
+              NULLIF(concat_ws(' / ', pc.name, c.name), '') AS category_name,
               s.id AS service_id, s.name AS service_name, s.active AS service_active, s.marketplace_service_id
        FROM pos_prices p
        JOIN pos_garments g ON g.id = p.garment_id AND g.vendor_id = p.vendor_id
        JOIN pos_services s ON s.id = p.service_id AND s.vendor_id = p.vendor_id
+       LEFT JOIN pos_categories c ON c.id = g.category_id AND c.vendor_id = p.vendor_id
+       LEFT JOIN pos_categories pc ON pc.id = c.parent_id AND pc.vendor_id = p.vendor_id
        WHERE p.vendor_id = $1 AND (p.customer_user_id IS NULL OR p.customer_user_id = $4)
          AND (g.id = ANY($2::uuid[]) OR g.marketplace_garment_type_id = ANY($2::uuid[]))
          AND (s.id = ANY($3::uuid[]) OR s.marketplace_service_id = ANY($3::uuid[]))`,
@@ -259,7 +262,7 @@ export class VendorCounterOrdersService {
       priced.push({
         garmentId: rate.garment_id, serviceId: rate.service_id,
         garmentTypeId: rate.marketplace_garment_type_id || null, vendorServiceId: rate.marketplace_service_id || null,
-        name: rate.garment_name, serviceName: rate.service_name, unit: rate.unit, qty, ratePaise: rate.rate_paise, amountPaise,
+        name: rate.garment_name, serviceName: rate.service_name, categoryName: rate.category_name || null, unit: rate.unit, qty, ratePaise: rate.rate_paise, amountPaise,
       })
     }
     return { success: true, priced, subtotalPaise }
@@ -405,7 +408,7 @@ export class VendorCounterOrdersService {
           )
           tags.push({
             unitId: unit.id, tagNumber: tagCode, tagKind: 'garment', orderNumber, customer: customer.name || customer.phone,
-            garment: line.name, service: line.serviceName, sequence, total: line.qty,
+            garment: line.name, service: line.serviceName, category: line.categoryName || undefined, sequence, total: line.qty,
             orderDate: input.orderDate || new Date().toISOString().slice(0, 10), expectedDeliveryDate: input.expectedDeliveryDate,
           })
         }
