@@ -1,21 +1,52 @@
 import { query, getClient } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
 
+const SLOT_TZ_OFFSET_MS = 330 * 60 * 1000 // IST, UTC+05:30
+
 export class SlotsService {
-  async getAvailableSlots(vendorId, bookingDate) {
-    const dateObj = new Date(bookingDate)
-    if (!Number.isFinite(dateObj.getTime())) {
-      throw { statusCode: 400, message: 'Invalid booking date' }
+  /**
+   * The pickup slots this ONE vendor offers on [bookingDate] (a calendar day),
+   * with room left. Everything is derived from this vendor's own configured
+   * weekly slots — a day the vendor is closed simply has none, whatever any
+   * other vendor does.
+   *
+   * @param {string} vendorId
+   * @param {string} bookingDate `YYYY-MM-DD`
+   * @param {Date} [now] injectable clock (tests)
+   */
+  async getAvailableSlots(vendorId, bookingDate, now = new Date()) {
+    // The weekday belongs to the CALENDAR DATE itself, not to the server's
+    // timezone: read it from the date's own year/month/day.
+    const dayMatch = /^(\d{4})-(\d{2})-(\d{2})/.exec(`${bookingDate || ''}`)
+    let dayOfWeek
+    if (dayMatch) {
+      dayOfWeek = new Date(Date.UTC(Number(dayMatch[1]), Number(dayMatch[2]) - 1, Number(dayMatch[3]))).getUTCDay()
+    } else {
+      const dateObj = new Date(bookingDate)
+      if (!Number.isFinite(dateObj.getTime())) {
+        throw { statusCode: 400, message: 'Invalid booking date' }
+      }
+      dayOfWeek = dateObj.getDay() // 0 = Sunday, 6 = Saturday
     }
-    const dayOfWeek = dateObj.getDay() // 0 = Sunday, 6 = Saturday
 
     // 1. Get all configured slots for the day of week
-    const { rows: slots } = await query(
+    const { rows: allSlots } = await query(
       `SELECT id, vendor_id, day_of_week, start_time, end_time, max_orders, is_active
        FROM vendor_slots
        WHERE vendor_id = $1 AND day_of_week = $2 AND is_active = true`,
       [vendorId, dayOfWeek]
     )
+
+    // A slot that has already ended today can't be booked. (Pickups are served
+    // in India Standard Time.)
+    const ist = new Date(now.getTime() + SLOT_TZ_OFFSET_MS)
+    const todayIst = ist.toISOString().slice(0, 10)
+    const nowTimeIst = ist.toISOString().slice(11, 19)
+    const bookingDay = dayMatch ? `${dayMatch[1]}-${dayMatch[2]}-${dayMatch[3]}` : null
+    const slots =
+      bookingDay === todayIst
+        ? allSlots.filter((slot) => `${slot.end_time}` > nowTimeIst)
+        : allSlots
 
     if (slots.length === 0) {
       return []
