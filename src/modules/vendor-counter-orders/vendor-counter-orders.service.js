@@ -8,10 +8,15 @@ import { VendorCashShiftsRepository } from '../vendor-cash-shifts/vendor-cash-sh
 import { VendorProductionTasksService } from '../vendor-production-tasks/vendor-production-tasks.service.js'
 import { VendorPosCatalogueService } from '../vendor-pos-catalogue/vendor-pos-catalogue.service.js'
 import { scheduleInvoiceForDeliveredOrder } from '../invoices/invoice-jobs.js'
+import { VendorGarmentUnitsRepository } from '../vendor-garment-units/vendor-garment-units.repository.js'
+import { VendorLaundryContainersRepository } from '../vendor-laundry-containers/vendor-laundry-containers.repository.js'
+import { logger } from '../../config/logger.js'
 import { getVendorCapabilities, WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED } from '../vendors/vendor-tier.js'
 
 const PAYMENT_MODES = ['CASH', 'UPI', 'CARD', 'BANK', 'WALLET']
 const PIECE_UNITS = new Set(['piece', 'pc', 'pcs', 'pair'])
+// Garment states that can still be walked forward to ASSEMBLY. (MISSING is deliberately not among them.)
+const ADVANCEABLE_UNIT_STATES = ['INTAKE', 'SORTED', 'PROCESSING', 'QC', 'REWASH']
 const STATES = ['BOOKED', 'PICKED_UP', 'IN_PROCESS', 'READY', 'OUT_FOR_DELIVERY', 'DELIVERED', 'CANCELLED']
 const NEXT_STATES = {
   BOOKED: ['PICKED_UP', 'IN_PROCESS', 'CANCELLED'],
@@ -23,7 +28,6 @@ const NEXT_STATES = {
   CANCELLED: [],
 }
 // A garment must be at assembly (or beyond) before the order can be called ready.
-const NOT_READY_UNIT_STATES = ['INTAKE', 'SORTED', 'PROCESSING', 'QC', 'REWASH', 'MISSING']
 
 // pg returns DATE columns as Date objects at local midnight — format them without shifting the day.
 export const dateOnly = (value) => {
@@ -35,6 +39,22 @@ const digits = (value) => String(value ?? '').replace(/\D/g, '')
 const tag = (prefix) => `${prefix}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 const referralCode = () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join('')
 const fail = (message, code = 'VALIDATION_ERROR', status = 400) => ({ success: false, message, code, status })
+// Shortest legal sequence of states from `from` to `to` (excluding `from`), or null.
+function statePath(transitions, from, to) {
+  if (from === to) return []
+  const seen = new Set([from])
+  const queue = [[from]]
+  while (queue.length) {
+    const path = queue.shift()
+    for (const next of transitions[path[path.length - 1]] || []) {
+      if (seen.has(next)) continue
+      if (next === to) return [...path.slice(1), next]
+      seen.add(next)
+      queue.push([...path, next])
+    }
+  }
+  return null
+}
 // 10 -> "10", 7.5 -> "7.5", 2.333 -> "2.33"
 const percentText = (percent) => String(Number(Number(percent).toFixed(2)))
 
@@ -113,8 +133,12 @@ export class VendorCounterOrdersService {
     ledger = new VendorCustomerLedgerService(),
     cashShifts = new VendorCashShiftsRepository(),
     productionTasks = new VendorProductionTasksService(),
-    posCatalogue = new VendorPosCatalogueService()
+    posCatalogue = new VendorPosCatalogueService(),
+    garmentUnitsRepo = new VendorGarmentUnitsRepository(),
+    containersRepo = new VendorLaundryContainersRepository()
   ) {
+    this.garmentUnitsRepo = garmentUnitsRepo
+    this.containersRepo = containersRepo
     this.adjustmentRules = adjustmentRulesRepo
     this.ledger = ledger
     this.cashShifts = cashShifts
@@ -362,7 +386,14 @@ export class VendorCounterOrdersService {
     // Using the LNDRY wallet at the POS counter is a Partner/Exclusive feature (app checkout is
     // unaffected); a Standard vendor's POS can neither redeem
     // from it nor record a sale as paid by it.
-    if ((input.walletRedemption?.requestId || mode === 'WALLET') && !(await getVendorCapabilities(vendorId)).walletAccess) {
+    // Applying a redemption the customer ALREADY confirmed is settling a debit that happened while this vendor had
+    // wallet access, so it still works if the vendor's type changed in between (otherwise the customer would be out of
+    // pocket for a sale that cannot be booked). Anything new needs wallet access right now.
+    const redemptionId = input.walletRedemption?.requestId
+    const confirmedEarlier = redemptionId
+      ? (await query(`SELECT 1 FROM wallet_redemption_requests WHERE id = $1 AND vendor_id = $2 AND status = 'CONFIRMED'`, [redemptionId, vendorId])).rows.length > 0
+      : false
+    if ((redemptionId || mode === 'WALLET') && !confirmedEarlier && !(await getVendorCapabilities(vendorId)).walletAccess) {
       return fail(WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED, 403)
     }
 
@@ -424,6 +455,11 @@ export class VendorCounterOrdersService {
           input.deliveryAddress || null, input.serviceZone || null, input.notes ? String(input.notes).slice(0, 1000) : null, input.photoPath || null,
           JSON.stringify(q.breakdown),
         ]
+      )
+
+      await client.query(
+        `INSERT INTO store_order_status_events (store_order_id, vendor_id, from_status, to_status, actor_user_id) VALUES ($1,$2,NULL,'BOOKED',$3)`,
+        [orderId, vendorId, actor.userId]
       )
 
       if (walletPaise > 0) {
@@ -541,7 +577,7 @@ export class VendorCounterOrdersService {
   async getDetail(vendorId, id) {
     const order = await this.getOrder(vendorId, id)
     if (!order) return null
-    const [units, containers, payments] = await Promise.all([
+    const [units, containers, payments, history] = await Promise.all([
       query(
         `SELECT gu.id, gu.active_tag_code, gu.sequence, gu.store_line_index, gu.state, gu.location, gu.condition, gu.created_at, gu.updated_at, COALESCE(gu.garment_name, gt.name) AS garment_name
          FROM vendor_garment_units gu LEFT JOIN garment_types gt ON gt.id = gu.garment_type_id
@@ -550,9 +586,14 @@ export class VendorCounterOrdersService {
         `SELECT id, tag_code, sequence, total_count, weight_kg, state, location, condition, created_at, updated_at, delivered_at
          FROM vendor_laundry_containers WHERE vendor_id = $1 AND order_id = $2 ORDER BY sequence`, [vendorId, id]),
       this.listPayments(vendorId, id),
+      query(
+        `SELECT e.id, e.from_status, e.to_status, e.note, e.created_at, u.name AS actor_name
+         FROM store_order_status_events e LEFT JOIN users u ON u.id = e.actor_user_id
+         WHERE e.store_order_id = $1 AND e.vendor_id = $2 ORDER BY e.created_at, e.id`, [id, vendorId]),
     ])
     return {
       order,
+      history: history.rows.map((e) => ({ id: e.id, from: e.from_status, to: e.to_status, note: e.note, by: e.actor_name || null, at: e.created_at })),
       units: units.rows.map((u) => ({ id: u.id, tagCode: u.active_tag_code, sequence: u.sequence, itemIndex: u.store_line_index, state: u.state, location: u.location, condition: u.condition, garmentName: u.garment_name, createdAt: u.created_at, updatedAt: u.updated_at })),
       containers: containers.rows.map((c) => ({ id: c.id, tagCode: c.tag_code, sequence: c.sequence, total: c.total_count, weightKg: c.weight_kg == null ? null : Number(c.weight_kg), state: c.state, location: c.location, condition: c.condition, createdAt: c.created_at, updatedAt: c.updated_at, deliveredAt: c.delivered_at })),
       payments,
@@ -586,6 +627,50 @@ export class VendorCounterOrdersService {
     return { success: true, order: await this.getOrder(vendorId, id) }
   }
 
+  /**
+   * Moves the order from the status the operator saw to the new one, and writes the history row, in ONE
+   * statement. Returns false when the order is no longer in that status (someone else moved it first).
+   */
+  async _moveStatus(vendorId, id, fromStatus, toStatus, actor, { reason = null, note = null } = {}) {
+    const { rows } = await query(
+      `WITH moved AS (
+         UPDATE store_orders SET status = $3, cancel_reason = COALESCE($6, cancel_reason), version = version + 1, updated_at = NOW()
+         WHERE id = $1 AND vendor_id = $2 AND status = $4 RETURNING id
+       )
+       INSERT INTO store_order_status_events (store_order_id, vendor_id, from_status, to_status, actor_user_id, note)
+       SELECT id, $2, $4, $3, $5, $7 FROM moved RETURNING id`,
+      [id, vendorId, toStatus, fromStatus, actor.userId, reason, note]
+    )
+    return rows.length > 0
+  }
+
+  /**
+   * "Mark ready anyway": garments and bags that were never scanned through the floor are moved forward along the
+   * legal path to ASSEMBLY / READY, each step written to the tag's own history, so the order and its tags agree.
+   */
+  async _advanceForReady(vendorId, actor, orderId) {
+    const note = 'Advanced with the order: it was marked Ready by the operator before this tag was scanned through every stage'
+    const units = (await query(`SELECT id, state, location, condition FROM vendor_garment_units WHERE vendor_id = $1 AND order_id = $2 AND state = ANY($3::text[])`, [vendorId, orderId, ADVANCEABLE_UNIT_STATES])).rows
+    for (const unit of units) {
+      let from = unit.state
+      for (const to of statePath(VendorGarmentUnitsRepository.TRANSITIONS, unit.state, 'ASSEMBLY') || []) {
+        await this.garmentUnitsRepo.transition(unit.id, { state: to, location: unit.location, condition: unit.condition })
+        await this.garmentUnitsRepo.appendEvent(unit.id, { eventType: 'STATE_TRANSITION', fromState: from, toState: to, location: unit.location, note, actorId: actor.userId })
+        await this.productionTasks.onGarmentUnitTransitioned(vendorId, actor.userId, { garmentUnitId: unit.id, orderId, nextState: to, note })
+        from = to
+      }
+    }
+    const bags = (await query(`SELECT id, state, location, condition FROM vendor_laundry_containers WHERE vendor_id = $1 AND order_id = $2 AND state IN ('INTAKE','PROCESSING')`, [vendorId, orderId])).rows
+    for (const bag of bags) {
+      let from = bag.state
+      for (const to of statePath(VendorLaundryContainersRepository.TRANSITIONS, bag.state, 'READY') || []) {
+        await this.containersRepo.transition(bag.id, { state: to, location: bag.location, condition: bag.condition, deliveredAt: null })
+        await this.containersRepo.appendEvent(bag.id, { eventType: 'STATE_TRANSITION', fromState: from, toState: to, location: bag.location, note, actorId: actor.userId })
+        from = to
+      }
+    }
+  }
+
   async transition(vendorId, actor, id, targetState, extra = {}) {
     const target = String(targetState || '').toUpperCase().replace(/\s+/g, '_')
     if (!STATES.includes(target)) return fail('Unknown order state')
@@ -595,21 +680,38 @@ export class VendorCounterOrdersService {
     if (!NEXT_STATES[order.status]?.includes(target)) return fail(`An order that is ${order.status.replace(/_/g, ' ').toLowerCase()} cannot move to ${target.replace(/_/g, ' ').toLowerCase()}`, 'INVALID_TRANSITION', 409)
     if (target === 'CANCELLED') return this.cancel(vendorId, actor, id, extra.reason)
 
+    let advanced = null
     if (target === 'READY') {
       const { rows } = await query(
         `SELECT
            (SELECT COUNT(*) FROM vendor_garment_units WHERE vendor_id = $1 AND order_id = $2 AND state = ANY($3::text[]))::int AS garments,
-           (SELECT COUNT(*) FROM vendor_laundry_containers WHERE vendor_id = $1 AND order_id = $2 AND state IN ('INTAKE','MISSING'))::int AS bags`,
-        [vendorId, id, NOT_READY_UNIT_STATES]
+           (SELECT COUNT(*) FROM vendor_garment_units WHERE vendor_id = $1 AND order_id = $2 AND state = 'MISSING')::int AS missing_garments,
+           (SELECT COUNT(*) FROM vendor_laundry_containers WHERE vendor_id = $1 AND order_id = $2 AND state = 'INTAKE')::int AS bags,
+           (SELECT COUNT(*) FROM vendor_laundry_containers WHERE vendor_id = $1 AND order_id = $2 AND state = 'MISSING')::int AS missing_bags`,
+        [vendorId, id, ADVANCEABLE_UNIT_STATES]
       )
-      const { garments, bags } = rows[0]
-      if (garments > 0) return fail(`${garments} garment(s) have not reached assembly yet — scan them through processing first.`, 'ASSEMBLY_INCOMPLETE', 409)
-      if (bags > 0) return fail(`${bags} bag(s) are still at intake — scan them into processing first.`, 'ASSEMBLY_INCOMPLETE', 409)
+      const { garments, missing_garments: missingGarments, bags, missing_bags: missingBags } = rows[0]
+      // A garment or bag that is MISSING can never be waved through — it has to be found or resolved first.
+      if (missingGarments > 0 || missingBags > 0) {
+        return fail(`${missingGarments + missingBags} item(s) are marked missing — find or resolve them before marking the order ready.`, 'ASSEMBLY_INCOMPLETE', 409)
+      }
+      if (garments > 0 || bags > 0) {
+        if (!extra.allowIncomplete) {
+          const parts = [garments > 0 && `${garments} garment(s) have not reached assembly yet`, bags > 0 && `${bags} bag(s) are still at intake`].filter(Boolean)
+          return fail(`${parts.join(' and ')} — scan them through processing first, or mark the order ready anyway.`, 'ASSEMBLY_INCOMPLETE', 409)
+        }
+        advanced = { garments, bags }
+      }
     }
     if (target === 'DELIVERED' && order.paymentStatus !== 'PAID' && !extra.allowUnpaid) {
       return fail('This order still has an outstanding balance. Collect payment first.', 'PAYMENT_OUTSTANDING', 409)
     }
-    await query('UPDATE store_orders SET status = $3, version = version + 1, updated_at = NOW() WHERE id = $1 AND vendor_id = $2', [id, vendorId, target])
+    const overrides = [advanced && 'tags advanced to match', target === 'DELIVERED' && order.paymentStatus !== 'PAID' && 'delivered with balance due'].filter(Boolean)
+    const moved = await this._moveStatus(vendorId, id, order.status, target, actor, { note: overrides.length ? `Operator override: ${overrides.join('; ')}` : null })
+    if (!moved) return fail('This order was changed by someone else. Reload and try again.', 'VERSION_CONFLICT', 409)
+    if (advanced) {
+      try { await this._advanceForReady(vendorId, actor, id) } catch (error) { logger.warn({ err: error.message, orderId: id }, 'Advancing tags for a ready order failed (order status was already updated)') }
+    }
     if (target === 'DELIVERED') {
       await query(`UPDATE vendor_garment_units SET state = 'DELIVERED', updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state IN ('ASSEMBLY','RACKED','DISPATCHED')`, [vendorId, id])
       await query(`UPDATE vendor_laundry_containers SET state = 'DELIVERED', delivered_at = NOW(), updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state IN ('READY','DISPATCHED','PROCESSING')`, [vendorId, id])
@@ -617,7 +719,7 @@ export class VendorCounterOrdersService {
     }
     emitAudit('vendor_counter_order_transitioned', {
       actor_user_id: actor.userId, actor_role: actor.role, target_type: 'store_order', target_id: id,
-      before: { status: order.status }, after: { status: target }, ip_address: actor.ip, user_agent: actor.userAgent,
+      before: { status: order.status }, after: { status: target, ...(overrides.length ? { overrides } : {}) }, ip_address: actor.ip, user_agent: actor.userAgent,
     })
     return { success: true, order: await this.getOrder(vendorId, id) }
   }
@@ -628,7 +730,7 @@ export class VendorCounterOrdersService {
     if (['DELIVERED', 'CANCELLED'].includes(order.status)) return fail('This order can no longer be cancelled', 'INVALID_TRANSITION', 409)
     const why = String(reason || '').trim()
     if (why.length < 3) return fail('Give a reason for cancelling this order')
-    await query(`UPDATE store_orders SET status = 'CANCELLED', cancel_reason = $3, version = version + 1, updated_at = NOW() WHERE id = $1 AND vendor_id = $2`, [id, vendorId, why.slice(0, 500)])
+    if (!(await this._moveStatus(vendorId, id, order.status, 'CANCELLED', actor, { reason: why.slice(0, 500) }))) return fail('This order was changed by someone else. Reload and try again.', 'VERSION_CONFLICT', 409)
     await query(`UPDATE vendor_garment_units SET state = 'CANCELLED', updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state NOT IN ('DELIVERED')`, [vendorId, id])
     await query(`UPDATE vendor_laundry_containers SET state = 'CANCELLED', updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state NOT IN ('DELIVERED')`, [vendorId, id])
     emitAudit('vendor_counter_order_cancelled', {

@@ -71,6 +71,7 @@ export class WalletRedemptionService {
 
     // Lazy-expiry sweep for this customer before the insert — see repo comment.
     await this.repo.expirePendingForCustomer(customerUserId)
+    for (const staleId of await this.repo.cancelPendingForVendor(vendorId, customerUserId)) await redis.del(redisKey(staleId))
 
     const rawOtp = Math.floor(100000 + Math.random() * 900000).toString()
     const otpHash = await bcrypt.hash(rawOtp, 12)

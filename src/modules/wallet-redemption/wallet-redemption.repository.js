@@ -32,6 +32,21 @@ export class WalletRedemptionRepository {
     )
   }
 
+  /**
+   * A new request from a vendor replaces that SAME vendor's still-pending one for this customer (a fresh
+   * code is issued) instead of failing with "already in progress" — e.g. after the operator reloaded the
+   * screen or the vendor's type was switched back and forth. Another vendor's pending request is left alone.
+   */
+  async cancelPendingForVendor(vendorId, customerUserId) {
+    const { rows } = await query(
+      `UPDATE wallet_redemption_requests SET status = 'CANCELLED', updated_at = NOW()
+       WHERE vendor_id = $1 AND customer_user_id = $2 AND status = 'PENDING'
+       RETURNING id`,
+      [vendorId, customerUserId]
+    )
+    return rows.map((row) => row.id)
+  }
+
   async create({ customerUserId, vendorId, requestedByUserId, amountPaise, otpHash, expiresAt }) {
     // AS wrr: the shared COLUMNS constant's RETURNING references are all
     // wrr.-prefixed (matching the SELECT queries below, which do have a
