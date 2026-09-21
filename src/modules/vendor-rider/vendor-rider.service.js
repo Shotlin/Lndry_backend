@@ -16,6 +16,17 @@ import { orderQueue } from '../../config/bullmq.js'
  */
 import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
 
+/**
+ * An assisted booking ("Book With Expert Check") has no order lines until the
+ * laundry inspects the garments and picks services. The Captain app's pickup
+ * screens are built around at least one line (count it, photograph it), so at
+ * PICKUP only, the job detail presents ONE stand-in line — never stored — and
+ * the measurement/photo endpoints accept it and record it as a note/evidence
+ * instead of touching totals. The Captain app itself is unchanged.
+ */
+export const ASSISTED_PICKUP_LINE_ID = '00000000-0000-4000-8000-00000000a551'
+const ASSISTED_PICKUP_LINE_NAME = 'Garments (assisted booking)'
+
 export class VendorRiderService {
   constructor({ fastify, otpService } = {}) {
     this.otpService = otpService || new OrderOtpService()
@@ -116,7 +127,7 @@ export class VendorRiderService {
       `SELECT oa.id AS assignment_id, oa.order_id, oa.assignment_type, oa.assigned_at,
               o.order_number, o.status AS order_status, o.delivery_address,
               o.scheduled_slot_label, o.vendor_delivery_slot_label, o.vendor_delivery_slot_at,
-              o.payment_method, o.total_amount,
+              o.payment_method, o.total_amount, o.booking_type,
               (SELECT COALESCE(SUM(amount), 0) FROM payments WHERE order_id = o.id AND status = 'PAID') AS amount_paid,
               u.name AS customer_name, u.phone AS customer_phone
        FROM order_assignments oa
@@ -143,14 +154,19 @@ export class VendorRiderService {
       [orderId]
     )
 
+    const lines = linesRes.rows.map((l) => ({
+      id: l.id,
+      garment_name: l.garment_name,
+      unit: l.unit,
+      quantity: l.quantity,
+    }))
+    if (row.booking_type === 'ASSISTED' && row.assignment_type === 'PICKUP' && lines.length === 0) {
+      lines.push({ id: ASSISTED_PICKUP_LINE_ID, garment_name: ASSISTED_PICKUP_LINE_NAME, unit: 'piece', quantity: 1 })
+    }
+
     return {
       ...this._mapJobRow(row),
-      lines: linesRes.rows.map((l) => ({
-        id: l.id,
-        garment_name: l.garment_name,
-        unit: l.unit,
-        quantity: l.quantity,
-      })),
+      lines,
     }
   }
 
@@ -431,10 +447,12 @@ export class VendorRiderService {
     }
 
     for (const photo of photos) {
+      // The assisted-booking stand-in line is not a real order_lines row.
+      const lineId = photo.order_line_id === ASSISTED_PICKUP_LINE_ID ? null : (photo.order_line_id || null)
       await query(
         `INSERT INTO order_pickup_photos (order_id, order_line_id, photo_url, is_grouped, uploaded_by)
          VALUES ($1, $2, $3, $4, $5)`,
-        [orderId, photo.order_line_id || null, photo.url, !!photo.is_grouped, userId]
+        [orderId, lineId, photo.url, !!photo.is_grouped, userId]
       )
     }
     return { orderId, photosSaved: photos.length }
@@ -460,7 +478,7 @@ export class VendorRiderService {
       await client.query('BEGIN')
 
       const { rows } = await client.query(
-        `SELECT id, status, fee_breakdown, estimated_amount_paise, payable_amount_paise
+        `SELECT id, status, fee_breakdown, estimated_amount_paise, payable_amount_paise, booking_type
          FROM orders WHERE id = $1 FOR UPDATE`,
         [orderId]
       )
@@ -479,6 +497,29 @@ export class VendorRiderService {
          FROM order_lines WHERE order_id = $1`,
         [orderId]
       )
+
+      // Assisted booking, nothing priced yet: the captain's count is only a
+      // hint for the laundry — record it, change no money.
+      if (order.booking_type === 'ASSISTED' && linesRes.rows.length === 0) {
+        const counted = (confirmedLines || []).find((l) => l.order_line_id === ASSISTED_PICKUP_LINE_ID)?.confirmed_quantity
+        if (Number.isFinite(counted) && counted > 0) {
+          await recordOrderEvent(client, {
+            orderId,
+            oldStatus: order.status,
+            newStatus: order.status,
+            actorId: userId,
+            actorRole: rider.role,
+            note: `Captain counted ${counted} piece(s) at pickup (assisted booking — not priced yet)`,
+          })
+        }
+        await client.query('COMMIT')
+        return {
+          orderId,
+          old_subtotal_paise: 0,
+          new_subtotal_paise: 0,
+          new_payable_amount_paise: Number(order.payable_amount_paise || 0),
+        }
+      }
 
       const computed = computeRecalculatedTotals({
         orderRow: order,

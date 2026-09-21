@@ -139,7 +139,7 @@ export class VendorOrdersService {
               o.payment_method, o.payment_status,
               o.delivery_address, o.vendor_slot_id, o.pickup_date,
               o.estimated_amount_paise, o.payable_amount_paise, o.fee_breakdown,
-              o.processing_stage, o.pickup_otp, o.delivery_otp,
+              o.processing_stage, o.pickup_otp, o.delivery_otp, o.booking_type,
               o.created_at, o.updated_at,
               u.name AS customer_name, u.phone AS customer_phone
        FROM orders o
@@ -503,11 +503,28 @@ export class VendorOrdersService {
       await client.query('BEGIN')
 
       const { rows } = await client.query(
-        `SELECT id, status, processing_stage, vendor_id FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
+        `SELECT id, status, processing_stage, vendor_id, booking_type FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
         [orderId, vendor.vendorId]
       )
       const order = rows[0]
       if (!order) throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
+
+      // An assisted booking ("Book With Expert Check") has no services yet —
+      // they are chosen through Re-evaluate and approved by the customer. Do
+      // not let it be washed/packed for free before that has happened.
+      if (order.booking_type === 'ASSISTED' && newStatus !== ORDER_STATUSES.RECEIVED_AT_VENDOR) {
+        const { rows: lineRows } = await client.query(
+          `SELECT 1 FROM order_lines WHERE order_id = $1 LIMIT 1`,
+          [orderId]
+        )
+        if (lineRows.length === 0) {
+          throw {
+            statusCode: 409,
+            message: 'This is an assisted booking. Choose the services first (Re-evaluate) and get the customer’s approval before processing.',
+            code: 'ASSISTED_SERVICE_SELECTION_REQUIRED',
+          }
+        }
+      }
 
       let currentLogicalStatus = order.status;
       if (order.status === 'PROCESSING' && order.processing_stage) {
@@ -621,16 +638,13 @@ export class VendorOrdersService {
     // redundant, less-specific set of general photos.
     const hasGeneralPhotos = Array.isArray(photoUrls) && photoUrls.length > 0
     const hasProblemReports = Array.isArray(requestedProblems) && requestedProblems.length > 0
-    if (!hasGeneralPhotos && !hasProblemReports) {
-      throw { statusCode: 400, message: 'At least one photo_urls entry or problems[] report is required', code: 'VALIDATION_ERROR' }
-    }
 
     const client = await getClient()
     try {
       await client.query('BEGIN')
 
       const { rows } = await client.query(
-        `SELECT id, status, user_id, vendor_id, fee_breakdown, estimated_amount_paise, payable_amount_paise
+        `SELECT id, status, user_id, vendor_id, fee_breakdown, estimated_amount_paise, payable_amount_paise, booking_type
          FROM orders WHERE id = $1 AND vendor_id = $2 FOR UPDATE`,
         [orderId, vendor.vendorId]
       )
@@ -653,6 +667,16 @@ export class VendorOrdersService {
         [orderId]
       )
       const linesById = new Map(linesRes.rows.map((l) => [l.id, l]))
+
+      // Evidence is required for a correction to an order the customer
+      // specified. An assisted booking ("Book With Expert Check") that has no
+      // lines yet is different: the customer chose nothing, so the laundry is
+      // *choosing* the services rather than disputing anything — there is no
+      // problem to evidence. (Photos / problem reports are still accepted.)
+      const isAssistedSelection = order.booking_type === 'ASSISTED' && linesRes.rows.length === 0
+      if (!isAssistedSelection && !hasGeneralPhotos && !hasProblemReports) {
+        throw { statusCode: 400, message: 'At least one photo_urls entry or problems[] report is required', code: 'VALIDATION_ERROR' }
+      }
 
       // Reclassification (100% of an existing line moves to a different
       // service, e.g. a delicate item selected under a per-kg wash actually

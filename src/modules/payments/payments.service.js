@@ -8,6 +8,7 @@ import { OrdersRepository } from '../orders/orders.repository.js'
 import { WalletRepository } from '../wallet/wallet.repository.js'
 import { WalletRedemptionRepository } from '../wallet-redemption/wallet-redemption.repository.js'
 import { query, getClient } from '../../config/database.js'
+import { getAdvanceAmountPaise } from '../../utils/advance-amount.js'
 
 const INLINE_AUTO_ASSIGN_IN_NON_PROD =
   process.env.AUTO_ASSIGN_INLINE === 'true' ||
@@ -42,14 +43,7 @@ export class PaymentsService {
    * lookup pattern already used elsewhere for store-level settings.
    */
   async _getAdvanceAmountPaise() {
-    try {
-      const { rows } = await query(`SELECT value FROM app_settings WHERE key = 'order_advance_amount_paise'`)
-      const parsed = Number(rows[0]?.value)
-      return Number.isFinite(parsed) && parsed > 0 ? parsed : 5000
-    } catch (err) {
-      logger.warn({ err: err.message }, 'Failed to read configurable advance amount, using default')
-      return 5000
-    }
+    return getAdvanceAmountPaise()
   }
 
   /**
@@ -70,7 +64,7 @@ export class PaymentsService {
     let purpose = requestedPurpose
 
     if (orderDraftIdVal) {
-      const draftRes = await query('SELECT id, payable_amount_paise FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
+      const draftRes = await query('SELECT id, payable_amount_paise, booking_type FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
       const draft = draftRes.rows[0]
       if (!draft) {
         return { success: false, message: 'Order draft not found' }
@@ -78,8 +72,13 @@ export class PaymentsService {
       purpose = purpose || 'ADVANCE'
       const advancePaise = await this._getAdvanceAmountPaise()
       // Never charge more than the order's own estimate, so a tiny order
-      // isn't forced to overpay the configured advance.
-      amountPaise = Math.min(advancePaise, draft.payable_amount_paise)
+      // isn't forced to overpay the configured advance. An assisted booking
+      // has no service price yet (the laundry sets it after inspecting the
+      // garments), so its draft only carries pickup/platform fees — the
+      // advance is always the full configured amount.
+      amountPaise = draft.booking_type === 'ASSISTED'
+        ? advancePaise
+        : Math.min(advancePaise, draft.payable_amount_paise)
       amountRupees = amountPaise / 100
       receipt = draft.id
     } else if (orderId) {
@@ -232,7 +231,7 @@ export class PaymentsService {
     let purpose
 
     if (orderDraftIdVal) {
-      const draftRes = await query('SELECT id, payable_amount_paise FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
+      const draftRes = await query('SELECT id, payable_amount_paise, booking_type FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
       const draft = draftRes.rows[0]
       if (!draft) {
         return { success: false, message: 'Order draft not found' }
@@ -243,7 +242,10 @@ export class PaymentsService {
       }
       purpose = 'ADVANCE'
       const advancePaise = await this._getAdvanceAmountPaise()
-      amountPaise = Math.min(advancePaise, draft.payable_amount_paise)
+      // Assisted booking: no service price yet → always the full advance.
+      amountPaise = draft.booking_type === 'ASSISTED'
+        ? advancePaise
+        : Math.min(advancePaise, draft.payable_amount_paise)
     } else if (orderId) {
       const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
       if (!order) {

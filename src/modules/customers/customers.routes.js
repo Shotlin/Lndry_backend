@@ -5,6 +5,8 @@ import { query } from '../../config/database.js'
 import { HelpFaqsRepository } from '../admin/help-faqs/help-faqs.repository.js'
 import { publicFaqsSchema } from '../admin/help-faqs/help-faqs.schema.js'
 import { customerAccountDeletionRoutes } from '../admin/account-deletion/account-deletion.routes.js'
+import { AssistedBookingService } from '../admin/assisted-booking/assisted-booking.service.js'
+import { publicAssistedBookingSchema } from '../admin/assisted-booking/assisted-booking.schema.js'
 
 export default async function customerRoutes(fastify) {
   const repository = new UsersRepository()
@@ -40,6 +42,17 @@ export default async function customerRoutes(fastify) {
       faqs.map(({ id, question, answer }) => ({ id, question, answer })),
       'FAQs fetched successfully'
     ))
+  })
+
+  // GET /assisted-booking?vendor_id= — is "Book With Expert Check" offered for
+  // this laundry, and the admin-editable wording for it (dashboard → Categories
+  // → Assisted Booking). Public on purpose: the vendor page is browsable before
+  // sign-in. `available` is decided by the same rule the quote endpoint
+  // enforces, so a button shown here is never refused there.
+  const assistedBookingService = new AssistedBookingService()
+  fastify.get('/assisted-booking', { schema: publicAssistedBookingSchema }, async (request, reply) => {
+    const config = await assistedBookingService.getPublicConfig(request.query.vendor_id || null)
+    return reply.code(200).send(success(config, 'Assisted booking config fetched successfully'))
   })
 
   // POST/GET /account-deletion — customer "Delete Account" request + status.

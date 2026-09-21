@@ -3,8 +3,11 @@ import { redis } from '../../config/redis.js'
 import { query } from '../../config/database.js'
 import { success, error } from '../../utils/apiResponse.js'
 import { checkVendorEligibility } from './vendor-eligibility.js'
+import { AssistedBookingService } from '../admin/assisted-booking/assisted-booking.service.js'
 
 export default async function quotesRoutes(fastify) {
+  const assistedBooking = new AssistedBookingService()
+
   // POST /api/v1/quotes -> Generate quote
   fastify.post('/', {
     preHandler: [fastify.authenticate, fastify.authorize(['CUSTOMER'])],
@@ -35,18 +38,49 @@ export default async function quotesRoutes(fastify) {
               }
             }
           },
-          estimated_weight_kg: { type: 'number', minimum: 0.1 }
+          estimated_weight_kg: { type: 'number', minimum: 0.1 },
+          // 'ASSISTED' = "Book With Expert Check": no garments/services are
+          // chosen here — the laundry inspects them and sets the price
+          // through the normal re-evaluation flow.
+          booking_type: { type: 'string', enum: ['STANDARD', 'ASSISTED'] }
         }
       }
     }
   }, async (request, reply) => {
-    const { vendor_id, service_id, garment_lines, estimated_weight_kg } = request.body
+    const { vendor_id, service_id, garment_lines, estimated_weight_kg, booking_type } = request.body
     const customerId = request.user.id
 
     // 1. Verify eligibility (approved, enabled, published, configurations, proximity)
     const eligibility = await checkVendorEligibility(customerId, vendor_id)
     if (!eligibility.eligible) {
       return reply.code(400).send(error(eligibility.message, eligibility.code))
+    }
+
+    // 1b. Assisted booking: nothing to price. Only vendors the admin has
+    // enabled offer it (same rule the customer-facing config uses).
+    if (booking_type === 'ASSISTED') {
+      if (!(await assistedBooking.isAvailableForVendor(vendor_id))) {
+        return reply.code(400).send(error('Book With Expert Check is not available for this laundry.', 'ASSISTED_BOOKING_UNAVAILABLE'))
+      }
+      const assistedExpiry = new Date(Date.now() + 10 * 60 * 1000).toISOString()
+      const assistedRes = await query(
+        `INSERT INTO quotes (
+          customer_id, vendor_id, service_id, estimated_weight_kg, estimate_paise, pricing_snapshot, expires_at, booking_type
+        ) VALUES ($1, $2, NULL, NULL, 0, '[]', $3, 'ASSISTED')
+        RETURNING id`,
+        [customerId, vendor_id, assistedExpiry]
+      )
+      const assistedQuoteId = assistedRes.rows[0].id
+      await redis.setex(`quote:${assistedQuoteId}`, 600, JSON.stringify({
+        quote_id: assistedQuoteId, vendor_id, garment_lines: [], estimate_paise: 0,
+        booking_type: 'ASSISTED', expiry: assistedExpiry,
+      }))
+      return reply.code(201).send(success({
+        quote_id: assistedQuoteId,
+        estimate_paise: 0,
+        expiry: assistedExpiry,
+        booking_type: 'ASSISTED',
+      }, 'Quotation generated successfully'))
     }
 
     let estimate_paise = 0
@@ -205,6 +239,9 @@ export default async function quotesRoutes(fastify) {
     const dbQuote = quoteRes.rows[0]
     if (dbQuote.customer_id !== customerId) {
       return reply.code(403).send(error('Forbidden - you do not own this quotation', 'FORBIDDEN'))
+    }
+    if (dbQuote.booking_type === 'ASSISTED') {
+      return reply.code(400).send(error('An assisted booking has no items to update — the laundry sets the price after inspection.', 'ASSISTED_QUOTE_NOT_EDITABLE'))
     }
 
     let estimate_paise = 0

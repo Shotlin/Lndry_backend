@@ -65,6 +65,7 @@ const orderResponseSchema = {
   properties: {
     id: { type: 'string', format: 'uuid' },
     orderNumber: { type: 'string' },
+    bookingType: { type: 'string' },
     shopId: { type: ['string', 'null'] },
     vendorName: { type: ['string', 'null'] },
     status: { type: 'string' },

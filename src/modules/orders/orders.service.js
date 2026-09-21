@@ -31,6 +31,7 @@ import { prepareReorder } from './reorder.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
 import { TotalsEngine } from '../../../archived_modules/cart/totals-engine.service.js'
 import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
+import { getAdvanceAmountPaise } from '../../utils/advance-amount.js'
 
 const DELIVERY_FEE = 25 // ₹25 flat delivery fee
 const PLATFORM_FEE = 5 // ₹5 platform fee
@@ -1346,10 +1347,14 @@ export class OrdersService {
     }
   }
 
-  async _buildDraftFeeBreakdown({ quote, vendor, distanceKm, couponDiscount = 0, isExpressPickup = false }) {
+  async _buildDraftFeeBreakdown({ quote, vendor, distanceKm, couponDiscount = 0, isExpressPickup = false, assisted = false }) {
     const subtotalPaise = Number(quote.estimate_paise || 0)
     const subtotalRupees = this._paiseToRupees(subtotalPaise)
-    const { config, source } = await this.feeSettingsService.resolveForShop(quote.vendor_id)
+    const { config: resolvedConfig, source } = await this.feeSettingsService.resolveForShop(quote.vendor_id)
+    // Assisted booking: the basket isn't known yet, so a "small cart" fee
+    // (which depends on it) must not be baked into the order's fees — it
+    // would otherwise stay on the bill after the laundry prices a big load.
+    const config = assisted ? { ...resolvedConfig, small_cart_fee_enabled: false } : resolvedConfig
     const canonical = this.totalsEngine.computeBreakdown({
       config,
       itemsSubtotal: subtotalRupees,
@@ -1443,12 +1448,16 @@ export class OrdersService {
       return { success: false, message: 'Quotation has expired', code: 'QUOTE_EXPIRED' }
     }
 
+    const isAssisted = dbQuote.booking_type === 'ASSISTED'
+    const bookingType = isAssisted ? 'ASSISTED' : 'STANDARD'
+
     const quote = {
       quote_id: quoteId,
       vendor_id: dbQuote.vendor_id,
       estimate_paise: dbQuote.estimate_paise,
       garment_lines: typeof dbQuote.pricing_snapshot === 'string' ? JSON.parse(dbQuote.pricing_snapshot) : dbQuote.pricing_snapshot,
-      estimated_weight_kg: dbQuote.estimated_weight_kg ? Number(dbQuote.estimated_weight_kg) : null
+      estimated_weight_kg: dbQuote.estimated_weight_kg ? Number(dbQuote.estimated_weight_kg) : null,
+      booking_type: bookingType
     }
 
     // 2. Fetch address
@@ -1513,6 +1522,12 @@ export class OrdersService {
     // single-vendor drafts only, so no multi-shop redistribution needed here.
     let appliedCouponCode = null
     let appliedCouponDiscount = 0
+    if (couponCode && isAssisted) {
+      // Coupons, first-time offers, milestones and referral credits are all
+      // worked out from the order subtotal, which an assisted booking doesn't
+      // have until the laundry has inspected the garments.
+      return { success: false, message: 'Coupons cannot be applied to a Book With Expert Check booking.', code: 'COUPON_NOT_APPLICABLE_ASSISTED' }
+    }
     if (couponCode) {
       const subtotalRupees = this._paiseToRupees(quote.estimate_paise)
       const couponResult = await this.couponsService.validate(userId, couponCode, subtotalRupees)
@@ -1536,7 +1551,7 @@ export class OrdersService {
     let firstTimeOffer = null
     let firstTimeReward = null
     const subtotalRupeesForOffer = this._paiseToRupees(quote.estimate_paise)
-    const resolvedOffer = await this.firstTimeOffersService.resolveForCheckout(userId, subtotalRupeesForOffer)
+    const resolvedOffer = isAssisted ? null : await this.firstTimeOffersService.resolveForCheckout(userId, subtotalRupeesForOffer)
     let extraDiscount = 0
     if (resolvedOffer?.autoApply) {
       if (resolvedOffer.rewardType === 'FREE_DELIVERY') {
@@ -1578,7 +1593,7 @@ export class OrdersService {
     // COUPON_UNLOCK handling above, so an abandoned draft never grants it.
     let cartMilestone = null
     let cartMilestoneReward = null
-    const resolvedMilestone = await this.cartMilestonesService.resolveForCheckout(userId, subtotalRupeesForOffer)
+    const resolvedMilestone = isAssisted ? null : await this.cartMilestonesService.resolveForCheckout(userId, subtotalRupeesForOffer)
     if (resolvedMilestone && !(appliedCouponCode && !resolvedMilestone.stackableWithCoupon)) {
       const reward = this.cartMilestonesService.computeReward(resolvedMilestone, subtotalRupeesForOffer)
       if (reward.discount && (appliedCouponCode || firstTimeReward?.discount)) {
@@ -1606,7 +1621,7 @@ export class OrdersService {
     // now, so an abandoned draft never spends a credit for nothing.
     let referralCredit = null
     const referralCreditType = isExpressPickup ? 'FREE_EXPRESS_DELIVERY' : 'FREE_STANDARD_DELIVERY'
-    const availableReferralCredit = await this.referralsRepo.getCredit(userId, referralCreditType)
+    const availableReferralCredit = isAssisted ? 0 : await this.referralsRepo.getCredit(userId, referralCreditType)
     if (availableReferralCredit > 0) {
       const preReferralBreakdown = await this._buildDraftFeeBreakdown({
         quote, vendor, distanceKm: distance,
@@ -1630,11 +1645,17 @@ export class OrdersService {
       distanceKm: distance,
       couponDiscount: appliedCouponDiscount + extraDiscount,
       isExpressPickup,
+      assisted: isAssisted,
     })
     const payableAmount = feeBreakdown.total_payable_paise
 
     const snapshot = {
       quote,
+      booking_type: bookingType,
+      // What the customer actually pays now. For an assisted booking there is
+      // no service price yet, so this — not the fee-only total above — is the
+      // number checkout must show.
+      advance_amount_paise: isAssisted ? await getAdvanceAmountPaise() : undefined,
       address,
       slot_id: isExpressPickup ? null : slotId,
       booking_date: bookingDate,
@@ -1652,8 +1673,8 @@ export class OrdersService {
 
     // 6. Write draft
     const { rows: draftRows } = await query(
-      `INSERT INTO order_drafts (user_id, vendor_id, slot_id, address_id, garment_lines, estimated_weight, payable_amount_paise, snapshot)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      `INSERT INTO order_drafts (user_id, vendor_id, slot_id, address_id, garment_lines, estimated_weight, payable_amount_paise, snapshot, booking_type)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
        RETURNING id`,
       [
         userId,
@@ -1663,7 +1684,8 @@ export class OrdersService {
         JSON.stringify(quote.garment_lines),
         quote.estimated_weight_kg ? Number(quote.estimated_weight_kg) : null,
         payableAmount,
-        JSON.stringify(snapshot)
+        JSON.stringify(snapshot),
+        bookingType
       ]
     )
 
@@ -1785,8 +1807,8 @@ export class OrdersService {
            payment_method, payment_status, delivery_address,
            vendor_slot_id, pickup_date,
            estimated_amount_paise, payable_amount_paise,
-           fee_breakdown, coupon_code, is_express_pickup
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22)
+           fee_breakdown, coupon_code, is_express_pickup, booking_type
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
          RETURNING id, order_number, user_id, vendor_id, status, created_at`,
         [
           orderDraftId,
@@ -1810,7 +1832,8 @@ export class OrdersService {
           feeBreakdown.total_payable_paise,
           JSON.stringify(feeBreakdown),
           appliedCouponCode,
-          isExpressPickup
+          isExpressPickup,
+          draft.booking_type === 'ASSISTED' ? 'ASSISTED' : 'STANDARD'
         ]
       )
       const order = orderInsertRes.rows[0]
@@ -1846,7 +1869,9 @@ export class OrdersService {
         newStatus: 'WAITING_VENDOR_CONFIRMATION',
         actorId: userId,
         actorRole: 'CUSTOMER',
-        note: 'Order placed from draft'
+        note: draft.booking_type === 'ASSISTED'
+          ? 'Assisted booking placed — services and price to be confirmed after inspection'
+          : 'Order placed from draft'
       })
 
       // 10. Link the advance payment (COD and ONLINE both have one now — only
