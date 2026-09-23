@@ -6,6 +6,7 @@ import { WatermarkService } from '../watermark/watermark.service.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { autoPublishAfterChange } from './vendor-publishing.js'
 import { normalizeVendorType, capabilitiesFor, VENDOR_TYPES } from './vendor-tier.js'
+import { setGoogleBusinessForVendor } from './google-business.js'
 
 // Single source of truth for which onboarding documents block submission —
 // previously duplicated as three separate hardcoded arrays across
@@ -66,7 +67,59 @@ export class VendorsService {
     delete data.is_active
     delete data.created_by
     delete data.vendor_type // admin-only — see adminSetVendorType
-    return this.repo.update(vendor.id, data)
+
+    // Google Business fields are admin/vendor-typed data (link + the rating
+    // they see on their own listing) — no resolve pipeline, just validated
+    // and written together so they never drift out of sync with each other.
+    let googleResult = null
+    if (data.google_business_url !== undefined) {
+      const googleInput = {
+        url: data.google_business_url,
+        rating: data.google_rating,
+        reviewCount: data.google_review_count,
+        businessName: data.google_business_name,
+      }
+      delete data.google_business_url
+      delete data.google_rating
+      delete data.google_review_count
+      delete data.google_business_name
+      googleResult = await setGoogleBusinessForVendor(this.repo, vendor.id, googleInput)
+    }
+
+    const updated = await this.repo.update(vendor.id, data)
+    if (!googleResult) return updated
+    return { ...updated, ...googleResult.vendor }
+  }
+
+  /**
+   * Admin-side counterpart to the vendor's own [updateProfile] Google link —
+   * only ever for an already-approved vendor (Google reviews are shown on a
+   * live marketplace listing, not a pending application). `input` is
+   * `{url, rating, reviewCount, businessName}`, all admin-typed.
+   */
+  async adminSetGoogleBusiness(id, input, adminUserId, actor = {}) {
+    const vendorId = await this._requireAdminVendorId(id)
+    const before = await this.repo.findById(vendorId)
+    const result = await setGoogleBusinessForVendor(this.repo, vendorId, input)
+    emitAudit('vendor_google_business_updated', {
+      actor_user_id: adminUserId ?? null,
+      actor_role: 'ADMIN',
+      target_type: 'vendor',
+      target_id: vendorId,
+      before: {
+        google_business_url: before?.google_business_url ?? null,
+        google_rating: before?.google_rating ?? null,
+        google_review_count: before?.google_review_count ?? null,
+      },
+      after: {
+        google_business_url: result.vendor?.google_business_url ?? null,
+        google_rating: result.vendor?.google_rating ?? null,
+        google_review_count: result.vendor?.google_review_count ?? null,
+      },
+      ip_address: actor.ip ?? null,
+      user_agent: actor.userAgent ?? null,
+    })
+    return result
   }
 
   async uploadDocument(userId, type, fileUrl) {

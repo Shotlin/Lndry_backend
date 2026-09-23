@@ -249,7 +249,15 @@ export default async function vendorApplicationsRoutes(fastify) {
           // removeAdditional) — operating_hours was missing, so every
           // working-hours edit from the vendor app was silently dropped
           // before it ever reached the service/repository layer.
-          operating_hours: { type: 'object' }
+          operating_hours: { type: 'object' },
+          // Optional Google Business Profile link — the vendor pastes the
+          // Google Maps/Business link and types in the rating/review count
+          // they see on their own listing (no server-side lookup). Empty
+          // string / null unlinks it.
+          google_business_url: { type: ['string', 'null'] },
+          google_rating: { type: ['number', 'null'] },
+          google_review_count: { type: ['integer', 'null'] },
+          google_business_name: { type: ['string', 'null'] }
         }
       }
     }

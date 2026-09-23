@@ -1042,7 +1042,7 @@ export class OrdersService {
   }
 
   async _enrichCustomerOrder(order) {
-    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems, paymentsRes] = await Promise.all([
+    const [statusHistory, riderLocation, paidRes, riderReconRes, vendorReconRes, liveItems, paymentsRes, assignmentsRes] = await Promise.all([
       this.repo.getStatusHistory(order.id),
       order.riderId && this.fastify?.getRiderLocation
         ? this.fastify.getRiderLocation(order.riderId).catch(() => null)
@@ -1065,6 +1065,20 @@ export class OrdersService {
       // differ, e.g. advance via Razorpay, balance via the LNDRY wallet).
       query(
         `SELECT id, purpose, method, status, amount, created_at FROM payments WHERE order_id = $1 ORDER BY created_at ASC`,
+        [order.id]
+      ),
+      // The captain actually assigned to this order's pickup/delivery leg,
+      // for the order-details call button — the vendor-owned
+      // order_assignments system (Rider Assignment initiative), NOT the
+      // legacy single orders.rider_id column, which the current assignment
+      // flow never writes to. Scoped to this exact order.id, so a captain
+      // can never leak onto another order; ASSIGNED/IN_TRANSIT only — an
+      // OFFERED-but-not-yet-accepted broadcast is not a real contact yet.
+      query(
+        `SELECT oa.assignment_type, u.name, u.phone
+         FROM order_assignments oa
+         JOIN users u ON u.id = oa.employee_id
+         WHERE oa.order_id = $1 AND oa.status IN ('ASSIGNED', 'IN_TRANSIT')`,
         [order.id]
       ),
     ])
@@ -1103,6 +1117,20 @@ export class OrdersService {
       createdAt: row.created_at,
     }))
 
+    let pickupCaptainName = null
+    let pickupCaptainPhone = null
+    let deliveryCaptainName = null
+    let deliveryCaptainPhone = null
+    for (const row of assignmentsRes.rows) {
+      if (row.assignment_type === 'PICKUP') {
+        pickupCaptainName = row.name
+        pickupCaptainPhone = row.phone
+      } else if (row.assignment_type === 'DELIVERY') {
+        deliveryCaptainName = row.name
+        deliveryCaptainPhone = row.phone
+      }
+    }
+
     return {
       ...enriched,
       timeline: this._buildCustomerTimeline(order, statusHistory || []),
@@ -1113,6 +1141,12 @@ export class OrdersService {
       payments,
       riderReevaluation,
       vendorReevaluation,
+      // The customer order-details call button — see orders.schema.js.
+      // Null unless a captain is genuinely, currently assigned to that leg.
+      pickupCaptainName,
+      pickupCaptainPhone,
+      deliveryCaptainName,
+      deliveryCaptainPhone,
     }
   }
 

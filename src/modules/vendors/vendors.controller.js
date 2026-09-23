@@ -253,7 +253,7 @@ export class VendorsController {
       const profile = await this.service.updateProfile(request.user.id, request.body)
       return reply.send(success(profile, 'Profile updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update profile'))
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update profile', err.code))
     }
   }
 
@@ -546,6 +546,27 @@ export class VendorsController {
       return reply.send(success(res, 'Vendor type updated'))
     } catch (err) {
       return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update vendor type', err.code))
+    }
+  }
+
+  async adminSetGoogleBusiness(request, reply) {
+    const { id } = request.params
+    const {
+      google_business_url: url,
+      google_rating: rating,
+      google_review_count: reviewCount,
+      google_business_name: businessName,
+    } = request.body || {}
+    try {
+      const result = await this.service.adminSetGoogleBusiness(
+        id,
+        { url: url ?? '', rating, reviewCount, businessName },
+        request.user.id,
+        { ip: request.ip ?? null, userAgent: request.headers?.['user-agent'] ?? null }
+      )
+      return reply.send(success(result, result.cleared ? 'Google Business link removed' : 'Google Business Profile saved'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update Google Business link', err.code))
     }
   }
 

@@ -137,6 +137,15 @@ const orderResponseSchema = {
     },
     riderReevaluation: { type: ['object', 'null'], additionalProperties: true },
     vendorReevaluation: { type: ['object', 'null'], additionalProperties: true },
+    // The order-details call button — the vendor-owned captain currently
+    // ASSIGNED/IN_TRANSIT on this order's pickup/delivery leg (from
+    // order_assignments, not the legacy orders.rider_id/riderPhone fields
+    // above). Null whenever no captain is actively assigned to that leg —
+    // the app falls back to the platform support number in that case.
+    pickupCaptainName: { type: ['string', 'null'] },
+    pickupCaptainPhone: { type: ['string', 'null'] },
+    deliveryCaptainName: { type: ['string', 'null'] },
+    deliveryCaptainPhone: { type: ['string', 'null'] },
   },
 }
 

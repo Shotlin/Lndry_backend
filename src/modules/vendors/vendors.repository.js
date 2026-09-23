@@ -67,7 +67,8 @@ export class VendorsRepository {
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
         requested_service_radius_km, approved_service_radius_km,
-        express_pickup_available, vendor_type
+        express_pickup_available, vendor_type,
+        google_business_url, google_rating, google_review_count, google_business_name
       FROM vendors
       WHERE id = $1 AND deleted_at IS NULL`,
       [id]
@@ -85,7 +86,8 @@ export class VendorsRepository {
         v.gst_number, v.pan_number, v.created_by, v.created_at, v.updated_at,
         v.vendor_approved, v.account_enabled, v.marketplace_published,
         v.requested_service_radius_km, v.approved_service_radius_km,
-        v.express_pickup_available, v.vendor_type
+        v.express_pickup_available, v.vendor_type,
+        v.google_business_url, v.google_rating, v.google_review_count, v.google_business_name
       FROM vendors v
       LEFT JOIN vendor_employees ve ON ve.vendor_id = v.id
       WHERE (v.created_by = $1 OR ve.user_id = $1) AND v.deleted_at IS NULL
@@ -163,7 +165,8 @@ export class VendorsRepository {
         gst_number, pan_number, created_by, created_at, updated_at,
         vendor_approved, account_enabled, marketplace_published,
         requested_service_radius_km, approved_service_radius_km,
-        express_pickup_available, vendor_type`,
+        express_pickup_available, vendor_type,
+        google_business_url, google_rating, google_review_count, google_business_name`,
       params
     )
     return rows[0] || null
@@ -179,6 +182,23 @@ export class VendorsRepository {
        WHERE id = $1 AND deleted_at IS NULL
        RETURNING id, vendor_type`,
       [id, vendorType]
+    )
+    return rows[0] || null
+  }
+
+  /**
+   * Deliberately NOT part of update()'s field map either: admin-typed
+   * data, saved together so the four columns never drift out of sync.
+   */
+  async setGoogleBusiness(id, { url, rating, reviewCount, businessName }) {
+    const { rows } = await query(
+      `UPDATE vendors SET
+         google_business_url = $2, google_rating = $3,
+         google_review_count = $4, google_business_name = $5,
+         updated_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, google_business_url, google_rating, google_review_count, google_business_name`,
+      [id, url, rating, reviewCount, businessName]
     )
     return rows[0] || null
   }

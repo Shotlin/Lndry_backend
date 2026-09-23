@@ -290,6 +290,28 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.adminSetVendorType.bind(controller))
 
+  fastify.put('/admin/:id/google-business', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Connect/update/remove a vendor\'s optional Google Business Profile link [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        properties: {
+          google_business_url: { type: ['string', 'null'] },
+          google_rating: { type: ['number', 'null'] },
+          google_review_count: { type: ['integer', 'null'] },
+          google_business_name: { type: ['string', 'null'] }
+        }
+      }
+    }
+  }, controller.adminSetGoogleBusiness.bind(controller))
+
   fastify.put('/admin/:id/express-pickup', {
     preHandler: adminPreHandlers,
     schema: {
