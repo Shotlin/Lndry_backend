@@ -123,7 +123,11 @@ export class AuthService {
       }
     }
 
-    if (!isSmsSent && !isDemo) {
+    // Test-bypass phones (TEST_BYPASS_OTP_PHONES) must also keep the fixed
+    // '123456' code — previously this fell through to a random generateOTP(),
+    // silently defeating the point of a small, memorable allow-list of Play
+    // Store review / demo accounts.
+    if (!isSmsSent && !isDemo && !isTestBypass) {
       otpCode = generateOTP()
     }
 
