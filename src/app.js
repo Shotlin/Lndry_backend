@@ -568,6 +568,15 @@ export const buildApp = async () => {
     prefix: '/api/v1/reconciliation-problem-types',
   })
 
+  // App Releases — public latest-version/download endpoints for the two
+  // Flutter apps' self-hosted APK distribution (admin CRUD is under
+  // /api/v1/admin/app-releases). This is what lndry.in's download buttons
+  // and version badges call.
+  const { publicAppReleasesRoutes } = await import('./modules/admin/app-releases/app-releases.routes.js')
+  await app.register(publicAppReleasesRoutes, {
+    prefix: '/api/v1/app-releases',
+  })
+
   // Store Orders — walk-in/counter sales pushed by a vendor's own POS
   // desktop app when a customer's phone matches a real LNDRY account.
   // Customer-facing "my Laundry Store history" is its own prefix; the
