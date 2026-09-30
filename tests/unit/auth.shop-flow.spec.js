@@ -39,6 +39,13 @@ vi.mock('../../src/config/redis.js', () => ({
     set: vi.fn(),
     get: vi.fn(() => null),
     del: vi.fn(),
+    exists: vi.fn(() => 0),
+    expire: vi.fn(),
+    zadd: vi.fn(),
+    zremrangebyscore: vi.fn(),
+    zcard: vi.fn(() => 1),
+    zrange: vi.fn(() => []),
+    zrem: vi.fn(),
   },
 }))
 
@@ -183,12 +190,17 @@ describe('AuthService.verifyOtp — single active shop assignment', () => {
       permissions: ['manage_orders', 'manage_inventory'],
     })
 
-    // Refresh token persisted in Redis with 7-day TTL
+    // Refresh token persisted per session in Redis with a 365-day TTL
     expect(redis.set).toHaveBeenCalledWith(
-      `refresh:${USER_ID}`,
-      'signed.refresh.jwt',
+      expect.stringMatching(new RegExp(`^refresh:${USER_ID}:[0-9a-f]{40}$`)),
+      '1',
       'EX',
-      7 * 24 * 60 * 60
+      365 * 24 * 60 * 60
+    )
+    expect(redis.zadd).toHaveBeenCalledWith(
+      `refresh_idx:${USER_ID}`,
+      expect.any(Number),
+      'signed.refresh.jwt'
     )
   })
 

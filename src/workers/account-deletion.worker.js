@@ -7,6 +7,7 @@
  * claimed with SELECT ... FOR UPDATE SKIP LOCKED inside its own transaction.
  */
 import { redis } from '../config/redis.js'
+import { revokeAllRefreshTokens } from '../modules/auth/refresh-token-store.js'
 import { logger } from '../config/logger.js'
 import { AccountDeletionRepository } from '../modules/admin/account-deletion/account-deletion.repository.js'
 import { emit as emitAudit } from '../utils/audit-log.js'
@@ -47,7 +48,7 @@ export async function processDueAccountDeletions(repo = new AccountDeletionRepos
     if (!result) break
     done++
     try {
-      await redis.del(`refresh:${result.userId}`)
+      await revokeAllRefreshTokens(result.userId)
     } catch (err) {
       logger.warn({ err: err.message, userId: result.userId }, 'Refresh-token cleanup failed after anonymization')
     }

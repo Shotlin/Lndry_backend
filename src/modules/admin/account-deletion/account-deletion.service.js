@@ -1,4 +1,5 @@
 import { redis } from '../../../config/redis.js'
+import { revokeAllRefreshTokens } from '../../auth/refresh-token-store.js'
 import { logger } from '../../../config/logger.js'
 import { emit as emitAudit } from '../../../utils/audit-log.js'
 import { AccountDeletionRepository } from './account-deletion.repository.js'
@@ -6,7 +7,6 @@ import { AccountDeletionRepository } from './account-deletion.repository.js'
 /** Days between admin approval and the permanent anonymization. */
 export const ACCOUNT_DELETION_GRACE_DAYS = 30
 
-const REFRESH_TOKEN_PREFIX = 'refresh:'
 
 export class AccountDeletionService {
   constructor(repository = new AccountDeletionRepository()) {
@@ -88,7 +88,7 @@ export class AccountDeletionService {
     // Kill the refresh token so the session can't be silently renewed. Access
     // tokens are already dead: approve() bumped users.session_version.
     try {
-      await redis.del(`${REFRESH_TOKEN_PREFIX}${result.userId}`)
+      await revokeAllRefreshTokens(result.userId)
     } catch (err) {
       logger.warn({ err: err.message, userId: result.userId }, 'Refresh-token cleanup failed on deletion approval')
     }

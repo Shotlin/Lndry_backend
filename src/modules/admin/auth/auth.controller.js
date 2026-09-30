@@ -52,6 +52,7 @@ const COOKIE_BASE = Object.freeze({
  */
 function cookieMaxAgeFor(tokenExpiry) {
   if (tokenExpiry === '5m') return COOKIE_MAXAGE_5M
+  if (tokenExpiry === '30d') return 30 * 24 * 60 * 60
   return COOKIE_MAXAGE_24H
 }
 

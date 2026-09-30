@@ -8,6 +8,9 @@ import {
 } from '../../../utils/permissions.js'
 import { ERROR_CODES } from '../../../constants/errors.js'
 
+// Dashboard sign-in lasts 30 days (the 5m step-up/MFA-pending tokens are unchanged).
+export const ADMIN_SESSION_EXPIRY = '30d'
+
 /**
  * AdminAuthService
  *
@@ -262,7 +265,7 @@ export class AdminAuthService {
 
       return {
         tokenPayload,
-        tokenExpiry: '24h',
+        tokenExpiry: ADMIN_SESSION_EXPIRY,
         user: safeUser,
         vendors: [],
         isSuperAdmin,
@@ -339,7 +342,7 @@ export class AdminAuthService {
 
       return {
         tokenPayload,
-        tokenExpiry: '24h',
+        tokenExpiry: ADMIN_SESSION_EXPIRY,
         user: safeUser,
         vendors,
         isSuperAdmin: false,
@@ -870,7 +873,7 @@ export class AdminAuthService {
 
     return {
       tokenPayload,
-      tokenExpiry: '24h',
+      tokenExpiry: ADMIN_SESSION_EXPIRY,
       shop: {
         vendor_id: assignment.vendor_id,
         shop_name: assignment.shop_name,
@@ -1171,7 +1174,7 @@ export class AdminAuthService {
         permissions: safePermissions,
         session_version: newSessionVersion,
       }
-      tokenExpiry = '24h'
+      tokenExpiry = ADMIN_SESSION_EXPIRY
     } else if (shopId) {
       // Shop-scoped JWT (24h) — design §5.6
       tokenPayload = {
@@ -1184,7 +1187,7 @@ export class AdminAuthService {
         permissions: safePermissions,
         session_version: newSessionVersion,
       }
-      tokenExpiry = '24h'
+      tokenExpiry = ADMIN_SESSION_EXPIRY
     } else {
       // STORE_PENDING interim JWT (5m) — design §5.6.
       // Realistically unreachable because require-no-force-password
@@ -1283,7 +1286,7 @@ export class AdminAuthService {
 
       return {
         tokenPayload,
-        tokenExpiry: '24h',
+        tokenExpiry: ADMIN_SESSION_EXPIRY,
         user: safeUser,
         vendors: [],
         isSuperAdmin,
@@ -1341,7 +1344,7 @@ export class AdminAuthService {
 
       return {
         tokenPayload,
-        tokenExpiry: '24h',
+        tokenExpiry: ADMIN_SESSION_EXPIRY,
         user: safeUser,
         vendors,
         isSuperAdmin: false,

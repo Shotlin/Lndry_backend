@@ -5,11 +5,11 @@ import { sendSmsOtp, verifySmsOtp } from '../../utils/sms.js'
 import { generateTokenPair, signAccessToken, signRefreshToken, verifyToken } from '../../utils/jwt.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { redis } from '../../config/redis.js'
+import { storeRefreshToken, isRefreshTokenValid, revokeRefreshToken, revokeAllRefreshTokens } from './refresh-token-store.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 import { query } from '../../config/database.js'
 
-const REFRESH_TOKEN_PREFIX = 'refresh:'
 const SMS_SESSION_PREFIX = 'sms:session:'
 // Short-lived token issued when a staff member logs in but has multiple shop
 // assignments and must select one before getting a full session JWT.
@@ -322,12 +322,7 @@ export class AuthService {
         phone: user.phone,
         role: user.role,
       })
-      await redis.set(
-        `${REFRESH_TOKEN_PREFIX}${user.id}`,
-        refreshToken,
-        'EX',
-        7 * 24 * 60 * 60
-      )
+      await storeRefreshToken(user.id, refreshToken)
 
       logger.info(
         {
@@ -409,12 +404,7 @@ export class AuthService {
     const payload = { id: user.id, phone: user.phone, role: requestedRole }
     const tokens = generateTokenPair(payload)
 
-    await redis.set(
-      `${REFRESH_TOKEN_PREFIX}${user.id}`,
-      tokens.refreshToken,
-      'EX',
-      7 * 24 * 60 * 60
-    )
+    await storeRefreshToken(user.id, tokens.refreshToken)
 
     let isVerified = false
     if (requestedRole === 'RIDER') {
@@ -453,8 +443,7 @@ export class AuthService {
       const decoded = verifyToken(refreshToken, env.JWT_REFRESH_SECRET)
 
       // Check if refresh token is still valid in Redis
-      const stored = await redis.get(`${REFRESH_TOKEN_PREFIX}${decoded.id}`)
-      if (!stored || stored !== refreshToken) {
+      if (!(await isRefreshTokenValid(decoded.id, refreshToken))) {
         return { success: false, message: 'Invalid or expired refresh token' }
       }
 
@@ -514,12 +503,8 @@ export class AuthService {
         phone: user.phone,
         role: decoded.role,
       })
-      await redis.set(
-        `${REFRESH_TOKEN_PREFIX}${user.id}`,
-        newRefreshToken,
-        'EX',
-        7 * 24 * 60 * 60
-      )
+      await storeRefreshToken(user.id, newRefreshToken)
+      await revokeRefreshToken(user.id, refreshToken)
 
       return {
         success: true,
@@ -536,7 +521,7 @@ export class AuthService {
    * Logout — invalidate refresh token
    */
   async logout(userId) {
-    await redis.del(`${REFRESH_TOKEN_PREFIX}${userId}`)
+    await revokeAllRefreshTokens(userId)
     logger.info({ userId }, 'User logged out')
   }
 
@@ -545,7 +530,7 @@ export class AuthService {
    */
   async deleteAccount(userId) {
     await this.repo.deleteUser(userId)
-    await redis.del(`${REFRESH_TOKEN_PREFIX}${userId}`)
+    await revokeAllRefreshTokens(userId)
     logger.info({ userId }, 'User account deleted')
   }
 
