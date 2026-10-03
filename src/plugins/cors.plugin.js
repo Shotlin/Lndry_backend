@@ -76,7 +76,10 @@ async function corsPlugin(fastify) {
     // src/lib/api.ts and design.md "X-Shop-Id Interceptor"). Must be in
     // allowedHeaders so the browser preflight passes. Without it, every
     // shop-scoped GET/POST fails with net::ERR_FAILED at the browser.
-    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Shop-Id', 'X-Step-Up-Token', 'x-step-up-token'],
+    // Idempotency-Key: the counter website (Vercel, cross-origin) attaches a UUID to every write so a retry after a
+    // lost response cannot double-book or double-charge (see plugins/idempotency.plugin.js). Without it in this list
+    // the browser's preflight rejects every such POST with a bare "Failed to fetch".
+    allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'X-Shop-Id', 'X-Step-Up-Token', 'x-step-up-token', 'Idempotency-Key'],
     exposedHeaders: ['X-Total-Count', 'X-Total-Pages'],
     maxAge: 86400,
   })
