@@ -169,9 +169,10 @@ export class VendorCounterOrdersService {
        ), merged AS (
          SELECT user_id, MAX(last_at) AS last_at, SUM(orders)::int AS orders, SUM(spent)::bigint AS spent FROM known GROUP BY user_id
        )
-       SELECT u.id, u.name, u.phone, m.last_at, m.orders, m.spent
+       SELECT u.id, COALESCE(vp.display_name, u.name) AS name, u.phone, m.last_at, m.orders, m.spent
        FROM merged m JOIN users u ON u.id = m.user_id
-       WHERE ($2 = '' OR lower(COALESCE(u.name, '')) LIKE '%' || $2 || '%' OR ($3 <> '' AND regexp_replace(COALESCE(u.phone, ''), '\\D', '', 'g') LIKE '%' || $3 || '%'))
+       LEFT JOIN vendor_customer_profiles vp ON vp.vendor_id = $1 AND vp.customer_user_id = u.id
+       WHERE ($2 = '' OR lower(COALESCE(vp.display_name, u.name, '')) LIKE '%' || $2 || '%' OR ($3 <> '' AND regexp_replace(COALESCE(u.phone, ''), '\\D', '', 'g') LIKE '%' || $3 || '%'))
        ORDER BY m.last_at DESC NULLS LAST
        LIMIT 200`,
       [vendorId, needle, phoneDigits.length >= 2 ? phoneDigits : '']
@@ -184,7 +185,25 @@ export class VendorCounterOrdersService {
    * this backend authenticates by OTP alone, so if the person later signs up
    * with the same phone they simply land on this row and their history is there).
    */
-  async findOrCreateCustomer(vendorId, actor, { name, phone }) {
+  async findOrCreateCustomer(vendorId, actor, input) {
+    const result = await this._findOrCreateCustomer(vendorId, actor, input)
+    if (result.success && result.customer?.id) {
+      // Remember this person in the vendor's own customer space (details the counter adds later live there).
+      // Best-effort: a hiccup here must never fail the booking flow that called this.
+      try {
+        await query(
+          `INSERT INTO vendor_customer_profiles (vendor_id, customer_user_id, display_name) VALUES ($1, $2, $3)
+           ON CONFLICT (vendor_id, customer_user_id) DO NOTHING`,
+          [vendorId, result.customer.id, result.created ? (result.customer.name || null) : null]
+        )
+      } catch (err) {
+        logger.warn({ err: err.message }, 'vendor customer profile upsert failed')
+      }
+    }
+    return result
+  }
+
+  async _findOrCreateCustomer(vendorId, actor, { name, phone }) {
     const clean = digits(phone).slice(-10)
     if (clean.length !== 10) return fail('Enter a valid 10-digit phone number')
     const display = String(name || '').trim().slice(0, 100)
@@ -234,12 +253,24 @@ export class VendorCounterOrdersService {
     if (!rows[0]) return null
     // A Standard vendor never receives an LNDRY account's e-mail address.
     if (!(await getVendorCapabilities(vendorId)).appSync) rows[0].email = null
+    // Details this vendor keeps about the customer (counter edits) come first.
+    const mine = (await query('SELECT display_name, email, notes FROM vendor_customer_profiles WHERE vendor_id = $1 AND customer_user_id = $2', [vendorId, customerId]).catch(() => ({ rows: [] }))).rows[0]
+    if (mine?.display_name) rows[0].name = mine.display_name
+    if (mine?.email) rows[0].email = mine.email
+    const addressRows = (await query(
+      `SELECT id, label, address_line1, address_line2, landmark, city, state, pincode, is_default FROM vendor_customer_addresses
+        WHERE vendor_id = $1 AND customer_user_id = $2 AND archived = false ORDER BY is_default DESC, created_at ASC`,
+      [vendorId, customerId]
+    ).catch(() => ({ rows: [] }))).rows
     const orders = await this.listOrders(vendorId, { customerId, limit: 100 })
     const balance = await query(
       `SELECT COALESCE(SUM(debit_paise - credit_paise), 0)::bigint AS balance FROM vendor_customer_ledger WHERE vendor_id = $1 AND customer_user_id = $2`,
       [vendorId, customerId]
     ).catch(() => ({ rows: [{ balance: 0 }] }))
-    return { customer: rows[0], orders, ledgerBalancePaise: Number(balance.rows[0]?.balance || 0) }
+    return {
+      customer: rows[0], orders, ledgerBalancePaise: Number(balance.rows[0]?.balance || 0), notes: mine?.notes || '',
+      addresses: addressRows.map((a) => ({ id: a.id, label: a.label, addressLine1: a.address_line1, addressLine2: a.address_line2 || '', landmark: a.landmark || '', city: a.city || '', state: a.state || '', pincode: a.pincode || '', isDefault: a.is_default })),
+    }
   }
 
   // ── Pricing ──────────────────────────────────────────────────────────────

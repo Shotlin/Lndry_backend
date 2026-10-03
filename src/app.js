@@ -693,6 +693,15 @@ export const buildApp = async () => {
   const { default: vendorPosCatalogueRoutes } = await import('./modules/vendor-pos-catalogue/vendor-pos-catalogue.routes.js')
   await app.register(vendorPosCatalogueRoutes, { prefix: '/api/v1/vendor/pos-catalogue' })
 
+  // Counter settings kept on the server (service units, order series, message templates, zones, ...),
+  // vendor-private customer details, and spreadsheet imports — migration 150.
+  const { default: vendorPosSettingsRoutes } = await import('./modules/vendor-pos-settings/vendor-pos-settings.routes.js')
+  await app.register(vendorPosSettingsRoutes, { prefix: '/api/v1/vendor/pos-settings' })
+  const { default: vendorCustomerProfilesRoutes } = await import('./modules/vendor-customer-profiles/vendor-customer-profiles.routes.js')
+  await app.register(vendorCustomerProfilesRoutes, { prefix: '/api/v1/vendor/customer-profiles' })
+  const { default: vendorImportsRoutes } = await import('./modules/vendor-imports/vendor-imports.routes.js')
+  await app.register(vendorImportsRoutes, { prefix: '/api/v1/vendor/imports' })
+
   // Tip Presets (admin)
   const { adminTipPresetsRoutes } = await import('./modules/tip-presets/tip-presets.routes.js')
   await app.register(adminTipPresetsRoutes, {
