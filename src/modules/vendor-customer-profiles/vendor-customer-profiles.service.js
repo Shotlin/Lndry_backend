@@ -17,7 +17,11 @@ const addressShape = (r) => ({
   id: r.id, label: r.label, addressLine1: r.address_line1, addressLine2: r.address_line2 || '', landmark: r.landmark || '',
   city: r.city || '', state: r.state || '', pincode: r.pincode || '', isDefault: r.is_default, createdAt: r.created_at,
 })
-const profileShape = (r) => ({ displayName: r?.display_name || '', email: r?.email || '', notes: r?.notes || '' })
+const CONTACTS = new Set(['Phone', 'WhatsApp', 'Email', 'None'])
+const profileShape = (r) => ({
+  displayName: r?.display_name || '', email: r?.email || '', notes: r?.notes || '',
+  servicePreferences: r?.service_preferences || '', preferredContact: r?.preferred_contact || null, marketingConsent: r?.marketing_consent ?? null,
+})
 
 export class VendorCustomerProfilesService {
   /** A vendor may only manage customers it has dealt with (a sale, an app order, a ledger entry or a counter look-up). */
@@ -58,16 +62,24 @@ export class VendorCustomerProfilesService {
     const email = sets.email === undefined ? undefined : text(sets.email, 160).toLowerCase()
     if (email && !EMAIL.test(email)) return fail('Enter a valid e-mail address')
     const notes = sets.notes === undefined ? undefined : String(sets.notes ?? '').trim().slice(0, 2000)
+    const prefs = input.servicePreferences === undefined ? undefined : String(input.servicePreferences ?? '').trim().slice(0, 2000)
+    if (input.preferredContact !== undefined && input.preferredContact !== null && input.preferredContact !== '' && !CONTACTS.has(input.preferredContact)) return fail('Choose Phone, WhatsApp, Email or None as the preferred contact')
+    const contact = input.preferredContact === undefined ? undefined : (input.preferredContact || null)
+    const consent = input.marketingConsent === undefined ? undefined : (input.marketingConsent === null ? null : input.marketingConsent === true)
     const { rows } = await query(
-      `INSERT INTO vendor_customer_profiles (vendor_id, customer_user_id, display_name, email, notes)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO vendor_customer_profiles (vendor_id, customer_user_id, display_name, email, notes, service_preferences, preferred_contact, marketing_consent)
+       VALUES ($1, $2, $3, $4, $5, $9, $10, $11)
        ON CONFLICT (vendor_id, customer_user_id) DO UPDATE SET
          display_name = CASE WHEN $6 THEN EXCLUDED.display_name ELSE vendor_customer_profiles.display_name END,
          email = CASE WHEN $7 THEN EXCLUDED.email ELSE vendor_customer_profiles.email END,
          notes = CASE WHEN $8 THEN EXCLUDED.notes ELSE vendor_customer_profiles.notes END,
+         service_preferences = CASE WHEN $12 THEN EXCLUDED.service_preferences ELSE vendor_customer_profiles.service_preferences END,
+         preferred_contact = CASE WHEN $13 THEN EXCLUDED.preferred_contact ELSE vendor_customer_profiles.preferred_contact END,
+         marketing_consent = CASE WHEN $14 THEN EXCLUDED.marketing_consent ELSE vendor_customer_profiles.marketing_consent END,
          updated_at = NOW()
        RETURNING *`,
-      [vendorId, customerId, name ?? null, email || null, notes ?? null, name !== undefined, email !== undefined, notes !== undefined]
+      [vendorId, customerId, name ?? null, email || null, notes ?? null, name !== undefined, email !== undefined, notes !== undefined,
+        prefs ?? null, contact ?? null, consent ?? null, prefs !== undefined, contact !== undefined, consent !== undefined]
     )
     emitAudit('vendor_customer_profile_updated', {
       actor_user_id: actor.userId, actor_role: actor.role, target_type: 'user', target_id: customerId,

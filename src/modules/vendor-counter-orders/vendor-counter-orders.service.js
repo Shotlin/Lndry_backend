@@ -254,7 +254,7 @@ export class VendorCounterOrdersService {
     // A Standard vendor never receives an LNDRY account's e-mail address.
     if (!(await getVendorCapabilities(vendorId)).appSync) rows[0].email = null
     // Details this vendor keeps about the customer (counter edits) come first.
-    const mine = (await query('SELECT display_name, email, notes FROM vendor_customer_profiles WHERE vendor_id = $1 AND customer_user_id = $2', [vendorId, customerId]).catch(() => ({ rows: [] }))).rows[0]
+    const mine = (await query('SELECT display_name, email, notes, service_preferences, preferred_contact, marketing_consent FROM vendor_customer_profiles WHERE vendor_id = $1 AND customer_user_id = $2', [vendorId, customerId]).catch(() => ({ rows: [] }))).rows[0]
     if (mine?.display_name) rows[0].name = mine.display_name
     if (mine?.email) rows[0].email = mine.email
     const addressRows = (await query(
@@ -268,7 +268,7 @@ export class VendorCounterOrdersService {
       [vendorId, customerId]
     ).catch(() => ({ rows: [{ balance: 0 }] }))
     return {
-      customer: rows[0], orders, ledgerBalancePaise: Number(balance.rows[0]?.balance || 0), notes: mine?.notes || '',
+      customer: rows[0], orders, ledgerBalancePaise: Number(balance.rows[0]?.balance || 0), notes: mine?.notes || '', servicePreferences: mine?.service_preferences || '', preferredContact: mine?.preferred_contact || null, marketingConsent: mine?.marketing_consent ?? null,
       addresses: addressRows.map((a) => ({ id: a.id, label: a.label, addressLine1: a.address_line1, addressLine2: a.address_line2 || '', landmark: a.landmark || '', city: a.city || '', state: a.state || '', pincode: a.pincode || '', isDefault: a.is_default })),
     }
   }

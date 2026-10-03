@@ -29,7 +29,9 @@ export class VendorCashShiftsService {
 
   async list(vendorId, pagination) {
     const { shifts, total } = await this.repo.list(vendorId, pagination)
-    return { shifts, total }
+    // Every shift carries its collection and expense totals (a closed shift's are read over its own opened→closed
+    // window), so the history shows what each shift actually handled instead of zeros.
+    return { shifts: await Promise.all(shifts.map((shift) => this._withLiveTotals(vendorId, shift))), total }
   }
 
   async open(vendorId, actor, input) {
