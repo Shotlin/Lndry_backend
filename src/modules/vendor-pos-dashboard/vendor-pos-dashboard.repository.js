@@ -18,7 +18,13 @@ export class VendorPosDashboardRepository {
        FROM store_orders WHERE vendor_id = $1 AND placed_at::date = $2`,
       [vendorId, asOf]
     )
-    return { count: rows[0].count, revenuePaise: rows[0].revenue_paise }
+    // Money actually received today (payments), kept separate from what was billed.
+    const paid = await query(
+      `SELECT COALESCE(SUM(amount_paise), 0)::int AS collected_paise
+       FROM store_order_payments WHERE vendor_id = $1 AND created_at::date = $2`,
+      [vendorId, asOf]
+    )
+    return { count: rows[0].count, revenuePaise: rows[0].revenue_paise, collectedPaise: paid.rows[0].collected_paise }
   }
 
   async openCashShift(vendorId) {
