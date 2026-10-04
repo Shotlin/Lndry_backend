@@ -118,11 +118,18 @@ export class VendorCounterViewsService {
 
   async corrections(vendorId) {
     const { rows } = await query(
-      `SELECT c.id, c.customer_user_id, c.order_id, c.claim_id, c.garment_unit_id, c.decision, c.summary, c.customer_message, c.issued_at, iu.name AS issued_by_name
-       FROM vendor_customer_corrections c JOIN vendor_quality_claims q ON q.id = c.claim_id LEFT JOIN users iu ON iu.id = c.issued_by WHERE q.vendor_id = $1 ORDER BY c.issued_at DESC LIMIT 300`, [vendorId])
+      `SELECT c.id, c.customer_user_id, c.order_id, c.claim_id, c.garment_unit_id, c.decision, c.summary, c.customer_message, c.issued_at, iu.name AS issued_by_name,
+              cu.name AS customer_name, gu.active_tag_code AS tag_code, gu.garment_name AS garment_name,
+              COALESCE(so.order_number, o.order_number) AS order_number
+       FROM vendor_customer_corrections c JOIN vendor_quality_claims q ON q.id = c.claim_id LEFT JOIN users iu ON iu.id = c.issued_by
+       LEFT JOIN users cu ON cu.id = c.customer_user_id
+       LEFT JOIN vendor_garment_units gu ON gu.id = c.garment_unit_id
+       LEFT JOIN store_orders so ON so.id = c.order_id
+       LEFT JOIN orders o ON o.id = c.order_id WHERE q.vendor_id = $1 ORDER BY c.issued_at DESC LIMIT 300`, [vendorId])
     return rows.map((c) => ({
       id: c.id, customerId: c.customer_user_id, orderId: c.order_id, claimId: c.claim_id, garmentUnitId: c.garment_unit_id, decision: c.decision, status: 'Issued',
       summary: c.summary, customerMessage: c.customer_message, issuedAt: c.issued_at, issuedBy: c.issued_by_name || 'Team member',
+      customerName: c.customer_name || null, orderNumber: c.order_number || null, tagCode: c.tag_code || null, garmentName: c.garment_name || null,
     }))
   }
 
