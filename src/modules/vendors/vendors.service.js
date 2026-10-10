@@ -6,6 +6,9 @@ import { WatermarkService } from '../watermark/watermark.service.js'
 import { emit as emitAudit } from '../../utils/audit-log.js'
 import { autoPublishAfterChange } from './vendor-publishing.js'
 import { normalizeVendorType, capabilitiesFor, VENDOR_TYPES } from './vendor-tier.js'
+import { OFFERINGS, normalizeOffering, allowedModesFor } from '../vendor-app-mode/offering.js'
+import { cacheDel } from '../../utils/cache.js'
+import { offeringCacheKey } from '../vendor-app-mode/vendor-app-mode.service.js'
 import { setGoogleBusinessForVendor } from './google-business.js'
 
 // Single source of truth for which onboarding documents block submission —
@@ -67,6 +70,7 @@ export class VendorsService {
     delete data.is_active
     delete data.created_by
     delete data.vendor_type // admin-only — see adminSetVendorType
+    for (const key of ['offering', 'pos_onboarding_status', 'pos_plan_name', 'pos_valid_to', 'pos_onboarding_data']) delete data[key] // admin-only — see adminSetOffering
 
     // Google Business fields are admin/vendor-typed data (link + the rating
     // they see on their own listing) — no resolve pipeline, just validated
@@ -1609,6 +1613,48 @@ export class VendorsService {
       logger.info({ vendorId, from: before?.vendor_type, to: type, adminUserId }, 'Vendor type changed')
     }
     return { vendor_type: updated.vendor_type, ...capabilitiesFor(updated.vendor_type) }
+  }
+
+  /**
+   * Admin sets which LNDRY products a vendor may use in the Vendor App (MARKETPLACE | POS | BOTH)
+   * plus the POS plan label/validity shown on the POS Home card. Takes effect on the vendor's
+   * next app-mode read; the offering cache is dropped immediately.
+   */
+  async adminSetOffering(id, input, adminUserId, actor = {}) {
+    const offering = normalizeOffering(input?.offering)
+    if (!offering) {
+      throw { statusCode: 400, message: `offering must be one of ${OFFERINGS.join(', ')}`, code: 'VALIDATION_ERROR' }
+    }
+    const planName = input?.pos_plan_name == null || input.pos_plan_name === '' ? null : String(input.pos_plan_name).trim().slice(0, 100)
+    const rawValidTo = input?.pos_valid_to == null || input.pos_valid_to === '' ? null : String(input.pos_valid_to).trim()
+    // Real calendar date only: Date.parse('2026-02-31') rolls over instead of failing, and Postgres would then reject it with a 500.
+    const isRealDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(v) && new Date(`${v}T00:00:00Z`).toISOString().slice(0, 10) === v
+    if (rawValidTo !== null && !isRealDate(rawValidTo)) {
+      throw { statusCode: 400, message: 'pos_valid_to must be a date like 2027-03-31', code: 'VALIDATION_ERROR' }
+    }
+    const vendorId = await this._requireAdminVendorId(id)
+    const before = await this.repo.getOffering(vendorId)
+    const updated = await this.repo.setOffering(vendorId, { offering, planName, validTo: rawValidTo })
+    if (!updated) throw { statusCode: 404, message: 'Approved vendor not found' }
+    await cacheDel(offeringCacheKey(vendorId)).catch(() => {})
+    emitAudit('vendor_offering_changed', {
+      actor_user_id: adminUserId ?? null,
+      actor_role: 'ADMIN',
+      target_type: 'vendor',
+      target_id: vendorId,
+      before: { offering: before?.offering ?? null, pos_plan_name: before?.pos_plan_name ?? null, pos_valid_to: before?.pos_valid_to ?? null },
+      after: { offering, pos_plan_name: planName, pos_valid_to: rawValidTo },
+      ip_address: actor.ip ?? null,
+      user_agent: actor.userAgent ?? null,
+    })
+    logger.info({ vendorId, from: before?.offering, to: offering, adminUserId }, 'Vendor offering changed')
+    return {
+      offering: updated.offering,
+      pos_onboarding_status: updated.pos_onboarding_status,
+      pos_plan_name: updated.pos_plan_name,
+      pos_valid_to: updated.pos_valid_to ? String(updated.pos_valid_to instanceof Date ? updated.pos_valid_to.toISOString() : updated.pos_valid_to).slice(0, 10) : null,
+      allowed_modes: allowedModesFor(updated.offering, updated.pos_onboarding_status),
+    }
   }
 
   async createCapacityException(userId, data) {

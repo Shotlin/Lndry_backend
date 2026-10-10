@@ -290,6 +290,28 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.adminSetVendorType.bind(controller))
 
+  fastify.put('/admin/:id/offering', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Set which LNDRY products a vendor may use in the Vendor App — MARKETPLACE / POS / BOTH — plus the POS plan label and validity [Admin]',
+      params: {
+        type: 'object',
+        required: ['id'],
+        properties: { id: { type: 'string', format: 'uuid' } }
+      },
+      body: {
+        type: 'object',
+        required: ['offering'],
+        properties: {
+          offering: { type: 'string', enum: ['MARKETPLACE', 'POS', 'BOTH'] },
+          pos_plan_name: { type: ['string', 'null'], maxLength: 100 },
+          pos_valid_to: { type: ['string', 'null'] }
+        }
+      }
+    }
+  }, controller.adminSetOffering.bind(controller))
+
   fastify.put('/admin/:id/google-business', {
     preHandler: adminPreHandlers,
     schema: {

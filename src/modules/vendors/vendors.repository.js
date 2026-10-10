@@ -176,6 +176,22 @@ export class VendorsRepository {
    * Deliberately NOT part of update()'s field map: vendor_type is an admin-only
    * setting, and update() also backs the vendor's own profile edits.
    */
+  async getOffering(id) {
+    const { rows } = await query(`SELECT offering, pos_plan_name, pos_valid_to FROM vendors WHERE id = $1`, [id])
+    return rows[0] || null
+  }
+
+  /** Admin-only, like setVendorType: never part of update()'s field map. Dates are YYYY-MM-DD or null. */
+  async setOffering(id, { offering, planName, validTo }) {
+    const { rows } = await query(
+      `UPDATE vendors SET offering = $2, pos_plan_name = $3, pos_valid_to = $4, updated_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, offering, pos_onboarding_status, pos_plan_name, pos_valid_to`,
+      [id, offering, planName, validTo]
+    )
+    return rows[0] || null
+  }
+
   async setVendorType(id, vendorType) {
     const { rows } = await query(
       `UPDATE vendors SET vendor_type = $2, updated_at = NOW()

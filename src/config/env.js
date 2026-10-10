@@ -175,6 +175,12 @@ const envSchema = z.object({
   // / ALLOW_MOCK_PAYMENT pattern.
   ALLOW_AUTO_APPROVE_VENDOR: booleanFromEnv.default(false),
 
+  // ENFORCE_OFFERING — when true, a vendor's `offering` (MARKETPLACE | POS | BOTH, migration 152)
+  // is enforced on the POS and marketplace route groups (403 POS_NOT_ENABLED /
+  // MARKETPLACE_NOT_ENABLED). Default false: the guard only logs what it would block, so the
+  // Epic desktop/website POS keeps working untouched. Turn on only after reviewing those logs.
+  ENFORCE_OFFERING: booleanFromEnv.default(false),
+
   // Delivery
   GOOGLE_MAPS_API_KEY: z.string().optional(),
   DELIVERY_RADIUS_KM: z.coerce.number().default(10),
