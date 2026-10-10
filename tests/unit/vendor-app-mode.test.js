@@ -134,7 +134,7 @@ describe('VendorAppModeService (mocked database)', () => {
 
   it('getAppMode: reports capabilities from vendor_type, never from offering', async () => {
     loadVendorActor.mockResolvedValue({ vendorId: 'v1', role: 'VENDOR_OWNER', permissions: [] })
-    query.mockResolvedValue({ rows: [row({ offering: 'BOTH', pos_onboarding_status: 'COMPLETED', vendor_type: 'PARTNER', pos_valid_to: new Date('2026-11-03T00:00:00Z') })] })
+    query.mockResolvedValue({ rows: [row({ offering: 'BOTH', pos_onboarding_status: 'COMPLETED', vendor_type: 'PARTNER', pos_valid_to: '2026-11-03' })] })
     const { appMode } = await service.getAppMode({ id: 'u1' })
     expect(appMode).toMatchObject({ allowedModes: ['MARKETPLACE', 'POS'], appSync: true, walletAccess: true, posValidTo: '2026-11-03', needsPosOnboarding: false, canStartPos: false })
   })

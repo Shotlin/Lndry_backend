@@ -88,7 +88,7 @@ const shapeVendor = (row) => {
     offering,
     posOnboardingStatus: status,
     posPlanName: row.pos_plan_name ?? null,
-    posValidTo: row.pos_valid_to ? String(row.pos_valid_to instanceof Date ? row.pos_valid_to.toISOString() : row.pos_valid_to).slice(0, 10) : null,
+    posValidTo: row.pos_valid_to ? String(row.pos_valid_to).slice(0, 10) : null,
     allowedModes: allowedModesFor(offering, status),
     needsPosOnboarding: offering !== 'MARKETPLACE' && status !== 'COMPLETED',
     canStartPos: offering === 'MARKETPLACE',
@@ -96,7 +96,8 @@ const shapeVendor = (row) => {
   }
 }
 
-const VENDOR_COLUMNS = `id, name, offering, pos_onboarding_status, pos_plan_name, pos_valid_to, pos_onboarding_data, vendor_type`
+// pos_valid_to::text: a DATE column must reach the client as 'YYYY-MM-DD', never as a JS Date (a server in IST would show the previous day).
+const VENDOR_COLUMNS = `id, name, offering, pos_onboarding_status, pos_plan_name, pos_valid_to::text AS pos_valid_to, pos_onboarding_data, vendor_type`
 
 export class VendorAppModeService {
   constructor({ catalogue = new VendorPosCatalogueService() } = {}) {

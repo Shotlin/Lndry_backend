@@ -1652,7 +1652,7 @@ export class VendorsService {
       offering: updated.offering,
       pos_onboarding_status: updated.pos_onboarding_status,
       pos_plan_name: updated.pos_plan_name,
-      pos_valid_to: updated.pos_valid_to ? String(updated.pos_valid_to instanceof Date ? updated.pos_valid_to.toISOString() : updated.pos_valid_to).slice(0, 10) : null,
+      pos_valid_to: updated.pos_valid_to ? String(updated.pos_valid_to).slice(0, 10) : null,
       allowed_modes: allowedModesFor(updated.offering, updated.pos_onboarding_status),
     }
   }
