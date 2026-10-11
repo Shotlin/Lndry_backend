@@ -145,6 +145,20 @@ describe.skipIf(!dbUp)('POS report (real database)', () => {
     expect(report.topGarments).toHaveLength(1)
     expect(report.topGarments[0]).toMatchObject({ qty: 6, revenuePaise: a.order.items[0].amountPaise * 3 })
 
+    // The CSV export lists exactly the orders the report counts, so its Total column adds up to the revenue.
+    const csv = (await dashboard.exportCounterSalesCsv(v, today, today)).split('\n')
+    expect(csv[0]).toBe('Order Number,Placed At,Customer,Phone,Subtotal (paise),Discount (paise),Tax (paise),Total (paise),Payment Method,Status,Paid (paise),Due (paise)')
+    expect(csv).toHaveLength(1 + 3)
+    const col = csv.slice(1).map((l) => l.split(','))
+    expect(col.reduce((sum, c) => sum + Number(c[7]), 0)).toBe(report.revenuePaise)
+    expect(col.reduce((sum, c) => sum + Number(c[11]), 0)).toBe(report.duesPaise)
+    expect(col[0][1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+
+    await query(`UPDATE users SET name = '=HYPERLINK("http://x")' WHERE id = $1`, [a.order.customer.id])
+    const evil = (await dashboard.exportCounterSalesCsv(v, today, today))
+    expect(evil).toContain(`"'=HYPERLINK(""http://x"")"`)
+    expect(evil).not.toMatch(/,=HYPERLINK/)
+
     // A wider range adds the old order and the old expense, and the daily rows add up to the totals.
     const wide = (await dashboard.report(v, addDays(-3), today)).report
     expect(wide.days).toBe(4)

@@ -1,7 +1,9 @@
 import { VendorPosDashboardRepository } from './vendor-pos-dashboard.repository.js'
 
 function csvEscape(value) {
-  const text = String(value ?? '')
+  let text = String(value ?? '')
+  // A name typed at the counter like =HYPERLINK(...) must not run as a formula when the file is opened in a spreadsheet.
+  if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) text = `'${text}`
   return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
@@ -66,12 +68,13 @@ export class VendorPosDashboardService {
 
   async exportCounterSalesCsv(vendorId, from, to) {
     const rows = await this.repo.exportCounterSales(vendorId, from, to)
-    const header = ['Order Number', 'Placed At', 'Customer', 'Phone', 'Subtotal (paise)', 'Discount (paise)', 'Tax (paise)', 'Total (paise)', 'Payment Method']
+    const header = ['Order Number', 'Placed At', 'Customer', 'Phone', 'Subtotal (paise)', 'Discount (paise)', 'Tax (paise)', 'Total (paise)', 'Payment Method', 'Status', 'Paid (paise)', 'Due (paise)']
     const lines = [header.join(',')]
     for (const row of rows) {
       lines.push([
         row.order_number, row.placed_at, row.customer_name, row.customer_phone,
-        row.subtotal_paise, row.discount_paise, row.tax_paise, row.total_paise, row.payment_method,
+        row.subtotal_paise, row.discount_paise, row.tax_paise, row.total_paise, row.payment_method, row.status, row.amount_paid_paise,
+        Math.max(0, row.total_paise - row.amount_paid_paise),
       ].map(csvEscape).join(','))
     }
     return lines.join('\n')

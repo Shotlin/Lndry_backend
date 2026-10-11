@@ -123,12 +123,16 @@ export class VendorPosDashboardRepository {
     return rows.map((row) => ({ name: row.name, units: row.units, revenuePaise: row.revenue_paise }))
   }
 
+  /**
+   * Counter orders placed in [from, to] — the same set the report counts (cancelled orders and the 'DESKTOP_PUSH'
+   * mirror rows are left out), so the Total column adds up to the report's revenue.
+   */
   async exportCounterSales(vendorId, from, to) {
     const { rows } = await query(
-      `SELECT so.order_number, so.placed_at, u.name AS customer_name, u.phone AS customer_phone,
-              so.subtotal_paise, so.discount_paise, so.tax_paise, so.total_paise, so.payment_method
+      `SELECT so.order_number, to_char(so.placed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS placed_at, u.name AS customer_name, u.phone AS customer_phone,
+              so.subtotal_paise, so.discount_paise, so.tax_paise, so.total_paise, so.payment_method, so.status, so.amount_paid_paise
        FROM store_orders so JOIN users u ON u.id = so.customer_user_id
-       WHERE so.vendor_id = $1 AND so.placed_at::date >= $2 AND so.placed_at::date <= $3
+       WHERE so.vendor_id = $1 AND so.source <> 'DESKTOP_PUSH' AND so.status <> 'CANCELLED' AND so.placed_at::date >= $2 AND so.placed_at::date <= $3
        ORDER BY so.placed_at ASC`,
       [vendorId, from, to]
     )
