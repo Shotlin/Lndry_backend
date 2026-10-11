@@ -12,6 +12,7 @@ export const posDashboardSchema = {
       properties: {
         asOf: { type: 'string' },
         counterSalesToday: { type: 'object', properties: { count: { type: 'integer' }, revenuePaise: { type: 'integer' }, collectedPaise: { type: 'integer' } } },
+        home: { type: 'object', properties: { bookingsToday: { type: 'integer' }, deliveriesToday: { type: 'integer' }, deliveredToday: { type: 'integer' }, pendingOrders: { type: 'integer' }, unassignedPickups: { type: 'integer' }, upcomingDeliveries: { type: 'integer' }, unassignedDeliveries: { type: 'integer' }, expressOrders: { type: 'integer' }, onlineOrderRequests: { type: 'integer' }, washingToStore: { type: 'integer' }, todayRevenuePaise: { type: 'integer' }, todayCollectionPaise: { type: 'integer' }, collectionDuePaise: { type: 'integer' } } },
         cashShift: { type: ['object', 'null'], properties: { id: { type: 'string' }, register: { type: 'string' }, openingCashPaise: { type: 'integer' }, openedAt: { type: 'string' } } },
         productionTasks: { type: 'object', properties: { open: { type: 'integer' }, inProgress: { type: 'integer' }, urgent: { type: 'integer' } } },
         openQualityClaims: { type: 'integer' },

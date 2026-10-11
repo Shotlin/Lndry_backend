@@ -13,7 +13,11 @@ export class VendorPosDashboardService {
   async dashboard(vendorId) {
     const asOf = new Date().toISOString().slice(0, 10)
     const sevenDaysAgo = new Date(Date.now() - 7 * 86400000).toISOString()
-    const [counterSales, cashShift, taskRows, qualityClaims, returnCases, riderSettlements, orderHolds, topGarments] = await Promise.all([
+    const [tiles, collectedToday, onlineRequests, washingToStore, counterSales, cashShift, taskRows, qualityClaims, returnCases, riderSettlements, orderHolds, topGarments] = await Promise.all([
+      this.repo.homeOrderTiles(vendorId, asOf),
+      this.repo.homeCollectionToday(vendorId, asOf),
+      this.repo.onlineOrderRequestsCount(vendorId),
+      this.repo.washingToStoreCount(vendorId),
       this.repo.counterSalesSummary(vendorId, asOf),
       this.repo.openCashShift(vendorId),
       this.repo.productionTaskCounts(vendorId),
@@ -34,6 +38,22 @@ export class VendorPosDashboardService {
     return {
       asOf,
       counterSalesToday: counterSales,
+      // POS Home tiles. Integers, never null: every figure is computed from this vendor's own rows.
+      home: {
+        todayRevenuePaise: Number(tiles.revenue_today_paise),
+        todayCollectionPaise: Number(collectedToday),
+        onlineOrderRequests: onlineRequests,
+        washingToStore,
+        bookingsToday: tiles.bookings_today,
+        deliveriesToday: tiles.deliveries_today,
+        deliveredToday: tiles.delivered_today,
+        pendingOrders: tiles.pending_orders,
+        unassignedPickups: tiles.unassigned_pickups,
+        upcomingDeliveries: tiles.upcoming_deliveries,
+        unassignedDeliveries: tiles.unassigned_deliveries,
+        expressOrders: tiles.express_orders,
+        collectionDuePaise: Number(tiles.collection_due_paise),
+      },
       cashShift: cashShift ? { id: cashShift.id, register: cashShift.register, openingCashPaise: cashShift.opening_cash_paise, openedAt: cashShift.opened_at } : null,
       productionTasks,
       openQualityClaims: qualityClaims,
