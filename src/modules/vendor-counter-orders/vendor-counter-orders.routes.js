@@ -2,6 +2,7 @@ import { query } from '../../config/database.js'
 import { success, error } from '../../utils/apiResponse.js'
 import { VendorCounterOrdersService } from './vendor-counter-orders.service.js'
 import { VendorCounterViewsService } from './vendor-counter-views.service.js'
+import { InvoicesService, InvoiceError } from '../invoices/invoices.service.js'
 import { VendorPosCatalogueService } from '../vendor-pos-catalogue/vendor-pos-catalogue.service.js'
 
 // No body schemas on purpose: this app's AJV runs with removeAdditional:'all', which would strip every
@@ -17,6 +18,7 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   const service = new VendorCounterOrdersService()
   const views = new VendorCounterViewsService()
   const posCatalogue = new VendorPosCatalogueService()
+  const invoices = new InvoicesService()
 
   fastify.addHook('preHandler', fastify.authenticate)
   fastify.addHook('preHandler', async (request, reply) => {
@@ -71,6 +73,25 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   fastify.post('/orders/:id/assign', { schema: { params: idParams} }, async (request, res) => reply(res, await service.assign(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Captain assigned'))
   fastify.get('/orders/:id/payments', { schema: { params: idParams } }, async (request, res) => res.send(success(await service.listPayments(request.vendorId, request.params.id))))
   fastify.post('/orders/:id/payments', { schema: { params: idParams} }, async (request, res) => reply(res, await service.collectPayment(request.vendorId, actorOf(request), request.params.id, request.body || {}), 'Payment recorded', 201))
+
+  // The bill/invoice PDF of one counter order. ?format=full (default) is the issued invoice of a delivered order;
+  // ?format=mini&paper=58|80 is a narrow counter bill, available until the order is cancelled.
+  fastify.get('/orders/:id/invoice', { schema: { params: idParams }, config: { rateLimit: { max: 60, timeWindow: '1 minute' } } }, async (request, res) => {
+    const format = request.query.format === 'mini' ? 'mini' : 'full'
+    const paperMm = Number(request.query.paper) === 58 ? 58 : 80
+    try {
+      const file = await invoices.getPdfForVendor(request.vendorId, request.params.id, { format, paperMm })
+      return res
+        .header('Content-Type', file.contentType)
+        .header('Content-Disposition', `inline; filename="${String(file.fileName).replace(/[^\w.\-]/g, '_')}"`)
+        .header('Cache-Control', 'private, no-store')
+        .header('X-Content-Type-Options', 'nosniff')
+        .send(file.buffer)
+    } catch (err) {
+      if (err instanceof InvoiceError) return res.code(err.statusCode).send(error(err.message, err.code))
+      throw err
+    }
+  })
 
   // (POS garment, POS service) -> LNDRY rate id, for features that reference a marketplace price line (service packages)
   fastify.get('/rates', async (request, res) => res.send(success(await posCatalogue.listMarketplaceLinkedRates(request.vendorId))))

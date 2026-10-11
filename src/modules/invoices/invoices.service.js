@@ -11,6 +11,7 @@ import {
   financialYearLabel,
 } from './invoice-data.builder.js'
 import { getActiveTemplate } from './templates/index.js'
+import miniTemplate from './templates/mini-v1.js'
 
 const LINK_TTL_SECONDS = 10 * 60
 const LINK_PURPOSE = 'invoice_pdf'
@@ -70,6 +71,36 @@ export class InvoicesService {
   async getPdfForAdmin(orderId) {
     const ref = await resolveOrderRef(orderId)
     if (!ref) throw notFound()
+    const { invoice } = await this.ensureInvoice(ref)
+    return this.loadPdf(invoice)
+  }
+
+  // ── Vendor counter ─────────────────────────────────────────────────────────
+
+  /** The vendor's own counter order, or a 404 (another shop's order reads as "not found"). */
+  async _vendorStoreOrder(vendorId, orderId) {
+    const ref = await resolveOrderRef(orderId)
+    if (!ref || ref.type !== 'STORE_ORDER' || ref.vendorId !== vendorId) throw notFound()
+    return ref
+  }
+
+  /**
+   * The vendor's PDF for one counter order.
+   *  - format "full": the issued A4 invoice (same file the customer gets). Only a delivered order has one.
+   *  - format "mini": a 58/80 mm bill built from the same invoice data, available at any stage except cancelled.
+   */
+  async getPdfForVendor(vendorId, orderId, { format = 'full', paperMm = 80 } = {}) {
+    const ref = await this._vendorStoreOrder(vendorId, orderId)
+    if (format === 'mini') {
+      if (ref.status === 'CANCELLED') throw new InvoiceError('INVOICE_NOT_AVAILABLE', 'A cancelled order has no bill.', 409)
+      const data = await buildInvoiceData(ref)
+      if (!data) throw notFound()
+      const existing = await this.repo.findByOrder(ref.type, ref.id)
+      if (existing) data.invoice = { ...data.invoice, number: existing.invoiceNumber }
+      const buffer = await miniTemplate.render(data, paperMm)
+      return { buffer, contentType: 'application/pdf', fileName: `Bill-${data.order.number || ref.id.slice(0, 8)}.pdf` }
+    }
+    if (!isInvoiceable(ref)) throw new InvoiceError('INVOICE_NOT_AVAILABLE', 'The invoice is created when the order is delivered. Use the mini bill until then.', 409)
     const { invoice } = await this.ensureInvoice(ref)
     return this.loadPdf(invoice)
   }
