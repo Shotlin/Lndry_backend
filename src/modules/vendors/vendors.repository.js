@@ -68,6 +68,7 @@ export class VendorsRepository {
         vendor_approved, account_enabled, marketplace_published,
         requested_service_radius_km, approved_service_radius_km,
         express_pickup_available, vendor_type,
+        offering, pos_onboarding_status, pos_plan_name, pos_valid_to::text AS pos_valid_to,
         google_business_url, google_rating, google_review_count, google_business_name
       FROM vendors
       WHERE id = $1 AND deleted_at IS NULL`,
@@ -87,6 +88,7 @@ export class VendorsRepository {
         v.vendor_approved, v.account_enabled, v.marketplace_published,
         v.requested_service_radius_km, v.approved_service_radius_km,
         v.express_pickup_available, v.vendor_type,
+        v.offering, v.pos_onboarding_status, v.pos_plan_name, v.pos_valid_to::text AS pos_valid_to,
         v.google_business_url, v.google_rating, v.google_review_count, v.google_business_name
       FROM vendors v
       LEFT JOIN vendor_employees ve ON ve.vendor_id = v.id
@@ -166,6 +168,7 @@ export class VendorsRepository {
         vendor_approved, account_enabled, marketplace_published,
         requested_service_radius_km, approved_service_radius_km,
         express_pickup_available, vendor_type,
+        offering, pos_onboarding_status, pos_plan_name, pos_valid_to::text AS pos_valid_to,
         google_business_url, google_rating, google_review_count, google_business_name`,
       params
     )
@@ -176,6 +179,22 @@ export class VendorsRepository {
    * Deliberately NOT part of update()'s field map: vendor_type is an admin-only
    * setting, and update() also backs the vendor's own profile edits.
    */
+  async getOffering(id) {
+    const { rows } = await query(`SELECT offering, pos_plan_name, pos_valid_to::text AS pos_valid_to FROM vendors WHERE id = $1`, [id])
+    return rows[0] || null
+  }
+
+  /** Admin-only, like setVendorType: never part of update()'s field map. Dates are YYYY-MM-DD or null. */
+  async setOffering(id, { offering, planName, validTo }) {
+    const { rows } = await query(
+      `UPDATE vendors SET offering = $2, pos_plan_name = $3, pos_valid_to = $4, updated_at = NOW()
+       WHERE id = $1 AND deleted_at IS NULL
+       RETURNING id, offering, pos_onboarding_status, pos_plan_name, pos_valid_to::text AS pos_valid_to`,
+      [id, offering, planName, validTo]
+    )
+    return rows[0] || null
+  }
+
   async setVendorType(id, vendorType) {
     const { rows } = await query(
       `UPDATE vendors SET vendor_type = $2, updated_at = NOW()
@@ -264,7 +283,7 @@ export class VendorsRepository {
         `SELECT v.id, v.name, v.slug, v.branch_code, v.description, v.logo_url, v.banner_url,
           v.phone, v.email, v.address_line1, v.address_line2, v.city, v.state, v.pincode,
           v.lat, v.lng, v.delivery_radius_km, v.is_active, v.is_open, v.status, v.created_at,
-          v.vendor_type,
+          v.vendor_type, v.offering, v.pos_onboarding_status, v.pos_plan_name, v.pos_valid_to::text AS pos_valid_to,
           u.name AS owner_name,
           (SELECT COUNT(*)::int FROM vendor_services vs WHERE vs.vendor_id = v.id AND vs.deleted_at IS NULL AND vs.is_available = true) AS services_count,
           (SELECT COUNT(*)::int FROM vendor_slots vs WHERE vs.vendor_id = v.id AND vs.is_active = true) AS slots_count,

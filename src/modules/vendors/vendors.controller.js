@@ -549,6 +549,19 @@ export class VendorsController {
     }
   }
 
+  async adminSetOffering(request, reply) {
+    const { id } = request.params
+    try {
+      const res = await this.service.adminSetOffering(id, request.body || {}, request.user.id, {
+        ip: request.ip ?? null,
+        userAgent: request.headers?.['user-agent'] ?? null,
+      })
+      return reply.send(success(res, 'Vendor offering updated'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update vendor offering', err.code))
+    }
+  }
+
   async adminSetGoogleBusiness(request, reply) {
     const { id } = request.params
     const {

@@ -3,6 +3,7 @@ import { env } from './config/env.js'
 import { query } from './config/database.js'
 import { redis } from './config/redis.js'
 import { sanitize } from './middlewares/sanitize.js'
+import { offeringGuard } from './middlewares/offering-guard.js'
 import { installRouteCollector } from './utils/permission-audit.js'
 import { captureRawBody } from './utils/rawBody.js'
 
@@ -66,6 +67,8 @@ export const buildApp = async () => {
   // parsing. preHandler runs after parsing *and* after AJV schema
   // validation/coercion, so this sanitizes already-validated string fields.
   app.addHook('preHandler', sanitize)
+  // Vendor offering (MARKETPLACE | POS | BOTH). Log-only unless ENFORCE_OFFERING=true. See middlewares/offering-guard.js.
+  app.addHook('preHandler', offeringGuard())
 
   // A POST/PUT/DELETE that declares `content-type: application/json` but sends
   // NO body (mobile HTTP clients do this for action endpoints like "reorder",
@@ -297,6 +300,10 @@ export const buildApp = async () => {
   })
   await app.register(import('./modules/vendors/vendors.routes.js'), {
     prefix: '/api/v1/vendors',
+  })
+  // Vendor App modes (Marketplace / POS) + POS onboarding
+  await app.register(import('./modules/vendor-app-mode/vendor-app-mode.routes.js'), {
+    prefix: '/api/v1/vendor',
   })
 
   // Vendor applications & profiles onboarding (Section 8)
