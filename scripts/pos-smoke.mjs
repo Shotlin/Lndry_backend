@@ -4,6 +4,8 @@
  *
  *   OTP login → POS onboarding → customer → price → quote (charge + discount + GST) → book (idempotent)
  *   → fetch → flags → list filters → dashboard tiles → tenant isolation → input validation
+ *   With --lifecycle also: part-pay → move through every step → deliver blocked while unpaid → pay → deliver
+ *   → invoice PDFs → status events → list paging/tabs → cancel
  *
  * Needs a running API with test OTPs enabled (local only: TEST_BYPASS_OTP_PHONES=*, OTP 123456):
  *   node src/server.js &            # API on :4500
@@ -142,6 +144,78 @@ for (const [name, patch] of [
 ]) {
   const r = await call(A.token, 'POST', '/vendor/counter/orders', { ...body, ...patch }, { 'Idempotency-Key': randomUUID() })
   check(`refused with 400: ${name}`, r.status === 400 && typeof r.body?.message === 'string' && !r.body.stack, r.body)
+}
+
+// ── order life (Phase 3): only with --lifecycle ─────────────────────────
+if (process.argv.includes('--lifecycle')) {
+  const cat = (await call(B.token, 'GET', '/vendor/pos-catalogue')).data
+  const priced = cat.prices.find((p) => p.ratePaise > 0)
+  const lc = await call(B.token, 'POST', '/vendor/counter/customers', { name: 'Life Customer', phone: '9000055555' })
+  const lcBody = { customer: { id: lc.data.customer.id }, items: [{ garmentId: priced.garmentId, serviceId: priced.serviceId, qty: 2 }], expectedDeliveryDate: inDays(2), paymentMode: 'PAY_LATER' }
+  const bk = await call(B.token, 'POST', '/vendor/counter/orders', lcBody, { 'Idempotency-Key': randomUUID() })
+  const o = bk.data?.order
+  const total = priced.ratePaise * 2
+  check('lifecycle: booked unpaid at the price list total', bk.status === 201 && o.status === 'BOOKED' && o.totalPaise === total && o.amountPaidPaise === 0, bk.body)
+  const url = `/vendor/counter/orders/${o.id}`
+  const pdf = async (q) => {
+    const res = await fetch(`${API}${url}/invoice${q}`, { headers: { authorization: `Bearer ${B.token}` } })
+    const buf = Buffer.from(await res.arrayBuffer())
+    return { status: res.status, type: res.headers.get('content-type'), isPdf: buf.subarray(0, 5).toString() === '%PDF-', size: buf.length, text: res.status === 200 ? '' : buf.toString() }
+  }
+
+  const part = Math.floor(total / 3)
+  const p1 = await call(B.token, 'POST', `${url}/payments`, { amountPaise: part, mode: 'CASH' })
+  check('part payment is recorded: PART_PAID with the right balance', p1.status === 201 && p1.data.order.paymentStatus === 'PART_PAID' && p1.data.order.amountPaidPaise === part && p1.data.payments.length === 1, p1.body)
+  const over = await call(B.token, 'POST', `${url}/payments`, { amountPaise: total, mode: 'CASH' })
+  check('paying more than the balance is refused (OVERPAYMENT)', over.status === 400 && over.body.code === 'OVERPAYMENT', over.body)
+  check('wallet is not accepted at Pay Now (no OTP-confirmed redemption on an existing order)', (await call(B.token, 'POST', `${url}/payments`, { amountPaise: 100, mode: 'WALLET' })).status === 400)
+
+  const skip = await call(B.token, 'POST', `${url}/transition`, { state: 'DELIVERED' })
+  check('skipping steps is refused with INVALID_TRANSITION', skip.status === 409 && skip.body.code === 'INVALID_TRANSITION', skip.body)
+  check('BOOKED -> IN_PROCESS', (await call(B.token, 'POST', `${url}/transition`, { state: 'IN_PROCESS' })).data?.order?.status === 'IN_PROCESS')
+  const gated = await call(B.token, 'POST', `${url}/transition`, { state: 'READY' })
+  check('IN_PROCESS -> READY is gated while garments are unscanned (ASSEMBLY_INCOMPLETE)', gated.status === 409 && gated.body.code === 'ASSEMBLY_INCOMPLETE', gated.body)
+  const ready = await call(B.token, 'POST', `${url}/transition`, { state: 'READY', allowIncomplete: true })
+  check('"Mark ready anyway" (allowIncomplete) moves it to READY', ready.data?.order?.status === 'READY', ready.body)
+  const blocked = await call(B.token, 'POST', `${url}/transition`, { state: 'DELIVERED' })
+  check('delivering with a balance is blocked (PAYMENT_OUTSTANDING)', blocked.status === 409 && blocked.body.code === 'PAYMENT_OUTSTANDING', blocked.body)
+  check('mini bill works before delivery (58 and 80 mm)', (await pdf('?format=mini&paper=80')).isPdf && (await pdf('?format=mini&paper=58')).isPdf)
+  const early = await pdf('')
+  check('the A4 invoice is refused until delivery (409, plain words)', early.status === 409 && /delivered/i.test(early.text), early)
+
+  const p2 = await call(B.token, 'POST', `${url}/payments`, { amountPaise: total - part, mode: 'UPI', reference: 'UTR123' })
+  check('paying the rest makes it PAID', p2.status === 201 && p2.data.order.paymentStatus === 'PAID' && p2.data.payments.length === 2, p2.body)
+  const del = await call(B.token, 'POST', `${url}/transition`, { state: 'DELIVERED' })
+  check('READY -> DELIVERED once paid', del.data?.order?.status === 'DELIVERED' && del.data.order.paymentStatus === 'PAID', del.body)
+  const inv = await pdf('')
+  check('the A4 invoice PDF is returned after delivery', inv.status === 200 && inv.isPdf && /pdf/.test(inv.type), inv)
+  const inv2 = await pdf('?format=full')
+  check('asking again returns the same issued invoice (same size)', inv2.status === 200 && inv2.size === inv.size, inv2)
+  const mini = await pdf('?format=mini&paper=58')
+  check('mini bill still works after delivery', mini.status === 200 && mini.isPdf, mini)
+  check('the order is closed: edit, cancel and transition are refused', (await call(B.token, 'PATCH', url, { notes: 'x' })).body?.code === 'ORDER_CLOSED' && (await call(B.token, 'POST', `${url}/cancel`, { reason: 'changed my mind' })).status === 409)
+
+  const detail = (await call(B.token, 'GET', url)).data
+  check('status events are recorded in order: BOOKED, IN_PROCESS, READY, DELIVERED', detail.history.map((e) => e.to).join() === 'BOOKED,IN_PROCESS,READY,DELIVERED', detail.history)
+  check('detail carries both payments', detail.payments.map((p) => p.mode).join() === 'CASH,UPI' && detail.payments.reduce((s, p) => s + p.amountPaise, 0) === total)
+
+  // list paging, tabs, payment-due
+  const more = []
+  for (let i = 0; i < 3; i++) more.push((await call(B.token, 'POST', '/vendor/counter/orders', { ...lcBody, paymentMode: i === 0 ? 'CASH' : 'PAY_LATER' }, { 'Idempotency-Key': randomUUID() })).data.order)
+  const page1 = (await call(B.token, 'GET', '/vendor/counter/orders?limit=2')).data
+  const page2 = (await call(B.token, 'GET', '/vendor/counter/orders?limit=2&offset=2')).data
+  const ids = [...page1, ...page2].map((x) => x.id)
+  check('paging by offset gives each order once, newest first', ids.length === 4 && new Set(ids).size === 4, ids)
+  const tab = (await call(B.token, 'GET', '/vendor/counter/orders?status=BOOKED,PICKED_UP')).data
+  check('?status=BOOKED,PICKED_UP is the Booked tab', tab.length === 3 && tab.every((x) => x.status === 'BOOKED'), tab.map((x) => x.status))
+  const due = (await call(B.token, 'GET', '/vendor/counter/orders?paymentDue=true')).data
+  check('?paymentDue=true keeps only orders that still owe money', due.length === 2 && due.every((x) => x.totalPaise > x.amountPaidPaise), due.map((x) => x.paymentStatus))
+  const c = await call(B.token, 'POST', `/vendor/counter/orders/${more[1].id}/cancel`, { reason: 'Customer changed mind' })
+  check('cancel records the reason', c.data?.order?.status === 'CANCELLED' && c.data.order.cancelReason === 'Customer changed mind', c.body)
+  check('a cancelled order no longer shows as payment due', (await call(B.token, 'GET', '/vendor/counter/orders?paymentDue=true')).data.length === 1)
+  const cancelledBill = await pdf('')
+  check('another shop cannot fetch this shop\'s invoice', (await fetch(`${API}${url}/invoice?format=mini`, { headers: { authorization: `Bearer ${A.token}` } })).status === 404 && cancelledBill.status === 200)
+  check('a cancelled order has no mini bill', (await fetch(`${API}/vendor/counter/orders/${more[1].id}/invoice?format=mini`, { headers: { authorization: `Bearer ${B.token}` } })).status === 409)
 }
 
 const failed = results.filter((ok) => !ok).length

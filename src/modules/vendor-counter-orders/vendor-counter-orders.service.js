@@ -11,6 +11,7 @@ import { scheduleInvoiceForDeliveredOrder } from '../invoices/invoice-jobs.js'
 import { VendorGarmentUnitsRepository } from '../vendor-garment-units/vendor-garment-units.repository.js'
 import { VendorLaundryContainersRepository } from '../vendor-laundry-containers/vendor-laundry-containers.repository.js'
 import { logger } from '../../config/logger.js'
+import { HOME_TILE_CONDITIONS, serverToday } from '../vendor-pos-dashboard/home-tile-filters.js'
 import { WalletRedemptionService } from '../wallet-redemption/wallet-redemption.service.js'
 import { getVendorCapabilities, WALLET_RESTRICTED_MESSAGE, TIER_RESTRICTED } from '../vendors/vendor-tier.js'
 
@@ -622,10 +623,25 @@ export class VendorCounterOrdersService {
 
   // ── Reading ──────────────────────────────────────────────────────────────
 
-  async listOrders(vendorId, { status, search, from, to, customerId, deliveryMode, express, limit = 100 } = {}) {
+  // `tile` filters like a POS Home tile (see vendor-pos-dashboard/home-tile-filters.js).
+  // `status` may be one status or a comma list ("BOOKED,PICKED_UP" = the Booked tab). `offset` pages through
+  // a long list; `paymentDue=true` keeps orders that still owe money (cancelled orders owe nothing).
+  async listOrders(vendorId, { status, search, from, to, customerId, deliveryMode, express, paymentDue, tile, limit = 100, offset = 0 } = {}) {
     const params = [vendorId]
     const where = ['so.vendor_id = $1', "so.source <> 'DESKTOP_PUSH'"]
-    if (status) { params.push(String(status).toUpperCase()); where.push(`so.status = $${params.length}`) }
+    const statuses = String(status || '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+    if (statuses.length) { params.push(statuses); where.push(`so.status = ANY($${params.length}::text[])`) }
+    // `tile` = exactly the orders a POS Home tile counts (same condition as the dashboard); an unknown tile matches nothing.
+    if (tile) {
+      const condition = Object.hasOwn(HOME_TILE_CONDITIONS, tile) ? HOME_TILE_CONDITIONS[tile] : null
+      if (!condition) where.push('FALSE')
+      else {
+        let sql = condition('so', '@TODAY@')
+        if (sql.includes('@TODAY@')) { params.push(serverToday()); sql = sql.replaceAll('@TODAY@', `$${params.length}::date`) }
+        where.push(`(${sql})`)
+      }
+    }
+    if (paymentDue === true || paymentDue === 'true') where.push("so.total_paise > COALESCE(so.amount_paid_paise, 0) AND so.status <> 'CANCELLED'")
     if (customerId) { params.push(customerId); where.push(`so.customer_user_id = $${params.length}`) }
     const mode = parseDeliveryMode(deliveryMode)
     if (mode && mode !== 'INVALID') { params.push(mode); where.push(`so.delivery_mode = $${params.length}`) }
@@ -638,7 +654,8 @@ export class VendorCounterOrdersService {
       where.push(`(lower(so.order_number) LIKE $${n} OR lower(COALESCE(u.name,'')) LIKE $${n} OR u.phone LIKE $${n})`)
     }
     params.push(Math.min(Number(limit) || 100, 500))
-    const { rows } = await query(`SELECT ${ORDER_SELECT} ${ORDER_FROM} WHERE ${where.join(' AND ')} ORDER BY so.placed_at DESC LIMIT $${params.length}`, params)
+    params.push(Math.max(Math.floor(Number(offset)) || 0, 0))
+    const { rows } = await query(`SELECT ${ORDER_SELECT} ${ORDER_FROM} WHERE ${where.join(' AND ')} ORDER BY so.placed_at DESC, so.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`, params)
     return rows.map(presentOrder)
   }
 

@@ -1,4 +1,5 @@
 import { query } from '../../config/database.js'
+import { HOME_TILE_CONDITIONS as T } from './home-tile-filters.js'
 
 /**
  * Vendor POS Dashboard repository — Tier 4 of the POS-parity initiative
@@ -35,18 +36,16 @@ export class VendorPosDashboardRepository {
   async homeOrderTiles(vendorId, asOf) {
     const { rows } = await query(
       `SELECT
-         COALESCE(SUM(total_paise) FILTER (WHERE placed_at::date = $2 AND status <> 'CANCELLED'), 0)::bigint AS revenue_today_paise,
-         COUNT(*) FILTER (WHERE placed_at::date = $2 AND status <> 'CANCELLED')::int AS bookings_today,
-         COUNT(*) FILTER (WHERE status NOT IN ('DELIVERED','CANCELLED') AND expected_delivery_date = $2::date)::int AS deliveries_today,
-         COUNT(*) FILTER (WHERE status NOT IN ('DELIVERED','CANCELLED') AND expected_delivery_date <= $2::date)::int AS upcoming_deliveries,
-         COUNT(*) FILTER (WHERE status = 'DELIVERED' AND EXISTS (
-            SELECT 1 FROM store_order_status_events e
-            WHERE e.store_order_id = store_orders.id AND e.to_status = 'DELIVERED' AND e.created_at::date = $2))::int AS delivered_today,
-         COUNT(*) FILTER (WHERE status NOT IN ('DELIVERED','CANCELLED'))::int AS pending_orders,
-         COUNT(*) FILTER (WHERE delivery_mode = 'PICKUP' AND status = 'BOOKED' AND pickup_rider_employee_id IS NULL)::int AS unassigned_pickups,
-         COUNT(*) FILTER (WHERE delivery_mode = 'HOME_DELIVERY' AND status IN ('READY','OUT_FOR_DELIVERY') AND delivery_rider_employee_id IS NULL)::int AS unassigned_deliveries,
-         COUNT(*) FILTER (WHERE is_express AND status NOT IN ('DELIVERED','CANCELLED'))::int AS express_orders,
-         COALESCE(SUM(total_paise - amount_paid_paise) FILTER (WHERE status <> 'CANCELLED' AND total_paise > amount_paid_paise), 0)::bigint AS collection_due_paise
+         COALESCE(SUM(total_paise) FILTER (WHERE ${T.bookingsToday('store_orders', '$2::date')}), 0)::bigint AS revenue_today_paise,
+         COUNT(*) FILTER (WHERE ${T.bookingsToday('store_orders', '$2::date')})::int AS bookings_today,
+         COUNT(*) FILTER (WHERE ${T.deliveriesToday('store_orders', '$2::date')})::int AS deliveries_today,
+         COUNT(*) FILTER (WHERE ${T.upcomingDeliveries('store_orders', '$2::date')})::int AS upcoming_deliveries,
+         COUNT(*) FILTER (WHERE ${T.deliveredToday('store_orders', '$2::date')})::int AS delivered_today,
+         COUNT(*) FILTER (WHERE ${T.pendingOrders('store_orders')})::int AS pending_orders,
+         COUNT(*) FILTER (WHERE ${T.unassignedPickups('store_orders')})::int AS unassigned_pickups,
+         COUNT(*) FILTER (WHERE ${T.unassignedDeliveries('store_orders')})::int AS unassigned_deliveries,
+         COUNT(*) FILTER (WHERE ${T.expressOrders('store_orders')})::int AS express_orders,
+         COALESCE(SUM(total_paise - amount_paid_paise) FILTER (WHERE ${T.collectionDue('store_orders')}), 0)::bigint AS collection_due_paise
        FROM store_orders
        WHERE vendor_id = $1 AND source <> 'DESKTOP_PUSH'`,
       [vendorId, asOf]
