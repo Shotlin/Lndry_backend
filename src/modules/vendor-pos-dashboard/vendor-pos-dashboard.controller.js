@@ -24,4 +24,11 @@ export class VendorPosDashboardController {
     if (!result.success) return reply.code(400).send(error(result.message, 'VALIDATION_ERROR'))
     return reply.code(200).send(success(result.results, 'Search results fetched'))
   }
+
+  async report(request, reply) {
+    const { from, to } = request.query || {}
+    const result = await this.service.report(request.vendorId, from, to)
+    if (!result.success) return reply.code(400).send(error(result.message, 'VALIDATION_ERROR'))
+    return reply.code(200).send(success(result.report, 'POS report fetched'))
+  }
 }

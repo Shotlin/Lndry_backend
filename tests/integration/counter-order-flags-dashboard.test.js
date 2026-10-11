@@ -110,6 +110,27 @@ describe.skipIf(!dbUp)('counter order delivery flags + POS Home tiles (real data
     expect(await orders.update(shop.vendorId, shop.actor, plain.order.id, { deliveryMode: 'x' })).toMatchObject({ success: false })
   })
 
+  it('two shops that enter different names for the same phone each see only their own name (list, detail, search, export)', async () => {
+    const one = await makeShop(6)
+    const two = await makeShop(7)
+    const customerPhone = phone(5)
+    const lineOne = await firstLine(one.vendorId)
+    const lineTwo = await firstLine(two.vendorId)
+    const mk = (shop, line, name) => orders.book(shop.vendorId, shop.actor, { customer: { name, phone: customerPhone }, expectedDeliveryDate: addDays(2), items: [{ ...line, qty: 1 }], paymentMode: 'PAY_LATER' })
+    const a = await mk(one, lineOne, 'Asha Rao')
+    const b = await mk(two, lineTwo, 'Ashu Bhai')
+    expect(a.success && b.success).toBe(true)
+    expect((await orders.listOrders(one.vendorId, {}))[0].customer.name).toBe('Asha Rao')
+    expect((await orders.listOrders(two.vendorId, {}))[0].customer.name).toBe('Ashu Bhai')
+    expect((await orders.getOrder(two.vendorId, b.order.id))?.order?.customer?.name ?? (await orders.getOrder(two.vendorId, b.order.id))?.customer?.name).toBe('Ashu Bhai')
+    expect((await orders.listOrders(two.vendorId, { search: 'Ashu' })).map((o) => o.id)).toEqual([b.order.id])
+    expect(await orders.listOrders(two.vendorId, { search: 'Asha Rao' })).toHaveLength(0)
+    const csv = await dashboard.exportCounterSalesCsv(two.vendorId, today, today)
+    expect(csv).toContain('Ashu Bhai')
+    expect(csv).not.toContain('Asha Rao')
+    expect((await dashboard.search(two.vendorId, 'Ashu')).results.customers.map((c) => c.name)).toEqual(['Ashu Bhai'])
+  })
+
   it('a malformed customer id is a 400 validation error, not a 500', async () => {
     const shop = await makeShop(5)
     const line = await firstLine(shop.vendorId)
