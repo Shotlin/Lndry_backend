@@ -49,6 +49,8 @@ const digits = (value) => String(value ?? '').replace(/\D/g, '')
 const tag = (prefix) => `${prefix}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 const referralCode = () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join('')
 const fail = (message, code = 'VALIDATION_ERROR', status = 400) => ({ success: false, message, code, status })
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+const BAD_CUSTOMER = 'Choose a valid customer.'
 // Shortest legal sequence of states from `from` to `to` (excluding `from`), or null.
 function statePath(transitions, from, to) {
   if (from === to) return []
@@ -354,6 +356,8 @@ export class VendorCounterOrdersService {
    * Everything is whole paise, each line rounded once; the total is the sum of the lines shown.
    */
   async quote(vendorId, input, customerUserId = input.customer?.id || input.customerId || null) {
+    // A malformed id would reach Postgres as a uuid cast and surface as a 500; it is the caller's mistake (400).
+    if (customerUserId && !UUID_RE.test(String(customerUserId))) return fail(BAD_CUSTOMER)
     const items = await this._priceItems(vendorId, input.items, customerUserId)
     if (!items.success) return items
     const chargeIds = input.chargeRuleIds || []
@@ -420,6 +424,7 @@ export class VendorCounterOrdersService {
     if (isExpress === 'INVALID') return fail('isExpress must be true or false')
 
     let customerId = input.customer?.id
+    if (customerId && !UUID_RE.test(String(customerId))) return fail(BAD_CUSTOMER)
     if (!customerId) {
       const created = await this.findOrCreateCustomer(vendorId, actor, { name: input.customer?.name, phone: input.customer?.phone })
       if (!created.success) return created

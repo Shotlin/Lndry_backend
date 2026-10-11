@@ -110,6 +110,17 @@ describe.skipIf(!dbUp)('counter order delivery flags + POS Home tiles (real data
     expect(await orders.update(shop.vendorId, shop.actor, plain.order.id, { deliveryMode: 'x' })).toMatchObject({ success: false })
   })
 
+  it('a malformed customer id is a 400 validation error, not a 500', async () => {
+    const shop = await makeShop(5)
+    const line = await firstLine(shop.vendorId)
+    const body = { customer: { id: 'not-a-uuid' }, expectedDeliveryDate: addDays(2), items: [{ ...line, qty: 1 }], paymentMode: 'PAY_LATER' }
+    expect(await orders.quote(shop.vendorId, body)).toMatchObject({ success: false, code: 'VALIDATION_ERROR', status: 400, message: 'Choose a valid customer.' })
+    expect(await orders.book(shop.vendorId, shop.actor, body)).toMatchObject({ success: false, code: 'VALIDATION_ERROR', status: 400 })
+    expect(await orders.quote(shop.vendorId, { ...body, customer: undefined, customerId: '1; drop table users' })).toMatchObject({ success: false, status: 400 })
+    // no customer at all still prices (the POS shows a bill before a customer is chosen)
+    expect((await orders.quote(shop.vendorId, { ...body, customer: undefined })).success).toBe(true)
+  })
+
   it('an empty vendor gets zeros (not errors, not nulls)', async () => {
     const empty = await makeShop(2, { withCatalogue: false })
     const d = await dashboard.dashboard(empty.vendorId)
