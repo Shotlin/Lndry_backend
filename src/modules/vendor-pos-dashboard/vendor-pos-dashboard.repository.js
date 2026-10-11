@@ -158,4 +158,66 @@ export class VendorPosDashboardRepository {
       garmentUnits: garments.rows.map((r) => ({ id: r.id, tagCode: r.active_tag_code, state: r.state, orderId: r.order_id })),
     }
   }
+  /**
+   * Report for a date range (inclusive, the server's UTC dates — same convention as the Home tiles).
+   * Orders = counter orders (not the 'DESKTOP_PUSH' mirror rows), the same set as the Orders list.
+   *   revenue    = total of orders PLACED in range that are not cancelled
+   *   collection = money RECEIVED in range (payment rows), by mode, on any of this shop's counter orders
+   *   dues       = what is STILL unpaid today on the orders placed in range (not cancelled)
+   *   expenses   = PAID expenses dated in range
+   */
+  async report(vendorId, from, to) {
+    const [orders, byStatus, payments, dues, expenses, expenseByCategory, topGarments, daily] = await Promise.all([
+      query(
+        `SELECT COUNT(*) FILTER (WHERE status <> 'CANCELLED')::int AS count,
+                COALESCE(SUM(total_paise) FILTER (WHERE status <> 'CANCELLED'), 0)::bigint AS revenue_paise
+         FROM store_orders WHERE vendor_id = $1 AND source <> 'DESKTOP_PUSH' AND placed_at::date BETWEEN $2::date AND $3::date`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT status, COUNT(*)::int AS count FROM store_orders
+         WHERE vendor_id = $1 AND source <> 'DESKTOP_PUSH' AND placed_at::date BETWEEN $2::date AND $3::date GROUP BY status`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT p.mode, COALESCE(SUM(p.amount_paise), 0)::bigint AS total_paise, COUNT(*)::int AS count
+         FROM store_order_payments p JOIN store_orders so ON so.id = p.store_order_id
+         WHERE p.vendor_id = $1 AND so.source <> 'DESKTOP_PUSH' AND p.created_at::date BETWEEN $2::date AND $3::date GROUP BY p.mode`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT COALESCE(SUM(total_paise - amount_paid_paise), 0)::bigint AS dues_paise, COUNT(*)::int AS count
+         FROM store_orders WHERE vendor_id = $1 AND source <> 'DESKTOP_PUSH' AND status <> 'CANCELLED' AND total_paise > amount_paid_paise
+           AND placed_at::date BETWEEN $2::date AND $3::date`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT COALESCE(SUM(amount_paise), 0)::bigint AS total_paise, COUNT(*)::int AS count
+         FROM vendor_expenses WHERE vendor_id = $1 AND status = 'PAID' AND expense_date BETWEEN $2::date AND $3::date`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT category, COALESCE(SUM(amount_paise), 0)::bigint AS total_paise FROM vendor_expenses
+         WHERE vendor_id = $1 AND status = 'PAID' AND expense_date BETWEEN $2::date AND $3::date GROUP BY category ORDER BY 2 DESC`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT item->>'name' AS name, SUM((item->>'qty')::numeric)::float AS qty, SUM((item->>'amountPaise')::bigint)::bigint AS revenue_paise
+         FROM store_orders so, jsonb_array_elements(so.items) AS item
+         WHERE so.vendor_id = $1 AND so.source <> 'DESKTOP_PUSH' AND so.status <> 'CANCELLED' AND so.placed_at::date BETWEEN $2::date AND $3::date
+         GROUP BY item->>'name' ORDER BY revenue_paise DESC, name LIMIT 8`,
+        [vendorId, from, to]
+      ),
+      query(
+        `SELECT d::date::text AS day,
+           (SELECT COALESCE(SUM(total_paise), 0) FROM store_orders WHERE vendor_id = $1 AND source <> 'DESKTOP_PUSH' AND status <> 'CANCELLED' AND placed_at::date = d::date)::bigint AS revenue_paise,
+           (SELECT COALESCE(SUM(p.amount_paise), 0) FROM store_order_payments p JOIN store_orders so ON so.id = p.store_order_id
+             WHERE p.vendor_id = $1 AND so.source <> 'DESKTOP_PUSH' AND p.created_at::date = d::date)::bigint AS collection_paise,
+           (SELECT COALESCE(SUM(amount_paise), 0) FROM vendor_expenses WHERE vendor_id = $1 AND status = 'PAID' AND expense_date = d::date)::bigint AS expenses_paise
+         FROM generate_series($2::date, $3::date, interval '1 day') d ORDER BY d`,
+        [vendorId, from, to]
+      ),
+    ])
+    return { orders: orders.rows[0], byStatus: byStatus.rows, payments: payments.rows, dues: dues.rows[0], expenses: expenses.rows[0], expenseByCategory: expenseByCategory.rows, topGarments: topGarments.rows, daily: daily.rows }
+  }
 }

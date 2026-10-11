@@ -46,3 +46,24 @@ export const posSearchSchema = {
     }),
   },
 }
+
+const int = { type: 'integer' }
+export const posReportSchema = {
+  tags: ['Vendor POS Dashboard'],
+  summary: 'Revenue, collection, dues, expenses, payment mix and top garments for a date range [VENDOR]',
+  querystring: { type: 'object', required: ['from', 'to'], properties: { from: { type: 'string', format: 'date' }, to: { type: 'string', format: 'date' } } },
+  response: {
+    200: envelope({
+      type: 'object',
+      properties: {
+        from: { type: 'string' }, to: { type: 'string' }, days: int, orderCount: int, revenuePaise: int, collectionPaise: int, duesPaise: int, duesOrderCount: int,
+        expensesPaise: int, expenseCount: int, netPaise: int,
+        ordersByStatus: { type: 'object', properties: { booked: int, inProcess: int, ready: int, delivered: int, cancelled: int } },
+        paymentMix: { type: 'object', properties: { cashPaise: int, upiPaise: int, cardPaise: int, bankPaise: int, walletPaise: int } },
+        expenseByCategory: { type: 'array', items: { type: 'object', properties: { category: { type: 'string' }, totalPaise: int } } },
+        topGarments: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, qty: { type: 'number' }, revenuePaise: int } } },
+        daily: { type: 'array', items: { type: 'object', properties: { date: { type: 'string' }, revenuePaise: int, collectionPaise: int, expensesPaise: int } } },
+      },
+    }),
+  },
+}
