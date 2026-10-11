@@ -36,6 +36,15 @@ export const dateOnly = (value) => {
   if (value instanceof Date) return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`
   return String(value).slice(0, 10)
 }
+export const DELIVERY_MODES = ['WALK_IN', 'HOME_DELIVERY', 'PICKUP']
+// undefined/null -> not provided; otherwise a valid mode or the string 'INVALID'.
+const parseDeliveryMode = (value) => {
+  if (value === undefined || value === null || value === '') return null
+  const mode = String(value).toUpperCase().replace(/[\s-]+/g, '_')
+  return DELIVERY_MODES.includes(mode) ? mode : 'INVALID'
+}
+// undefined/null -> not provided; a real boolean otherwise; anything else is invalid.
+const parseFlag = (value) => (value === undefined || value === null ? null : typeof value === 'boolean' ? value : 'INVALID')
 const digits = (value) => String(value ?? '').replace(/\D/g, '')
 const tag = (prefix) => `${prefix}-${new Date().toISOString().slice(0, 10).replace(/-/g, '')}-${Math.random().toString(36).slice(2, 8).toUpperCase()}`
 const referralCode = () => Array.from({ length: 8 }, () => 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[Math.floor(Math.random() * 36)]).join('')
@@ -68,7 +77,7 @@ const ORDER_SELECT = `
   so.id, so.vendor_id, so.customer_user_id, so.pos_order_id, so.order_number, so.items,
   so.subtotal_paise, so.discount_paise, so.charges_paise, so.tax_paise, so.tax_rate_bps, so.total_paise,
   so.payment_method, so.amount_paid_paise, so.payment_reference, so.wallet_amount_paise, so.wallet_redemption_request_id,
-  so.status, so.version, so.source, so.order_date, so.expected_delivery_date, so.fulfillment_mode,
+  so.status, so.version, so.source, so.order_date, so.expected_delivery_date, so.fulfillment_mode, so.delivery_mode, so.is_express,
   so.delivery_address, so.service_zone, so.notes, so.photo_path, so.cancel_reason, so.cash_shift_id,
   so.pickup_rider_employee_id, so.delivery_rider_employee_id, so.placed_at, so.updated_at, so.price_breakdown,
   u.name AS customer_name, u.phone AS customer_phone,
@@ -110,6 +119,8 @@ function presentOrder(row) {
     orderDate: dateOnly(row.order_date) || dateOnly(row.placed_at),
     expectedDeliveryDate: dateOnly(row.expected_delivery_date),
     fulfillmentMode: row.fulfillment_mode,
+    deliveryMode: row.delivery_mode,
+    isExpress: row.is_express === true,
     deliveryAddress: row.delivery_address,
     serviceZone: row.service_zone,
     notes: row.notes,
@@ -403,6 +414,10 @@ export class VendorCounterOrdersService {
     const mode = input.paymentMode ? String(input.paymentMode).toUpperCase().replace(/\s+/g, '_') : 'PAY_LATER'
     if (mode !== 'PAY_LATER' && !PAYMENT_MODES.includes(mode)) return fail(`paymentMode must be Pay Later or one of ${PAYMENT_MODES.join(', ')}`)
     if (!input.expectedDeliveryDate || Number.isNaN(Date.parse(input.expectedDeliveryDate))) return fail('An expected delivery date is required')
+    const deliveryMode = parseDeliveryMode(input.deliveryMode)
+    if (deliveryMode === 'INVALID') return fail(`deliveryMode must be one of ${DELIVERY_MODES.join(', ')}`)
+    const isExpress = parseFlag(input.isExpress)
+    if (isExpress === 'INVALID') return fail('isExpress must be true or false')
 
     let customerId = input.customer?.id
     if (!customerId) {
@@ -485,9 +500,9 @@ export class VendorCounterOrdersService {
            subtotal_paise, discount_paise, charges_paise, tax_paise, tax_rate_bps, total_paise,
            payment_method, amount_paid_paise, payment_reference, wallet_amount_paise, wallet_redemption_request_id,
            cash_shift_id, status, source, order_date, expected_delivery_date, fulfillment_mode, delivery_address,
-           service_zone, notes, photo_path, app_synced, price_breakdown
+           service_zone, notes, photo_path, app_synced, price_breakdown, delivery_mode, is_express
          ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,'BOOKED','COUNTER',$19,$20,$21,$22,$23,$24,$25,
-           COALESCE((SELECT v.vendor_type IN ('PARTNER', 'EXCLUSIVE') FROM vendors v WHERE v.id = $2), FALSE), $26)
+           COALESCE((SELECT v.vendor_type IN ('PARTNER', 'EXCLUSIVE') FROM vendors v WHERE v.id = $2), FALSE), $26, $27, $28)
          RETURNING id`,
         [
           orderId, vendorId, customerId, String(input.idempotencyKey || `CO-${orderId}`), orderNumber, JSON.stringify(q.items),
@@ -496,7 +511,7 @@ export class VendorCounterOrdersService {
           walletPaise, walletRequestId, cashShiftId,
           input.orderDate || new Date().toISOString().slice(0, 10), input.expectedDeliveryDate, input.fulfillmentMode || null,
           input.deliveryAddress || null, input.serviceZone || null, input.notes ? String(input.notes).slice(0, 1000) : null, input.photoPath || null,
-          JSON.stringify(q.breakdown),
+          JSON.stringify(q.breakdown), deliveryMode || 'WALK_IN', isExpress === true,
         ]
       )
 
@@ -602,11 +617,14 @@ export class VendorCounterOrdersService {
 
   // ── Reading ──────────────────────────────────────────────────────────────
 
-  async listOrders(vendorId, { status, search, from, to, customerId, limit = 100 } = {}) {
+  async listOrders(vendorId, { status, search, from, to, customerId, deliveryMode, express, limit = 100 } = {}) {
     const params = [vendorId]
     const where = ['so.vendor_id = $1', "so.source <> 'DESKTOP_PUSH'"]
     if (status) { params.push(String(status).toUpperCase()); where.push(`so.status = $${params.length}`) }
     if (customerId) { params.push(customerId); where.push(`so.customer_user_id = $${params.length}`) }
+    const mode = parseDeliveryMode(deliveryMode)
+    if (mode && mode !== 'INVALID') { params.push(mode); where.push(`so.delivery_mode = $${params.length}`) }
+    if (express === true || express === 'true') where.push('so.is_express = TRUE')
     if (from) { params.push(from); where.push(`so.placed_at >= $${params.length}::date`) }
     if (to) { params.push(to); where.push(`so.placed_at < ($${params.length}::date + 1)`) }
     if (search) {
@@ -665,13 +683,18 @@ export class VendorCounterOrdersService {
     if (!order) return fail('Order not found', 'NOT_FOUND', 404)
     if (['DELIVERED', 'CANCELLED'].includes(order.status)) return fail('A delivered or cancelled order can no longer be edited', 'ORDER_CLOSED', 409)
     if (patch.version !== undefined && patch.version !== order.version) return fail('This order was changed by someone else. Reload and try again.', 'VERSION_CONFLICT', 409)
+    const deliveryMode = parseDeliveryMode(patch.deliveryMode)
+    if (deliveryMode === 'INVALID') return fail(`deliveryMode must be one of ${DELIVERY_MODES.join(', ')}`)
+    const isExpress = parseFlag(patch.isExpress)
+    if (isExpress === 'INVALID') return fail('isExpress must be true or false')
     const { rows } = await query(
       `UPDATE store_orders SET
          notes = COALESCE($3, notes), expected_delivery_date = COALESCE($4::date, expected_delivery_date),
          delivery_address = COALESCE($5, delivery_address), service_zone = COALESCE($6, service_zone),
-         fulfillment_mode = COALESCE($7, fulfillment_mode), version = version + 1, updated_at = NOW()
+         fulfillment_mode = COALESCE($7, fulfillment_mode), delivery_mode = COALESCE($8, delivery_mode), is_express = COALESCE($9::boolean, is_express),
+         version = version + 1, updated_at = NOW()
        WHERE id = $1 AND vendor_id = $2 RETURNING id`,
-      [id, vendorId, patch.notes ?? null, patch.expectedDeliveryDate ?? null, patch.deliveryAddress ?? null, patch.serviceZone ?? null, patch.fulfillmentMode ?? null]
+      [id, vendorId, patch.notes ?? null, patch.expectedDeliveryDate ?? null, patch.deliveryAddress ?? null, patch.serviceZone ?? null, patch.fulfillmentMode ?? null, deliveryMode, isExpress]
     )
     if (!rows[0]) return fail('Order not found', 'NOT_FOUND', 404)
     return { success: true, order: await this.getOrder(vendorId, id) }

@@ -27,6 +27,56 @@ export class VendorPosDashboardRepository {
     return { count: rows[0].count, revenuePaise: rows[0].revenue_paise, collectedPaise: paid.rows[0].collected_paise }
   }
 
+  /**
+   * POS Home tiles. Every figure is a plain count/sum over this vendor's rows. The order set is the same one the
+   * Orders list shows (counter orders, i.e. NOT the 'DESKTOP_PUSH' mirror rows), so tapping a tile and seeing a
+   * different number is impossible. "Active" = not DELIVERED / CANCELLED. Definitions follow Epic's queues.
+   */
+  async homeOrderTiles(vendorId, asOf) {
+    const { rows } = await query(
+      `SELECT
+         COALESCE(SUM(total_paise) FILTER (WHERE placed_at::date = $2 AND status <> 'CANCELLED'), 0)::bigint AS revenue_today_paise,
+         COUNT(*) FILTER (WHERE placed_at::date = $2 AND status <> 'CANCELLED')::int AS bookings_today,
+         COUNT(*) FILTER (WHERE status NOT IN ('DELIVERED','CANCELLED') AND expected_delivery_date = $2::date)::int AS deliveries_today,
+         COUNT(*) FILTER (WHERE status NOT IN ('DELIVERED','CANCELLED') AND expected_delivery_date <= $2::date)::int AS upcoming_deliveries,
+         COUNT(*) FILTER (WHERE status = 'DELIVERED' AND EXISTS (
+            SELECT 1 FROM store_order_status_events e
+            WHERE e.store_order_id = store_orders.id AND e.to_status = 'DELIVERED' AND e.created_at::date = $2))::int AS delivered_today,
+         COUNT(*) FILTER (WHERE status NOT IN ('DELIVERED','CANCELLED'))::int AS pending_orders,
+         COUNT(*) FILTER (WHERE delivery_mode = 'PICKUP' AND status = 'BOOKED' AND pickup_rider_employee_id IS NULL)::int AS unassigned_pickups,
+         COUNT(*) FILTER (WHERE delivery_mode = 'HOME_DELIVERY' AND status IN ('READY','OUT_FOR_DELIVERY') AND delivery_rider_employee_id IS NULL)::int AS unassigned_deliveries,
+         COUNT(*) FILTER (WHERE is_express AND status NOT IN ('DELIVERED','CANCELLED'))::int AS express_orders,
+         COALESCE(SUM(total_paise - amount_paid_paise) FILTER (WHERE status <> 'CANCELLED' AND total_paise > amount_paid_paise), 0)::bigint AS collection_due_paise
+       FROM store_orders
+       WHERE vendor_id = $1 AND source <> 'DESKTOP_PUSH'`,
+      [vendorId, asOf]
+    )
+    return rows[0]
+  }
+
+  // Money actually received today on this list's orders (cash/UPI/card/bank/wallet payments rows).
+  async homeCollectionToday(vendorId, asOf) {
+    const { rows } = await query(
+      `SELECT COALESCE(SUM(p.amount_paise), 0)::bigint AS collected_paise
+       FROM store_order_payments p JOIN store_orders so ON so.id = p.store_order_id
+       WHERE p.vendor_id = $1 AND so.source <> 'DESKTOP_PUSH' AND p.created_at::date = $2`,
+      [vendorId, asOf]
+    )
+    return rows[0].collected_paise
+  }
+
+  // Marketplace orders waiting for this vendor to accept (always 0 for a POS-only shop: it has none).
+  async onlineOrderRequestsCount(vendorId) {
+    const { rows } = await query(`SELECT COUNT(*)::int AS count FROM orders WHERE vendor_id = $1 AND status = 'WAITING_VENDOR_CONFIRMATION'`, [vendorId])
+    return rows[0].count
+  }
+
+  // Garments whose washing is finished and that wait at assembly to be racked in the store.
+  async washingToStoreCount(vendorId) {
+    const { rows } = await query(`SELECT COUNT(*)::int AS count FROM vendor_garment_units WHERE vendor_id = $1 AND state = 'ASSEMBLY'`, [vendorId])
+    return rows[0].count
+  }
+
   async openCashShift(vendorId) {
     const { rows } = await query(
       `SELECT id, register, opening_cash_paise, opened_at FROM vendor_cash_shifts WHERE vendor_id = $1 AND status = 'OPEN' LIMIT 1`,
