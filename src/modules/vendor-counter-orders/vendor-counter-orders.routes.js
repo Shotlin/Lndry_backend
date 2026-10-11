@@ -3,6 +3,7 @@ import { success, error } from '../../utils/apiResponse.js'
 import { VendorCounterOrdersService } from './vendor-counter-orders.service.js'
 import { VendorCounterViewsService } from './vendor-counter-views.service.js'
 import { InvoicesService, InvoiceError } from '../invoices/invoices.service.js'
+import { HOME_TILE_KEYS } from '../vendor-pos-dashboard/home-tile-filters.js'
 import { VendorPosCatalogueService } from '../vendor-pos-catalogue/vendor-pos-catalogue.service.js'
 
 // No body schemas on purpose: this app's AJV runs with removeAdditional:'all', which would strip every
@@ -62,7 +63,10 @@ export default async function vendorCounterOrdersRoutes(fastify) {
   // Orders
   fastify.post('/orders/quote', async (request, res) => reply(res, await service.quote(request.vendorId, request.body || {}), 'Quote computed'))
   fastify.post('/orders', async (request, res) => reply(res, await service.book(request.vendorId, actorOf(request), request.body || {}), 'Order booked', 201))
-  fastify.get('/orders', async (request, res) => res.send(success(await service.listOrders(request.vendorId, request.query))))
+  fastify.get('/orders', async (request, res) => {
+    if (request.query.tile && !HOME_TILE_KEYS.includes(request.query.tile)) return res.code(400).send(error(`tile must be one of ${HOME_TILE_KEYS.join(', ')}`, 'VALIDATION_ERROR'))
+    return res.send(success(await service.listOrders(request.vendorId, request.query)))
+  })
   fastify.get('/orders/:id', { schema: { params: idParams } }, async (request, res) => {
     const detail = await service.getDetail(request.vendorId, request.params.id)
     return detail ? res.send(success(detail)) : notFound(res, 'Order')

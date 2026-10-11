@@ -14,6 +14,8 @@ const { pool, query } = await import('../../src/config/database.js')
 const { VendorAppModeService } = await import('../../src/modules/vendor-app-mode/vendor-app-mode.service.js')
 const { VendorCounterOrdersService } = await import('../../src/modules/vendor-counter-orders/vendor-counter-orders.service.js')
 const { InvoicesService, InvoiceError } = await import('../../src/modules/invoices/invoices.service.js')
+const { VendorPosDashboardService } = await import('../../src/modules/vendor-pos-dashboard/vendor-pos-dashboard.service.js')
+const { HOME_TILE_KEYS } = await import('../../src/modules/vendor-pos-dashboard/home-tile-filters.js')
 
 let dbUp = false
 try {
@@ -26,6 +28,7 @@ const phone = (n) => `95${String(Date.now()).slice(-7)}${n}`
 const appMode = new VendorAppModeService()
 const orders = new VendorCounterOrdersService()
 const invoices = new InvoicesService()
+const dashboard = new VendorPosDashboardService()
 const addDays = (n) => new Date(Date.now() + n * 86400000).toISOString().slice(0, 10)
 const isPdf = (buf) => Buffer.isBuffer(buf) && buf.subarray(0, 5).toString() === '%PDF-'
 
@@ -157,5 +160,47 @@ describe.skipIf(!dbUp)('counter order lifecycle: list filters + vendor invoice P
     expect(isPdf(odd.buffer)).toBe(true)
     expect(odd.buffer.length).toBeGreaterThan(0)
     expect(Math.abs(odd.buffer.length - eighty.buffer.length)).toBeLessThan(200) // same layout (only the PDF timestamp differs)
+  })
+
+  it('every Home tile equals the list behind it (same definition, counted both ways)', async () => {
+    const shop = await makeShop(8)
+    const mk = async (n, extra = {}, paymentMode = 'PAY_LATER') => {
+      const res = await orders.book(shop.vendorId, shop.actor, {
+        customer: { name: 'Tile', phone: phone(n) }, expectedDeliveryDate: extra.date || addDays(2), items: [{ ...shop.line, qty: 1 }], paymentMode,
+        deliveryMode: extra.mode, isExpress: extra.express,
+      })
+      expect(res.success, JSON.stringify(res)).toBe(true)
+      return res.order
+    }
+    const today = new Date().toISOString().slice(0, 10)
+    const a = await mk(1, { express: true })                       // open, express, due
+    const b = await mk(2, { mode: 'PICKUP', date: today })         // unassigned pickup, due today
+    const c = await mk(3, { mode: 'HOME_DELIVERY' }, 'CASH')       // paid
+    const d = await mk(4, { date: addDays(-1) })                   // overdue
+    const e = await mk(5)                                          // will be cancelled
+    const f = await mk(6, {}, 'CASH')                              // will be delivered today
+    expect((await orders.cancel(shop.vendorId, shop.actor, e.id, 'Customer changed mind')).success).toBe(true)
+    for (const [state, extra] of [['IN_PROCESS', {}], ['READY', { allowIncomplete: true }], ['DELIVERED', {}]]) {
+      expect((await orders.transition(shop.vendorId, shop.actor, f.id, state, extra)).success).toBe(true)
+    }
+    for (const [state, extra] of [['IN_PROCESS', {}], ['READY', { allowIncomplete: true }]]) {
+      expect((await orders.transition(shop.vendorId, shop.actor, c.id, state, extra)).success).toBe(true) // home delivery, READY, no captain
+    }
+
+    const { home } = await dashboard.dashboard(shop.vendorId)
+    const count = async (tile) => (await orders.listOrders(shop.vendorId, { tile })).length
+    for (const key of HOME_TILE_KEYS.filter((k) => k !== 'collectionDue')) {
+      expect(await count(key), `tile ${key}`).toBe(home[key])
+    }
+    const due = await orders.listOrders(shop.vendorId, { tile: 'collectionDue' })
+    expect(due.reduce((s, o) => s + (o.totalPaise - o.amountPaidPaise), 0)).toBe(home.collectionDuePaise)
+
+    // the numbers are not all zero, so the equalities above mean something
+    expect(home).toMatchObject({ pendingOrders: 4, expressOrders: 1, unassignedPickups: 1, unassignedDeliveries: 1, deliveredToday: 1, bookingsToday: 5 })
+    expect([a.id, b.id, d.id].every((id) => due.some((o) => o.id === id))).toBe(true)
+    // a tile composes with the other filters, and an unknown tile matches nothing
+    expect((await orders.listOrders(shop.vendorId, { tile: 'pendingOrders', express: true })).map((o) => o.id)).toEqual([a.id])
+    expect(await orders.listOrders(shop.vendorId, { tile: 'constructor' })).toEqual([])
+    expect(await orders.listOrders(shop.vendorId, { tile: 'nope' })).toEqual([])
   })
 })

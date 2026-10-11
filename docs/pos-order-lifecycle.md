@@ -11,6 +11,8 @@ send none of the new parameters and get exactly the old answers.
 | `offset` | Skip this many orders (with `limit`, max 500) to page through a long list. Negative / non-numeric = 0. |
 | `paymentDue=true` | Only orders that still owe money (`total > paid`). A cancelled order owes nothing, so it never matches. |
 
+| `tile` | Exactly the orders a POS Home tile counts: `bookingsToday`, `deliveriesToday`, `upcomingDeliveries`, `deliveredToday`, `pendingOrders`, `unassignedPickups`, `unassignedDeliveries`, `expressOrders`, `collectionDue`. The definitions live once in `vendor-pos-dashboard/home-tile-filters.js` and the dashboard counts with the same ones, so a tile and the list behind it cannot disagree (tested). An unknown tile is `400`. |
+
 Order is `placed_at DESC, id DESC` (stable across pages). The answer is still a plain array; a page shorter than `limit` is the last one.
 Existing filters (`search`, `from`, `to`, `deliveryMode`, `express`, `customerId`) are unchanged and combine with the new ones.
 
@@ -35,5 +37,5 @@ Both answer `application/pdf`, `Cache-Control: private, no-store`. The mini temp
 
 ## Tests
 
-`tests/integration/counter-order-lifecycle.test.js` (real Postgres, mutation-checked) and
+`tests/integration/counter-order-lifecycle.test.js` (real Postgres, mutation-checked; includes the tile-equals-list parity test) and
 `node scripts/pos-smoke.mjs --lifecycle` (58 checks against the running API, end to end).
