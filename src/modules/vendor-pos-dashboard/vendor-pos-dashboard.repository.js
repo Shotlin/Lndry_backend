@@ -129,9 +129,10 @@ export class VendorPosDashboardRepository {
    */
   async exportCounterSales(vendorId, from, to) {
     const { rows } = await query(
-      `SELECT so.order_number, to_char(so.placed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS placed_at, u.name AS customer_name, u.phone AS customer_phone,
+      `SELECT so.order_number, to_char(so.placed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS placed_at, COALESCE(NULLIF(vcp.display_name, ''), u.name) AS customer_name, u.phone AS customer_phone,
               so.subtotal_paise, so.discount_paise, so.tax_paise, so.total_paise, so.payment_method, so.status, so.amount_paid_paise
        FROM store_orders so JOIN users u ON u.id = so.customer_user_id
+       LEFT JOIN vendor_customer_profiles vcp ON vcp.vendor_id = so.vendor_id AND vcp.customer_user_id = so.customer_user_id
        WHERE so.vendor_id = $1 AND so.source <> 'DESKTOP_PUSH' AND so.status <> 'CANCELLED' AND so.placed_at::date >= $2 AND so.placed_at::date <= $3
        ORDER BY so.placed_at ASC`,
       [vendorId, from, to]
@@ -143,8 +144,9 @@ export class VendorPosDashboardRepository {
     const like = `%${q}%`
     const [customers, orders, garments] = await Promise.all([
       query(
-        `SELECT DISTINCT u.id, u.name, u.phone FROM users u JOIN store_orders so ON so.customer_user_id = u.id
-         WHERE so.vendor_id = $1 AND (u.name ILIKE $2 OR u.phone ILIKE $2) LIMIT 10`,
+        `SELECT DISTINCT u.id, COALESCE(NULLIF(vcp.display_name, ''), u.name) AS name, u.phone FROM users u JOIN store_orders so ON so.customer_user_id = u.id
+         LEFT JOIN vendor_customer_profiles vcp ON vcp.vendor_id = so.vendor_id AND vcp.customer_user_id = u.id
+         WHERE so.vendor_id = $1 AND (COALESCE(NULLIF(vcp.display_name, ''), u.name) ILIKE $2 OR u.phone ILIKE $2) LIMIT 10`,
         [vendorId, like]
       ),
       query(

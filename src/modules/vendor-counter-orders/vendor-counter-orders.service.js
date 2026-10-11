@@ -83,13 +83,14 @@ const ORDER_SELECT = `
   so.status, so.version, so.source, so.order_date, so.expected_delivery_date, so.fulfillment_mode, so.delivery_mode, so.is_express,
   so.delivery_address, so.service_zone, so.notes, so.photo_path, so.cancel_reason, so.cash_shift_id,
   so.pickup_rider_employee_id, so.delivery_rider_employee_id, so.placed_at, so.updated_at, so.price_breakdown,
-  u.name AS customer_name, u.phone AS customer_phone,
+  COALESCE(NULLIF(vcp.display_name, ''), u.name) AS customer_name, u.phone AS customer_phone,
   pr.name AS pickup_rider_name, pru.phone AS pickup_rider_phone,
   dr.name AS delivery_rider_name, dru.phone AS delivery_rider_phone`
 
 const ORDER_FROM = `
   FROM store_orders so
   JOIN users u ON u.id = so.customer_user_id
+  LEFT JOIN vendor_customer_profiles vcp ON vcp.vendor_id = so.vendor_id AND vcp.customer_user_id = so.customer_user_id
   LEFT JOIN vendor_employees pe ON pe.id = so.pickup_rider_employee_id
   LEFT JOIN users pr ON pr.id = pe.user_id
   LEFT JOIN users pru ON pru.id = pe.user_id
@@ -651,7 +652,7 @@ export class VendorCounterOrdersService {
     if (search) {
       params.push(`%${String(search).toLowerCase()}%`)
       const n = params.length
-      where.push(`(lower(so.order_number) LIKE $${n} OR lower(COALESCE(u.name,'')) LIKE $${n} OR u.phone LIKE $${n})`)
+      where.push(`(lower(so.order_number) LIKE $${n} OR lower(COALESCE(NULLIF(vcp.display_name, ''), u.name, '')) LIKE $${n} OR u.phone LIKE $${n})`)
     }
     params.push(Math.min(Number(limit) || 100, 500))
     params.push(Math.max(Math.floor(Number(offset)) || 0, 0))

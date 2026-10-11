@@ -154,7 +154,7 @@ describe.skipIf(!dbUp)('POS report (real database)', () => {
     expect(col.reduce((sum, c) => sum + Number(c[11]), 0)).toBe(report.duesPaise)
     expect(col[0][1]).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
 
-    await query(`UPDATE users SET name = '=HYPERLINK("http://x")' WHERE id = $1`, [a.order.customer.id])
+    await query(`UPDATE vendor_customer_profiles SET display_name = '=HYPERLINK("http://x")' WHERE vendor_id = $1 AND customer_user_id = $2`, [v, a.order.customer.id])
     const evil = (await dashboard.exportCounterSalesCsv(v, today, today))
     expect(evil).toContain(`"'=HYPERLINK(""http://x"")"`)
     expect(evil).not.toMatch(/,=HYPERLINK/)
