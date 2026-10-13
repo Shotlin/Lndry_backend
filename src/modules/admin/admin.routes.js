@@ -43,6 +43,7 @@ import adminAccountDeletionRoutes from './account-deletion/account-deletion.rout
 import { adminInvoicesRoutes } from '../invoices/invoices.routes.js'
 import adminAssistedBookingRoutes from './assisted-booking/assisted-booking.routes.js'
 import adminAppReleasesRoutes from './app-releases/app-releases.routes.js'
+import { adminBlogRoutes } from '../blog/blog.routes.js'
 
 /**
  * Admin routes plugin
@@ -142,4 +143,5 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminInvoicesRoutes, { prefix: '/invoices' })
   fastify.register(adminAssistedBookingRoutes, { prefix: '/assisted-booking' })
   fastify.register(adminAppReleasesRoutes, { prefix: '/app-releases' })
+  fastify.register(adminBlogRoutes, { prefix: '/blog' })
 }

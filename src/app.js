@@ -562,6 +562,12 @@ export const buildApp = async () => {
     prefix: '/api/v1/cart-milestones',
   })
 
+  // Blog — public reads for lndry.in/blog (writes are under /api/v1/admin/blog)
+  const { default: publicBlogRoutes } = await import('./modules/blog/blog.routes.js')
+  await app.register(publicBlogRoutes, {
+    prefix: '/api/v1/blog',
+  })
+
   // Referrals — customer-facing "Refer & Earn" (admin CRUD of programs is under /api/v1/admin/referral-programs)
   const { default: referralsRoutes } = await import('./modules/referrals/referrals.routes.js')
   await app.register(referralsRoutes, {
