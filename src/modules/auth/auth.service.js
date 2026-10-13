@@ -73,20 +73,24 @@ export class AuthService {
    * Development: returns OTP in response for testing
    */
   async sendOtp(phone, accountType = 'CUSTOMER') {
-    // Rate limit: max 5 OTP requests per phone per 10 minutes
-    const rateLimitKey = `otp_limit:${phone}`
-    const rateCount = await redis.incr(rateLimitKey)
-    if (rateCount === 1) {
-      await redis.expire(rateLimitKey, 600) // 10 minutes
-    }
-    if (rateCount > 5) {
-      throw { statusCode: 429, message: 'Too many OTP requests. Please wait 10 minutes.', code: 'RATE_LIMIT_EXCEEDED' }
+    // Rate limit: max 5 OTP requests per phone per 10 minutes. Numbers on the
+    // TEST_BYPASS_OTP_PHONES list (fixed OTP, no SMS sent, so nothing to abuse) are exempt
+    // so testers can request codes as often as they like.
+    const isTestBypass = this._isTestBypassPhone(phone)
+    if (!isTestBypass) {
+      const rateLimitKey = `otp_limit:${phone}`
+      const rateCount = await redis.incr(rateLimitKey)
+      if (rateCount === 1) {
+        await redis.expire(rateLimitKey, 600) // 10 minutes
+      }
+      if (rateCount > 5) {
+        throw { statusCode: 429, message: 'Too many OTP requests. Please wait 10 minutes.', code: 'RATE_LIMIT_EXCEEDED' }
+      }
     }
 
     let otpCode = '123456'
     let isDemo = false
     let isSmsSent = false
-    const isTestBypass = this._isTestBypassPhone(phone)
     const smsConfig = await getSmsConfig()
 
     if (this._isDemoOtpPhone(phone)) {

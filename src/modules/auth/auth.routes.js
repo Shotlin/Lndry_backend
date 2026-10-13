@@ -1,3 +1,4 @@
+import { env } from '../../config/env.js'
 import { AuthController } from './auth.controller.js'
 import { AuthService } from './auth.service.js'
 import { AuthRepository } from './auth.repository.js'
@@ -27,9 +28,10 @@ export default async function authRoutes(fastify) {
     schema: sendOtpSchema,
     preHandler: [validatePhone],
     config: {
+      // Per-IP cap. Adjustable with OTP_RATE_LIMIT_MAX / OTP_RATE_LIMIT_WINDOW (default 5 per 5 minutes).
       rateLimit: {
-        max: 5,
-        timeWindow: '5 minutes',
+        max: env.OTP_RATE_LIMIT_MAX,
+        timeWindow: env.OTP_RATE_LIMIT_WINDOW,
       },
     },
   }, controller.sendOtp.bind(controller))
@@ -40,8 +42,8 @@ export default async function authRoutes(fastify) {
     preHandler: [validatePhone],
     config: {
       rateLimit: {
-        max: 10,
-        timeWindow: '5 minutes',
+        max: env.OTP_RATE_LIMIT_MAX * 2,
+        timeWindow: env.OTP_RATE_LIMIT_WINDOW,
       },
     },
   }, controller.verifyOtp.bind(controller))
