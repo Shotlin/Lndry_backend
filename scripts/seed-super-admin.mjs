@@ -19,7 +19,7 @@ import bcrypt from 'bcrypt'
 const EMAIL = process.env.LOCAL_ADMIN_EMAIL || 'admin@lndry.com'
 const PASSWORD = process.env.LOCAL_ADMIN_PASSWORD || 'Admin@123'
 const NAME = 'Local Super Admin'
-const PHONE = '9000000000'
+const PHONE = process.env.LOCAL_ADMIN_PHONE || '9000000000'
 
 async function main() {
   const pool = new pg.Pool({
