@@ -1,7 +1,7 @@
 import crypto from 'node:crypto'
 import { logger } from '../../config/logger.js'
 import { env } from '../../config/env.js'
-import { razorpay } from '../../config/razorpay.js'
+import { getRazorpay } from '../../config/razorpay.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 import { OrdersRepository } from '../orders/orders.repository.js'
@@ -125,7 +125,8 @@ export class PaymentsService {
 
     const expiresAt = new Date(Date.now() + 15 * 60 * 1000)
 
-    if (!razorpay) {
+    const rzp = await getRazorpay()
+    if (!rzp) {
       if (env.NODE_ENV === 'production' || (env.NODE_ENV !== 'test' && !env.ALLOW_MOCK_PAYMENT)) {
         throw { statusCode: 400, message: 'Razorpay integration is not configured', code: 'RAZORPAY_CONFIG_ERROR' }
       }
@@ -164,7 +165,7 @@ export class PaymentsService {
     }
 
     // Create Razorpay order
-    const rzpOrder = await razorpay.orders.create({
+    const rzpOrder = await rzp.client.orders.create({
       amount: amountPaise,
       currency: 'INR',
       receipt: receipt.substring(0, 40),
@@ -208,7 +209,7 @@ export class PaymentsService {
         razorpayOrderId: rzpOrder.id,
         amount: amountRupees,
         currency: 'INR',
-        keyId: env.RAZORPAY_KEY_ID,
+        keyId: rzp.keyId,
         purpose,
       },
     }
@@ -409,7 +410,8 @@ export class PaymentsService {
       return { success: false, message: 'Unauthorized' }
     }
 
-    const isMock = rzpOrderId.startsWith('order_mock_') || !razorpay
+    const rzp = await getRazorpay()
+    const isMock = rzpOrderId.startsWith('order_mock_') || !rzp
     if (isMock && (env.NODE_ENV === 'production' || (env.NODE_ENV !== 'test' && !env.ALLOW_MOCK_PAYMENT))) {
       return { success: false, message: 'Mock payment not allowed in this environment' }
     }
@@ -417,7 +419,7 @@ export class PaymentsService {
     // HMAC-SHA256 verification
     if (!isMock) {
       const expectedSignature = crypto
-        .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
+        .createHmac('sha256', rzp.keySecret)
         .update(`${rzpOrderId}|${rzpPaymentId}`)
         .digest('hex')
 
@@ -513,7 +515,9 @@ export class PaymentsService {
    * Handle Razorpay webhook events
    */
   async handleWebhook(rawBody, signature) {
-    if (!env.RAZORPAY_WEBHOOK_SECRET) {
+    const rzpCfg = await getRazorpay()
+    const webhookSecret = rzpCfg?.webhookSecret
+    if (!webhookSecret) {
       logger.warn('Razorpay webhook secret not configured')
       return { success: false }
     }
@@ -529,7 +533,7 @@ export class PaymentsService {
       : Buffer.from(typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody), 'utf8')
 
     const expectedSignature = crypto
-      .createHmac('sha256', env.RAZORPAY_WEBHOOK_SECRET)
+      .createHmac('sha256', webhookSecret)
       .update(rawBuffer)
       .digest('hex')
 
@@ -637,7 +641,8 @@ export class PaymentsService {
    * Admin: initiate refund
    */
   async refund(paymentId, { amount, reason }) {
-    if (!razorpay) {
+    const rzp = await getRazorpay()
+    if (!rzp) {
       return { success: false, message: 'Online payments are not configured' }
     }
 
@@ -660,7 +665,7 @@ export class PaymentsService {
     }
 
     try {
-      const rzpRefund = await razorpay.payments.refund(payment.razorpayPaymentId, {
+      const rzpRefund = await rzp.client.payments.refund(payment.razorpayPaymentId, {
         amount: Math.round(refundAmount * 100),
         notes: { reason: reason || 'Admin initiated refund' },
       })

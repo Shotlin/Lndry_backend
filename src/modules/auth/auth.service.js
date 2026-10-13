@@ -2,6 +2,7 @@ import { resolveShopAssignments } from './shop-assignment.js'
 import crypto from 'node:crypto'
 import { generateOTP, storeOTP, verifyOTP } from '../../utils/otp.js'
 import { sendSmsOtp, verifySmsOtp } from '../../utils/sms.js'
+import { getSmsConfig } from '../../utils/sms-config.js'
 import { generateTokenPair, signAccessToken, signRefreshToken, verifyToken } from '../../utils/jwt.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { redis } from '../../config/redis.js'
@@ -86,6 +87,7 @@ export class AuthService {
     let isDemo = false
     let isSmsSent = false
     const isTestBypass = this._isTestBypassPhone(phone)
+    const smsConfig = await getSmsConfig()
 
     if (this._isDemoOtpPhone(phone)) {
       otpCode = env.DEMO_OTP_CODE || '123456'
@@ -95,7 +97,7 @@ export class AuthService {
     } else if (isTestBypass) {
       await redis.del(`${SMS_SESSION_PREFIX}${phone}`)
       logger.info({ phone: phone.slice(-4) }, 'Test-bypass OTP phone used')
-    } else if (env.NODE_ENV === 'production' && env.SMS_PROVIDER === '2factor') {
+    } else if (env.NODE_ENV === 'production' && (smsConfig || env.SMS_PROVIDER === '2factor')) {
       const smsResult = await sendSmsOtp(phone)
       if (!smsResult.success) {
         logger.error({ phone: phone.slice(-4) }, '2Factor SMS failed, falling back to local OTP')
@@ -109,7 +111,7 @@ export class AuthService {
         )
         logger.info({ phone: phone.slice(-4) }, 'OTP sent via 2Factor SMS')
       }
-    } else if (env.SMS_PROVIDER === '2factor' && env.TWO_FACTOR_API_KEY) {
+    } else if (smsConfig) {
       const smsResult = await sendSmsOtp(phone)
       if (smsResult.success) {
         isSmsSent = true

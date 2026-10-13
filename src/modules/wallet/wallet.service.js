@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import { getClient } from '../../config/database.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
-import { razorpay } from '../../config/razorpay.js'
+import { getRazorpay } from '../../config/razorpay.js'
 import { getOffsetLimit, buildPagination } from '../../utils/paginate.js'
 
 /**
@@ -80,7 +80,8 @@ export class WalletService {
    * This does not credit the wallet.
    */
   async createTopUp(userId, amount) {
-    if (!razorpay) {
+    const rzp = await getRazorpay()
+    if (!rzp) {
       return { success: false, message: 'Online payments are not configured' }
     }
 
@@ -90,7 +91,7 @@ export class WalletService {
     }
 
     const wallet = await this.repo.getOrCreate(userId)
-    const razorpayOrder = await razorpay.orders.create({
+    const razorpayOrder = await rzp.client.orders.create({
       amount: Math.round(normalizedAmount * 100),
       currency: 'INR',
       receipt: `topup_${Date.now()}`,
@@ -114,7 +115,7 @@ export class WalletService {
         razorpayOrderId: razorpayOrder.id,
         amount: normalizedAmount,
         currency: 'INR',
-        keyId: env.RAZORPAY_KEY_ID,
+        keyId: rzp.keyId,
       },
     }
   }
@@ -154,8 +155,13 @@ export class WalletService {
         return { success: false, message: 'Top-up already marked as failed' }
       }
 
+      const rzpCfg = await getRazorpay()
+      if (!rzpCfg) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Online payments are not configured' }
+      }
       const expectedSignature = crypto
-        .createHmac('sha256', env.RAZORPAY_KEY_SECRET)
+        .createHmac('sha256', rzpCfg.keySecret)
         .update(`${orderId}|${paymentId}`)
         .digest('hex')
 

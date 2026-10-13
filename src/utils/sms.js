@@ -1,5 +1,5 @@
-import { env } from '../config/env.js'
 import { logger } from '../config/logger.js'
+import { getSmsConfig } from './sms-config.js'
 
 const TWO_FACTOR_BASE = 'https://2factor.in/API/V1'
 
@@ -23,17 +23,16 @@ function normalizePhone(phone) {
  * @returns {{ success: boolean, sessionId?: string, message?: string }}
  */
 export async function sendSmsOtp(phone) {
-  if (env.SMS_PROVIDER !== '2factor' || !env.TWO_FACTOR_API_KEY) {
+  const cfg = await getSmsConfig()
+  if (!cfg) {
     logger.warn('SMS provider not configured — skipping real SMS')
     return { success: false, message: 'SMS not configured' }
   }
 
   try {
     const cleanPhone = normalizePhone(phone)
-    // Template: prefer TWO_FACTOR_TEMPLATE, fall back to TWO_FACTOR_SENDER (legacy alias).
-    const template = env.TWO_FACTOR_TEMPLATE || env.TWO_FACTOR_SENDER || 'LndryAppOTP'
     // 2Factor API: GET /API/V1/{api_key}/SMS/{phone}/AUTOGEN/{template}
-    const url = `${TWO_FACTOR_BASE}/${env.TWO_FACTOR_API_KEY}/SMS/${cleanPhone}/AUTOGEN/${template}`
+    const url = `${TWO_FACTOR_BASE}/${cfg.apiKey}/SMS/${cleanPhone}/AUTOGEN/${encodeURIComponent(cfg.template)}`
 
     const res = await fetch(url, {
       method: 'GET',
@@ -62,13 +61,14 @@ export async function sendSmsOtp(phone) {
  * @returns {{ success: boolean, message?: string }}
  */
 export async function verifySmsOtp(sessionId, otp) {
-  if (env.SMS_PROVIDER !== '2factor' || !env.TWO_FACTOR_API_KEY) {
+  const cfg = await getSmsConfig()
+  if (!cfg) {
     return { success: false, message: 'SMS not configured' }
   }
 
   try {
     // VERIFY uses sessionId (not VERIFY3 which expects phone number)
-    const url = `${TWO_FACTOR_BASE}/${env.TWO_FACTOR_API_KEY}/SMS/VERIFY/${sessionId}/${otp}`
+    const url = `${TWO_FACTOR_BASE}/${cfg.apiKey}/SMS/VERIFY/${sessionId}/${otp}`
     logger.debug({ sessionId, otp, otpLength: otp?.length, otpType: typeof otp }, '2Factor verify — submitting')
 
     const res = await fetch(url, {

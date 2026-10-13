@@ -427,10 +427,11 @@ async function handleAutoReject({ orderId }) {
       let refundId = `ref_mock_${Math.random().toString(36).substring(2, 11)}`
       let refundStatus = 'PROCESSED'
 
-      const { razorpay } = await import('../config/razorpay.js')
-      if (razorpay && payment.razorpay_payment_id) {
+      const { getRazorpay } = await import('../config/razorpay.js')
+      const rzp = await getRazorpay()
+      if (rzp && payment.razorpay_payment_id) {
         try {
-          const rzpRefund = await razorpay.payments.refund(payment.razorpay_payment_id, {
+          const rzpRefund = await rzp.client.payments.refund(payment.razorpay_payment_id, {
             amount: Math.round(refundAmount * 100),
             notes: { reason },
           })

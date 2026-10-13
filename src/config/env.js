@@ -34,6 +34,9 @@ const envSchema = z.object({
   JWT_ACCESS_EXPIRY: z.string().default('15m'),
   JWT_REFRESH_EXPIRY: z.string().default('365d'),
   COOKIE_SECRET: z.string().min(16).optional(),
+  // Encrypts credentials saved from the dashboard (Razorpay / 2Factor). Required in production before
+  // any secret can be saved there; changing it makes already-saved secrets unreadable (re-enter them).
+  SETTINGS_ENCRYPTION_KEY: z.string().min(32).optional(),
 
   // PostgreSQL
   DB_HOST: z.string().default('localhost'),

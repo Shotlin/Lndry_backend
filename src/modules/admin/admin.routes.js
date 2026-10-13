@@ -35,6 +35,8 @@ import adminCartMilestonesRoutes from './cart-milestones/cart-milestones.routes.
 import adminReferralProgramsRoutes from './referral-programs/referral-programs.routes.js'
 import { adminReferralsRoutes } from '../referrals/referrals.routes.js'
 import adminOlaMapsSettingsRoutes from './ola-maps-settings/ola-maps-settings.routes.js'
+import adminRazorpaySettingsRoutes from './razorpay-settings/razorpay-settings.routes.js'
+import adminTwoFactorSettingsRoutes from './two-factor-settings/two-factor-settings.routes.js'
 import adminReconciliationProblemTypesRoutes from './reconciliation-problem-types/reconciliation-problem-types.routes.js'
 import adminHelpFaqsRoutes from './help-faqs/help-faqs.routes.js'
 import adminAccountDeletionRoutes from './account-deletion/account-deletion.routes.js'
@@ -132,6 +134,8 @@ export default async function adminRoutes(fastify) {
   fastify.register(adminReferralProgramsRoutes, { prefix: '/referral-programs' })
   fastify.register(adminReferralsRoutes, { prefix: '/referrals' })
   fastify.register(adminOlaMapsSettingsRoutes, { prefix: '/ola-maps-settings' })
+  fastify.register(adminRazorpaySettingsRoutes, { prefix: '/razorpay-settings' })
+  fastify.register(adminTwoFactorSettingsRoutes, { prefix: '/two-factor-settings' })
   fastify.register(adminReconciliationProblemTypesRoutes, { prefix: '/reconciliation-problem-types' })
   fastify.register(adminHelpFaqsRoutes, { prefix: '/help-faqs' })
   fastify.register(adminAccountDeletionRoutes, { prefix: '/account-deletion-requests' })

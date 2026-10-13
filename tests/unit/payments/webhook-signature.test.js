@@ -15,11 +15,11 @@ vi.mock('../../../src/config/bullmq.js', () => ({
   orderQueue: { add: vi.fn().mockResolvedValue(undefined) },
 }))
 
-vi.mock('../../../src/config/razorpay.js', () => ({
-  razorpay: null,
-}))
-
 const { WEBHOOK_SECRET } = vi.hoisted(() => ({ WEBHOOK_SECRET: 'test-webhook-secret' }))
+
+vi.mock('../../../src/config/razorpay.js', () => ({
+  getRazorpay: vi.fn(async () => ({ webhookSecret: WEBHOOK_SECRET, keyId: 'rzp_test_x', keySecret: 's', mode: 'TEST', source: 'dashboard' })),
+}))
 
 vi.mock('../../../src/config/env.js', () => ({
   env: { RAZORPAY_WEBHOOK_SECRET: WEBHOOK_SECRET },
