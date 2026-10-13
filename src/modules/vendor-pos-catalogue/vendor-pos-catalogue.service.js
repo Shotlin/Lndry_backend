@@ -96,6 +96,7 @@ export class VendorPosCatalogueService {
        LEFT JOIN service_categories sc ON gt.category_id = sc.id
        WHERE vs.vendor_id = $1 AND vsr.is_active = true AND vs.is_available = true
          AND vs.deleted_at IS NULL AND vs.approval_status = 'APPROVED' AND gt.is_active = true
+         AND (sc.id IS NULL OR sc.is_active = true) -- a category the admin switched off is not offered at the counter
        ORDER BY sc.name, vs.name, gt.name, vsr.id`, [vendorId])
     return rows
   }
