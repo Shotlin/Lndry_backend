@@ -59,7 +59,7 @@ export class AuthController {
       secure: env.NODE_ENV === 'production',
       sameSite: 'strict',
       path: '/api/v1/auth',
-      maxAge: 7 * 24 * 60 * 60, // 7 days
+      maxAge: 365 * 24 * 60 * 60, // matches the 365-day session (JWT_REFRESH_EXPIRY)
     })
 
     return reply.code(200).send(
@@ -245,7 +245,7 @@ export class AuthController {
       secure: env.NODE_ENV === 'production',
       sameSite: 'strict',
       path: '/api/v1/auth',
-      maxAge: 7 * 24 * 60 * 60,
+      maxAge: 365 * 24 * 60 * 60,
     })
 
     return reply.code(200).send(
