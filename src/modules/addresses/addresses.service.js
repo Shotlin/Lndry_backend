@@ -255,17 +255,32 @@ export class AddressesService {
    * Checks against pincodes in active vendors' serviceable_pincodes arrays.
    * Returns available=true also when no vendors are configured yet (null set).
    */
-  async validatePincode(pincode) {
+  async validatePincode(pincode, { lat, lng } = {}) {
     // Hard-blocked in production regardless of the flag — same
     // defense-in-depth pattern as the demo-OTP bypass.
     if (env.NODE_ENV !== 'production' && env.ALLOW_ALL_PINCODES) {
       return { available: true, deliveryFee: 29, estimatedMin: 30 }
     }
 
-    const serviceablePincodes = await getServiceablePincodes()
-
-    // null means no vendors configured — allow all so the app isn't blocked
-    const available = serviceablePincodes === null || serviceablePincodes.has(String(pincode))
+    // Service areas are radius-based now. A vendor created through the
+    // application flow has no `serviceable_pincodes` list at all, so a pincode
+    // that is not on some other vendor's list is NOT evidence that nobody
+    // serves it. Any of these makes the pincode available:
+    //   1. the exact point is inside an orderable vendor's radius (current apps send lat/lng),
+    //   2. an orderable vendor is registered in that pincode,
+    //   3. the pincode is on a vendor's legacy list, or no list exists at all.
+    let available = false
+    if (this._hasValidCoordinates(lat, lng) && lat !== undefined && lng !== undefined) {
+      available = (await this.repo.countServiceableVendorsAtCoords(Number(lat), Number(lng))) > 0
+    }
+    if (!available) {
+      available = (await this.repo.countServiceableVendorsInPincode(pincode)) > 0
+    }
+    if (!available) {
+      const serviceablePincodes = await getServiceablePincodes()
+      // null means no vendor lists configured — allow all so the app isn't blocked
+      available = serviceablePincodes === null || serviceablePincodes.has(String(pincode))
+    }
     return {
       available,
       deliveryFee: available ? 29 : 0,

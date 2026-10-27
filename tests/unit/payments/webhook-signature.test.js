@@ -3,7 +3,8 @@ import crypto from 'node:crypto'
 
 // Avoid touching Redis/Postgres/Razorpay during this unit test.
 vi.mock('../../../src/config/database.js', () => ({
-  query: vi.fn(),
+  // handleWebhook records each event for exactly-once processing.
+  query: vi.fn(async () => ({ rows: [{ processed_at: null }] })),
   getClient: vi.fn(),
 }))
 
@@ -56,7 +57,7 @@ describe('PaymentsService.handleWebhook — signature verification', () => {
 
     const result = await service.handleWebhook(rawBuffer, 'too-short')
 
-    expect(result).toEqual({ success: false })
+    expect(result).toMatchObject({ success: false, status: 400 })
   })
 
   it('rejects a same-length but incorrect signature', async () => {
@@ -66,7 +67,7 @@ describe('PaymentsService.handleWebhook — signature verification', () => {
 
     const result = await service.handleWebhook(rawBuffer, wrongSignature)
 
-    expect(result).toEqual({ success: false })
+    expect(result).toMatchObject({ success: false, status: 400 })
     expect(wrongSignature.length).toBe(sign(rawBuffer).length)
   })
 
@@ -78,7 +79,7 @@ describe('PaymentsService.handleWebhook — signature verification', () => {
 
     const result = await service.handleWebhook(tamperedBuffer, signature)
 
-    expect(result).toEqual({ success: false })
+    expect(result).toMatchObject({ success: false, status: 400 })
   })
 
   it('returns failure without verifying when the webhook secret is not configured', async () => {
@@ -91,6 +92,6 @@ describe('PaymentsService.handleWebhook — signature verification', () => {
 
     const result = await service.handleWebhook(Buffer.from('{}', 'utf8'), 'anything')
 
-    expect(result).toEqual({ success: false })
+    expect(result).toMatchObject({ success: false, status: 400 })
   })
 })

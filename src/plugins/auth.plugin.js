@@ -4,6 +4,7 @@ import cookie from '@fastify/cookie'
 import { env } from '../config/env.js'
 import { query } from '../config/database.js'
 import { ERROR_CODES } from '../constants/errors.js'
+import { normalizeActorRole } from '../utils/actor-role.js'
 
 /**
  * Auth plugin — registers JWT + Cookie support
@@ -26,6 +27,10 @@ async function authPlugin(fastify) {
       cookieName: 'accessToken',
       signed: false,
     },
+    // Every request.jwtVerify() (authenticate, optional-auth routes, offering
+    // guard) goes through this, so shop-staff tokens can never read as a
+    // platform ADMIN anywhere downstream.
+    formatUser: normalizeActorRole,
   })
 
   /**

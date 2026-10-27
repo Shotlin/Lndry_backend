@@ -1,4 +1,6 @@
 import bcrypt from 'bcrypt'
+import { env } from '../../../config/env.js'
+import { redis } from '../../../config/redis.js'
 import { getClient } from '../../../config/database.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { emit as emitAudit, emitInTx as emitAuditInTx } from '../../../utils/audit-log.js'
@@ -124,11 +126,42 @@ export class AdminAuthService {
    * Design:       §5.1
    */
   async login({ email, password }, ip = null, userAgent = null) {
+    // Per-ACCOUNT brute-force protection, on top of the per-IP route limit: an
+    // attacker rotating IPs (or a botnet) is still stopped after a handful of
+    // wrong passwords against one account. Successful login clears the counter.
+    const failKey = `admin_login_fail:${String(email || '').trim().toLowerCase()}`
+    const lockKey = `admin_login_lock:${String(email || '').trim().toLowerCase()}`
+    // The lockout is a safety net: if Redis is unreachable it must not also take
+    // sign-in down, so every Redis step here fails open.
+    let locked = false
+    try { locked = Boolean(await redis.get(lockKey)) } catch { /* fail open */ }
+    if (locked) {
+      throw { statusCode: 429, code: ERROR_CODES.LOGIN_TEMPORARILY_LOCKED, message: 'Too many failed sign-in attempts. Try again in 15 minutes.' }
+    }
+    try {
+      const result = await this._loginCore({ email, password }, ip, userAgent)
+      try { await redis.del(failKey) } catch { /* fail open */ }
+      return result
+    } catch (err) {
+      if (err?.code === ERROR_CODES.INVALID_CREDENTIALS) {
+        try {
+          const [, [, failures]] = await redis.multi().set(failKey, 0, 'EX', 900, 'NX').incr(failKey).exec()
+          if (failures >= 8) await redis.set(lockKey, '1', 'EX', 900)
+        } catch { /* fail open */ }
+      }
+      throw err
+    }
+  }
+
+  async _loginCore({ email, password }, ip = null, userAgent = null) {
     const user = await this.repository.findUserByEmailCI(email)
 
     // ── 1. Unknown email ────────────────────────────────────────────
     // R18.15 / R29.9: generic 401 — never disclose whether email exists.
     if (!user) {
+      // Burn the same bcrypt time a real account would, so response time does
+      // not reveal which emails exist.
+      await bcrypt.compare(String(password || ''), '$2b$12$C6UzMDM.H6dfI/f/IKcEeO5y5Gl6F3KQmSgbDFAo4U7Zk0kqVQ6Wy')
       emitAudit('login_failure', {
         actor_user_id: null,
         target_type: 'user',
@@ -210,7 +243,7 @@ export class AdminAuthService {
     const safeUser = sanitizeUser(user)
 
     // ── 4.1 Check 2FA ───────────────────────────────────────────────
-    if (user.totp_enabled) {
+    if (env.ADMIN_2FA_ENABLED && user.totp_enabled) {
       const tokenPayload = {
         id: user.id,
         role: 'MFA_PENDING',

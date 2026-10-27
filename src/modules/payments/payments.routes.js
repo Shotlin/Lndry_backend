@@ -25,13 +25,34 @@ export default async function paymentsRoutes(fastify) {
   fastify.post('/create-order', {
     schema: createPaymentOrderSchema,
     preHandler: [fastify.authenticate],
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
   }, controller.createPaymentOrder.bind(controller))
 
   // POST /verify — Verify payment signature
   fastify.post('/verify', {
     schema: verifyPaymentSchema,
     preHandler: [fastify.authenticate],
+    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
   }, controller.verifyPayment.bind(controller))
+
+  // GET /status — Where does this checkout / payment stand? (polled by the app)
+  fastify.get('/status', {
+    schema: {
+      tags: ['Payments'],
+      summary: 'Payment / checkout status for a draft, order or payment',
+      security: [{ bearerAuth: [] }],
+      querystring: {
+        type: 'object',
+        properties: {
+          order_draft_id: { type: 'string', format: 'uuid' },
+          order_id: { type: 'string', format: 'uuid' },
+          payment_id: { type: 'string', format: 'uuid' },
+        },
+      },
+    },
+    preHandler: [fastify.authenticate],
+    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+  }, controller.status.bind(controller))
 
   // GET /history — Payment history
   fastify.get('/history', {
@@ -43,6 +64,7 @@ export default async function paymentsRoutes(fastify) {
   fastify.post('/pay-with-wallet', {
     schema: payWithWalletSchema,
     preHandler: [fastify.authenticate],
+    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
   }, controller.payWithWallet.bind(controller))
 
   // ─── Webhook (NO AUTH — verified by Razorpay signature) ────────────

@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+import { effectiveRadiusKm } from '../discovery/vendor-visibility.js'
 import { getClient } from '../../config/database.js'
 import { query } from '../../config/database.js'
 import { redis } from '../../config/redis.js'
@@ -1354,6 +1356,39 @@ export class OrdersService {
     }
   }
 
+  /**
+   * Existing order for a draft, shaped like a fresh placement. Order id ==
+   * draft id (see the INSERT in placeOrderFromDraft). When the caller states
+   * a payment method that differs from what a webhook/recovery placement
+   * defaulted to, the caller's choice wins while the order is still brand new.
+   */
+  async _existingOrderForDraft(run, orderDraftId, userId, requestedMethod, body = {}) {
+    const res = await run('SELECT * FROM orders WHERE id = $1 AND user_id = $2', [orderDraftId, userId])
+    const row = res.rows[0]
+    if (!row) return null
+
+    const explicit = body.paymentMethod || body.payment_method
+    if (explicit && ['COD', 'ONLINE'].includes(requestedMethod) && row.payment_method !== requestedMethod && row.status === 'WAITING_VENDOR_CONFIRMATION') {
+      await run('UPDATE orders SET payment_method = $2, updated_at = NOW() WHERE id = $1', [row.id, requestedMethod])
+      row.payment_method = requestedMethod
+    }
+    return {
+      success: true,
+      order: { ...row, orderNumber: row.order_number },
+      status: row.status,
+    }
+  }
+
+  /** LNDR-YYYYMMDD-XXXXXX — 6 chars from an unambiguous 32-symbol alphabet (fits the 20-char column). */
+  _newOrderNumber() {
+    const alphabet = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789' // no 0/O, 1/I/L
+    const bytes = randomBytes(6)
+    let suffix = ''
+    for (let i = 0; i < 6; i++) suffix += alphabet[bytes[i] % alphabet.length]
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' }).replace(/-/g, '')
+    return `LNDR-${today}-${suffix}`
+  }
+
   _paiseToRupees(paise) {
     return Number((Number(paise) / 100).toFixed(2))
   }
@@ -1502,7 +1537,7 @@ export class OrdersService {
 
     // 3. Verify vendor status & approved service radius eligibility (Haversine check)
     const vendorRes = await query(
-      `SELECT id, is_active, status, lat, lng, approved_service_radius_km, vendor_approved, account_enabled, marketplace_published, express_pickup_available
+      `SELECT id, is_active, status, lat, lng, approved_service_radius_km, delivery_radius_km, vendor_approved, account_enabled, marketplace_published, express_pickup_available
        FROM vendors
        WHERE id = $1 AND deleted_at IS NULL`,
       [quote.vendor_id]
@@ -1528,7 +1563,8 @@ export class OrdersService {
       [Number(address.lat), Number(vendor.lat), Number(address.lng), Number(vendor.lng)]
     )
     const distance = parseFloat(distRows[0]?.distance_km || 0)
-    if (distance > parseFloat(vendor.approved_service_radius_km)) {
+    // A missing radius used to make this comparison NaN (always false), i.e. "any distance is fine".
+    if (distance > effectiveRadiusKm(vendor)) {
       return { success: false, message: 'Address falls outside this vendor\'s service area', code: 'OUT_OF_RADIUS' }
     }
 
@@ -1738,17 +1774,21 @@ export class OrdersService {
     const resolvedPaymentMethod = (body.paymentMethod || body.payment_method || 'ONLINE').toUpperCase()
     const isCod = resolvedPaymentMethod === 'COD'
 
-    // Check if order already exists for this draft ID (idempotency check)
-    const existingOrderRes = await query('SELECT * FROM orders WHERE id = $1', [orderDraftId])
-    if (existingOrderRes.rows.length > 0) {
-      return {
-        success: true,
-        order: existingOrderRes.rows[0],
-        status: existingOrderRes.rows[0].status
-      }
-    }
+    // Idempotency: this draft may already have become an order — through the
+    // app's own call, or through the payment webhook / reconciliation worker
+    // after the app was closed or the network dropped. Scoped to the caller so
+    // one customer can never read another's order by guessing a draft id.
+    const alreadyPlaced = await this._existingOrderForDraft(query, orderDraftId, userId, resolvedPaymentMethod, body)
+    if (alreadyPlaced) return alreadyPlaced
 
     const client = await getClient()
+    let clientReleased = false
+    const releaseClient = () => {
+      if (!clientReleased) {
+        clientReleased = true
+        client.release()
+      }
+    }
 
     try {
       await client.query('BEGIN')
@@ -1758,6 +1798,18 @@ export class OrdersService {
       const draft = draftRes.rows[0]
       if (!draft) {
         throw { statusCode: 404, message: 'Order draft not found', code: 'DRAFT_NOT_FOUND' }
+      }
+
+      // 1b. Re-check under the draft lock. Two callers (app + webhook) can pass
+      // the check above together; the second one to get the lock must return
+      // the first one's order instead of failing with "hold expired" for an
+      // order that was in fact created.
+      const placedUnderLock = await this._existingOrderForDraft(
+        (text, params) => client.query(text, params), orderDraftId, userId, resolvedPaymentMethod, body
+      )
+      if (placedUnderLock) {
+        await client.query('COMMIT')
+        return placedUnderLock
       }
 
       // 2. Lock payment FOR UPDATE — every order, COD or ONLINE, now requires
@@ -1780,15 +1832,19 @@ export class OrdersService {
       const isExpressPickup = !!snapshot.is_express_pickup
       let hold = null
       if (!isExpressPickup) {
-        // 3. Lock slot hold FOR UPDATE
+        // A pickup date that has already passed can never be honoured (a
+        // payment that was confirmed very late) — the caller refunds it.
+        const todayIst = new Date().toLocaleDateString('en-CA', { timeZone: 'Asia/Kolkata' })
+        if (snapshot.booking_date && String(snapshot.booking_date).slice(0, 10) < todayIst) {
+          throw { statusCode: 409, message: 'The selected pickup date has passed', code: 'SLOT_EXPIRED' }
+        }
+
+        // 3. Lock slot hold FOR UPDATE (if it is still there)
         const holdRes = await client.query(
           'SELECT * FROM slot_holds WHERE customer_id = $1 AND slot_id = $2 AND vendor_id = $3 AND quote_id = $4 AND status = \'ACTIVE\' AND expires_at > NOW() FOR UPDATE',
           [userId, draft.slot_id, draft.vendor_id, quoteId]
         )
-        hold = holdRes.rows[0]
-        if (!hold) {
-          throw { statusCode: 400, message: 'Pickup slot hold has expired or is invalid. Please request a new slot.', code: 'HOLD_EXPIRED' }
-        }
+        hold = holdRes.rows[0] || null
 
         // 4. Lock vendor slot FOR UPDATE
         const slotRes = await client.query(
@@ -1796,11 +1852,16 @@ export class OrdersService {
           [draft.slot_id]
         )
         if (slotRes.rows.length === 0) {
-          throw { statusCode: 404, message: 'Vendor slot not found' }
+          throw { statusCode: 404, message: 'Vendor slot not found', code: 'SLOT_FULL' }
         }
         const slot = slotRes.rows[0]
 
-        // 5. Enforce slot capacity under lock (exclude our locked hold)
+        // 5. Enforce slot capacity under lock (exclude our own hold, if any).
+        // The customer has ALREADY PAID the advance by now, so a hold that
+        // lapsed while the gateway was slow (UPI/netbanking confirmations can
+        // take 20-60 minutes) must not cost them the booking: the slot lock
+        // plus this capacity count is the real guarantee, the hold was only a
+        // courtesy reservation during checkout.
         const committedOrdersRes = await client.query(
           `SELECT COUNT(*)::int AS count FROM orders
            WHERE vendor_slot_id = $1 AND pickup_date = $2 AND status NOT IN ('PAYMENT_FAILED', 'VENDOR_REJECTED', 'AUTO_REJECTED', 'CUSTOMER_CANCELLED', 'ADMIN_CANCELLED', 'REFUNDED')`,
@@ -1808,21 +1869,21 @@ export class OrdersService {
         )
         const activeHoldsRes = await client.query(
           `SELECT COUNT(*)::int AS count FROM slot_holds
-           WHERE slot_id = $1 AND booking_date = $2 AND expires_at > NOW() AND status = 'ACTIVE' AND id != $3`,
-          [draft.slot_id, snapshot.booking_date, hold.id]
+           WHERE slot_id = $1 AND booking_date = $2 AND expires_at > NOW() AND status = 'ACTIVE'
+             AND ($3::uuid IS NULL OR id <> $3::uuid)`,
+          [draft.slot_id, snapshot.booking_date, hold ? hold.id : null]
         )
 
         const totalBooked = (committedOrdersRes.rows[0]?.count || 0) + (activeHoldsRes.rows[0]?.count || 0)
         if (totalBooked >= slot.max_orders) {
           throw { statusCode: 409, message: 'Selected pickup slot is fully booked', code: 'SLOT_FULL' }
         }
+        if (!hold) {
+          logger.info({ draftId: orderDraftId, userId }, 'Slot hold had lapsed but the advance is paid and capacity remains — placing the order')
+        }
       }
 
-      // 6. Generate collision-free order number LNDR-YYYYMMDD-RAND
-      const today = new Date().toISOString().slice(0, 10).replace(/-/g, '')
-      const randSuffix = Math.random().toString(36).substring(2, 5).toUpperCase()
-      const orderNumber = `LNDR-${today}-${randSuffix}`
-
+      // 6. Fee breakdown
       const feeBreakdown = this._normalizeDraftFeeBreakdown(snapshot.fee_breakdown)
       const subtotalRupees = this._paiseToRupees(feeBreakdown.subtotal_paise)
       const deliveryFeeRupees = this._paiseToRupees(feeBreakdown.delivery_fee_paise)
@@ -1833,44 +1894,62 @@ export class OrdersService {
 
       const appliedCouponCode = snapshot.coupon_code || null
 
-      // 7. Insert the order
-      const orderInsertRes = await client.query(
-        `INSERT INTO orders (
-           id, order_number, user_id, vendor_id, status, items, subtotal, discount_amount,
-           delivery_fee, platform_fee, tax_amount, total_amount,
-           payment_method, payment_status, delivery_address,
-           vendor_slot_id, pickup_date,
-           estimated_amount_paise, payable_amount_paise,
-           fee_breakdown, coupon_code, is_express_pickup, booking_type
-         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
-         RETURNING id, order_number, user_id, vendor_id, status, created_at`,
-        [
-          orderDraftId,
-          orderNumber,
-          userId,
-          draft.vendor_id,
-          'WAITING_VENDOR_CONFIRMATION',
-          JSON.stringify(draft.garment_lines),
-          subtotalRupees,
-          discountRupees,
-          deliveryFeeRupees,
-          platformFeeRupees,
-          taxRupees,
-          totalRupees,
-          isCod ? 'COD' : 'ONLINE',
-          'ADVANCE_PAID',
-          JSON.stringify(snapshot.address),
-          isExpressPickup ? null : draft.slot_id,
-          snapshot.booking_date,
-          feeBreakdown.subtotal_paise,
-          feeBreakdown.total_payable_paise,
-          JSON.stringify(feeBreakdown),
-          appliedCouponCode,
-          isExpressPickup,
-          draft.booking_type === 'ASSISTED' ? 'ASSISTED' : 'STANDARD'
-        ]
-      )
-      const order = orderInsertRes.rows[0]
+      // 7. Insert the order. The order number is LNDR-YYYYMMDD-<6 random chars>;
+      // a collision (rare, but certain to happen eventually at volume) is
+      // retried with a fresh number inside a savepoint so the surrounding
+      // transaction — and the customer's paid booking — survives it.
+      let order
+      let orderNumber
+      for (let attempt = 1; ; attempt++) {
+        orderNumber = this._newOrderNumber()
+        await client.query('SAVEPOINT order_insert')
+        try {
+          const orderInsertRes = await client.query(
+            `INSERT INTO orders (
+               id, order_number, user_id, vendor_id, status, items, subtotal, discount_amount,
+               delivery_fee, platform_fee, tax_amount, total_amount,
+               payment_method, payment_status, delivery_address,
+               vendor_slot_id, pickup_date,
+               estimated_amount_paise, payable_amount_paise,
+               fee_breakdown, coupon_code, is_express_pickup, booking_type
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+             RETURNING id, order_number, user_id, vendor_id, status, created_at`,
+            [
+              orderDraftId,
+              orderNumber,
+              userId,
+              draft.vendor_id,
+              'WAITING_VENDOR_CONFIRMATION',
+              JSON.stringify(draft.garment_lines),
+              subtotalRupees,
+              discountRupees,
+              deliveryFeeRupees,
+              platformFeeRupees,
+              taxRupees,
+              totalRupees,
+              isCod ? 'COD' : 'ONLINE',
+              'ADVANCE_PAID',
+              JSON.stringify(snapshot.address),
+              isExpressPickup ? null : draft.slot_id,
+              snapshot.booking_date,
+              feeBreakdown.subtotal_paise,
+              feeBreakdown.total_payable_paise,
+              JSON.stringify(feeBreakdown),
+              appliedCouponCode,
+              isExpressPickup,
+              draft.booking_type === 'ASSISTED' ? 'ASSISTED' : 'STANDARD'
+            ]
+          )
+          order = orderInsertRes.rows[0]
+          await client.query('RELEASE SAVEPOINT order_insert')
+          break
+        } catch (insertErr) {
+          await client.query('ROLLBACK TO SAVEPOINT order_insert')
+          const numberCollision = insertErr.code === '23505' && /order_number/.test(insertErr.constraint || insertErr.detail || '')
+          if (!numberCollision || attempt >= 6) throw insertErr
+          logger.warn({ orderNumber, attempt }, 'Order number collision — retrying with a new number')
+        }
+      }
 
       // 8. Insert garment lines into order_lines
       for (const line of draft.garment_lines) {
@@ -1917,15 +1996,39 @@ export class OrdersService {
         await client.query('UPDATE slot_holds SET status = \'CONSUMED\' WHERE id = $1', [hold.id])
       }
 
-      await client.query('COMMIT')
-
+      // Coupon usage is recorded INSIDE the order transaction under a lock on
+      // the coupon row. Recording it after commit (two separate statements,
+      // no lock) let concurrent orders each pass the limit check and each
+      // consume the same single-use coupon.
       if (appliedCouponCode) {
+        // Savepoint: the customer has already paid, so a bookkeeping failure
+        // here must never roll back their order.
+        await client.query('SAVEPOINT coupon_usage')
         try {
-          await this.couponsService.recordUsage(appliedCouponCode, userId, order.id)
+          const usage = await this.couponsRepo.recordUsageLocked(client, appliedCouponCode, userId, order.id)
+          await client.query('RELEASE SAVEPOINT coupon_usage')
+          if (usage.recorded && usage.overLimit) {
+            logger.warn(
+              { orderId: order.id, userId, couponCode: appliedCouponCode },
+              'Coupon limit was reached by a concurrent order before this one was placed — recorded for audit'
+            )
+          }
         } catch (err) {
+          await client.query('ROLLBACK TO SAVEPOINT coupon_usage')
           logger.warn({ err: err.message, orderId: order.id }, 'Coupon usage recording failed')
         }
       }
+
+      await client.query('COMMIT')
+
+      // The order is durable. Give the connection back BEFORE the follow-up
+      // work below: those steps (referrals, milestones, coupon unlocks ...) run
+      // their own queries through the shared pool. While this transaction's
+      // connection was still checked out, N simultaneous checkouts (N = pool
+      // size) held every connection and each waited for a second one that could
+      // never free up — the pool deadlocked until the connection timeout and
+      // the orders failed.
+      releaseClient()
 
       // First-time-offer COUPON_UNLOCK reward — only takes effect now that
       // the order is actually confirmed, not at draft-prepare time, so an
@@ -2000,11 +2103,11 @@ export class OrdersService {
         status: 'WAITING_VENDOR_CONFIRMATION'
       }
     } catch (err) {
-      await client.query('ROLLBACK')
+      if (!clientReleased) await client.query('ROLLBACK').catch(() => {})
       logger.error({ err: err.message, draftId: orderDraftId }, 'Order draft checkout failed')
       throw err
     } finally {
-      client.release()
+      releaseClient()
     }
   }
 }

@@ -138,71 +138,89 @@ export class AuthController {
 
   /**
    * POST /select-role
+   *
+   * SECURITY: the `role` placed in the issued token must be one the account
+   * genuinely holds (its own users.role or the role of the shop assignment it
+   * is selecting). It used to be copied verbatim from the request body, which
+   * let any shop employee mint a token with role "ADMIN".
    */
   async selectRole(request, reply) {
     const { role, vendor_id } = request.body || {}
-    if (!role) {
-      return reply.code(400).send(error('role is required', 'VALIDATION_ERROR'))
-    }
-
     const userId = request.user.id
+
+    const user = await this.service.repo.findById(userId)
+    if (!user || !user.is_active) {
+      return reply.code(403).send(error('Account is not active', 'FORBIDDEN'))
+    }
 
     if (vendor_id) {
       const assignment = await this.service.repo.findActiveShopStaffByUserAndShop(userId, vendor_id)
       if (!assignment) {
         return reply.code(403).send(error('No active assignment found for this vendor', 'ASSIGNMENT_NOT_FOUND'))
       }
-      
-      const accessToken = signAccessToken(
-        {
-          id: userId,
-          phone: request.user.phone,
-          role,
-          shopId: vendor_id,
-          shopRole: assignment.role,
-          permissions: assignment.permissions || [],
-        },
-        { expiresIn: '24h' }
-      )
-      
-      return reply.code(200).send(success({
-        token: accessToken,
-        vendor_id,
-        role,
-        permissions: assignment.permissions || []
-      }, 'Role selected successfully'))
-    } else {
-      const user = await this.service.repo.findById(userId)
-      if (user.role !== role) {
-        // Allow CUSTOMER as base role for staff too
-        const isStaff = (await this.service.repo.findActiveShopStaffByUserId(userId)).length > 0
-        if (role !== 'CUSTOMER' || !isStaff) {
-          return reply.code(403).send(error('Insufficient permissions for this role', 'FORBIDDEN'))
-        }
+
+      // No role asked for (the legacy /select-shop alias) = the account's own
+      // role, exactly what the OTP login issues for a single-shop account.
+      const heldRoles = new Set([user.role, assignment.role])
+      const tokenRole = role || user.role
+      if (!heldRoles.has(tokenRole)) {
+        return reply.code(403).send(error('Insufficient permissions for this role', 'FORBIDDEN'))
       }
 
       const accessToken = signAccessToken(
         {
           id: userId,
           phone: user.phone,
-          role
+          role: tokenRole,
+          shopId: vendor_id,
+          shopRole: assignment.role,
+          permissions: assignment.permissions || [],
         },
         { expiresIn: '24h' }
       )
 
       return reply.code(200).send(success({
         token: accessToken,
-        role
+        vendor_id,
+        role: tokenRole,
+        shop_role: assignment.role,
+        permissions: assignment.permissions || []
       }, 'Role selected successfully'))
     }
+
+    if (!role) {
+      return reply.code(400).send(error('role is required', 'VALIDATION_ERROR'))
+    }
+    if (user.role !== role) {
+      // Allow CUSTOMER as base role for staff too
+      const isStaff = (await this.service.repo.findActiveShopStaffByUserId(userId)).length > 0
+      if (role !== 'CUSTOMER' || !isStaff) {
+        return reply.code(403).send(error('Insufficient permissions for this role', 'FORBIDDEN'))
+      }
+    }
+
+    const accessToken = signAccessToken(
+      {
+        id: userId,
+        phone: user.phone,
+        role
+      },
+      { expiresIn: '24h' }
+    )
+
+    return reply.code(200).send(success({
+      token: accessToken,
+      role
+    }, 'Role selected successfully'))
   }
 
   /**
    * POST /select-shop (legacy alias)
    */
   async selectShop(request, reply) {
-    const { vendor_id } = request.body || {}
-    request.body.role = 'VENDOR_OWNER' // default to owner for selectShop legacy call
+    // Legacy alias: the role is derived server-side from the account and the
+    // chosen shop assignment, never taken from the client.
+    request.body = { vendor_id: (request.body || {}).vendor_id }
     return this.selectRole(request, reply)
   }
 
@@ -242,7 +260,14 @@ export class AuthController {
    * POST /logout
    */
   async logout(request, reply) {
-    await this.service.logout(request.user.id)
+    // Signing out of one app/phone must not sign the same phone number out of
+    // every other device (customer app + Partner app + rider app share an
+    // account). The client sends the refresh token of the session it is
+    // leaving; only `all: true` (or a client that sends nothing) ends every
+    // session, which is the old behaviour.
+    const { refreshToken, all } = request.body || {}
+    const bodyToken = typeof refreshToken === 'string' && refreshToken ? refreshToken : request.cookies?.refreshToken
+    await this.service.logout(request.user.id, { refreshToken: all ? null : bodyToken })
     reply.clearCookie('refreshToken', { path: '/api/v1/auth' })
     return reply.code(200).send(success(null, 'Logged out successfully'))
   }

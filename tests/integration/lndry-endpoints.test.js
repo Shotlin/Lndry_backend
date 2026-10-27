@@ -49,6 +49,39 @@ vi.mock('../../src/config/redis.js', () => {
         return val
       }),
       expire: vi.fn(() => 1),
+      ttl: vi.fn(() => 60),
+      exists: vi.fn((key) => (store.has(key) ? 1 : 0)),
+      zadd: vi.fn(() => 1),
+      zrem: vi.fn(() => 1),
+      zrange: vi.fn(() => []),
+      zcard: vi.fn(() => 0),
+      zremrangebyscore: vi.fn(() => 0),
+      // MULTI/EXEC used by the atomic rate counters: set-if-absent, incr, ttl.
+      multi: vi.fn(() => {
+        const ops = []
+        const chain = {
+          set: (key, val, ...rest) => {
+            ops.push(() => {
+              if (rest.includes('NX') && store.has(key)) return null
+              store.set(key, val)
+              return 'OK'
+            })
+            return chain
+          },
+          incr: (key) => {
+            ops.push(() => {
+              const next = (Number(store.get(key)) || 0) + 1
+              store.set(key, next)
+              return next
+            })
+            return chain
+          },
+          ttl: () => { ops.push(() => 60); return chain },
+          expire: () => { ops.push(() => 1); return chain },
+          exec: async () => ops.map((op) => [null, op()]),
+        }
+        return chain
+      }),
       setex: vi.fn((key, ttl, val) => {
         store.set(key, val)
         return 'OK'
@@ -204,6 +237,11 @@ beforeEach(() => {
       }
     }
 
+    // Atomic attempt reservation (UPDATE ... RETURNING attempts)
+    if (sql.includes('UPDATE otp_challenges')) {
+      return { rows: [{ attempts: 1 }] }
+    }
+
     // OTP challenge fetch
     if (sql.includes('SELECT') && sql.includes('otp_challenges')) {
       return {
@@ -353,7 +391,7 @@ beforeEach(() => {
     }
 
     // validate-location (serviceable check)
-    if (sql.includes('SELECT COUNT(*)::int AS count') && sql.includes('candidates')) {
+    if (sql.includes('SELECT COUNT(*)::int AS count') && (sql.includes('candidates') || sql.includes('FROM vendors v WHERE'))) {
       return { rows: [{ count: 2 }] }
     }
 
@@ -454,6 +492,11 @@ beforeEach(() => {
           updated_at: new Date().toISOString()
         }]
       }
+    }
+    // create-order's "already paid?" / "reuse an open gateway order?" lookups
+    // must find nothing for a brand-new checkout.
+    if (sql.includes('FROM payments') && (sql.includes("status = 'PAID' ORDER BY created_at") || sql.includes("status = 'PENDING' AND purpose"))) {
+      return { rows: [] }
     }
     if (sql.includes('SELECT') && sql.includes('payments')) {
       return {

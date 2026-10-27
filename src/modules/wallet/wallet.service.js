@@ -1,5 +1,5 @@
 import crypto from 'node:crypto'
-import { getClient } from '../../config/database.js'
+import { getClient, query } from '../../config/database.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 import { getRazorpay } from '../../config/razorpay.js'
@@ -165,11 +165,16 @@ export class WalletService {
         .update(`${orderId}|${paymentId}`)
         .digest('hex')
 
-      if (expectedSignature !== signature) {
-        await this.repo.markTopUpFailed(client, topup.id)
-        await client.query('COMMIT')
+      const sigOk =
+        expectedSignature.length === String(signature).length &&
+        crypto.timingSafeEqual(Buffer.from(expectedSignature), Buffer.from(String(signature)))
+      if (!sigOk) {
+        // Reject only. Marking the top-up FAILED here made a real payment
+        // impossible to credit later (the customer paid, one bad verify call
+        // arrived first, and the webhook then found a "failed" top-up).
+        await client.query('ROLLBACK')
         logger.warn({ userId, orderId }, 'Wallet top-up signature verification failed')
-        return { success: false, message: 'Payment verification failed' }
+        return { success: false, message: 'Payment verification failed. If money was deducted it will be added to your wallet automatically.' }
       }
 
       const wallet = await this._getOrCreateWalletForUpdate(client, userId)
@@ -196,6 +201,69 @@ export class WalletService {
     } finally {
       client.release()
     }
+  }
+
+  /**
+   * Credit a top-up the GATEWAY says was paid — used by the webhook and the
+   * reconciliation worker, so a customer who paid and then closed the app (or
+   * whose bank took an hour to confirm) still gets the money. Idempotent: the
+   * row lock + COMPLETED check mean it can run any number of times.
+   */
+  async settleTopUp(razorpayOrderId, razorpayPaymentId = null) {
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      const topup = await this.repo.findTopUpByOrderIdForUpdate(client, razorpayOrderId)
+      if (!topup) {
+        await client.query('ROLLBACK')
+        return { success: false, reason: 'NOT_FOUND' }
+      }
+      if (topup.status === 'COMPLETED') {
+        await client.query('COMMIT')
+        return { success: true, already: true }
+      }
+      const wallet = await this._getOrCreateWalletForUpdate(client, topup.userId)
+      await this.repo.applyPendingTopUp(client, wallet.id, topup.id, topup.amount)
+      await client.query('COMMIT')
+      logger.info({ userId: topup.userId, amount: topup.amount, razorpayOrderId, razorpayPaymentId }, 'Wallet top-up credited from gateway confirmation')
+      return { success: true, credited: true, userId: topup.userId, amount: topup.amount }
+    } catch (err) {
+      await client.query('ROLLBACK')
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  /**
+   * Ask the gateway about top-ups that are still pending and credit the paid ones.
+   * @returns {Promise<number>} how many were credited
+   */
+  async reconcilePendingTopUps({ limit = 30 } = {}) {
+    const rzp = await getRazorpay()
+    if (!rzp) return 0
+    const { rows } = await query(
+      `SELECT DISTINCT reference_id FROM wallet_transactions
+        WHERE type = 'CREDIT' AND status = 'PENDING'
+          AND reference_id LIKE 'order\\_%'
+          AND created_at < NOW() - INTERVAL '90 seconds'
+          AND created_at > NOW() - INTERVAL '24 hours'
+        LIMIT $1`,
+      [limit]
+    )
+    let credited = 0
+    for (const { reference_id: rzpOrderId } of rows) {
+      try {
+        const res = await rzp.client.orders.fetchPayments(rzpOrderId)
+        const paid = (res?.items || []).find((p) => p.status === 'captured')
+        if (!paid) continue
+        const out = await this.settleTopUp(rzpOrderId, paid.id)
+        if (out.credited) credited++
+      } catch (err) {
+        logger.warn({ err: err?.error?.description || err?.message, rzpOrderId }, 'Top-up reconciliation check failed')
+      }
+    }
+    return credited
   }
 
   /**

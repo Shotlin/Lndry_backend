@@ -1,3 +1,4 @@
+import { userRateLimit } from '../../middlewares/userRateLimit.js'
 import { WalletController } from './wallet.controller.js'
 import { WalletService } from './wallet.service.js'
 import { WalletRepository } from './wallet.repository.js'
@@ -40,7 +41,7 @@ export default async function walletRoutes(fastify) {
   // POST /topup — Create wallet top-up payment order
   fastify.post('/topup', {
     schema: createTopUpSchema,
-    preHandler: [fastify.authenticate],
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'wallet-topup', max: 10, windowSeconds: 60 })],
   }, controller.createTopUp.bind(controller))
 
   // POST /topup/verify — Verify wallet top-up payment

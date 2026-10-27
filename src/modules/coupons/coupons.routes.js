@@ -1,3 +1,4 @@
+import { userRateLimit } from '../../middlewares/userRateLimit.js'
 import { CouponsController } from './coupons.controller.js'
 import { CouponsService } from './coupons.service.js'
 import { CouponsRepository } from './coupons.repository.js'
@@ -31,7 +32,8 @@ export default async function couponsRoutes(fastify) {
   // POST /validate — Validate coupon for cart
   fastify.post('/validate', {
     schema: validateCouponSchema,
-    preHandler: [fastify.authenticate],
+    // Stops coupon-code guessing: 20 tries a minute per account.
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'coupon-validate', max: 20, windowSeconds: 60 })],
   }, controller.validate.bind(controller))
 
   // GET /available — List available coupons

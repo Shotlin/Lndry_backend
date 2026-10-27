@@ -52,8 +52,13 @@ export default async function authRoutes(fastify) {
   fastify.post('/refresh-token', {
     schema: refreshTokenSchema,
     config: {
+      // Per IP, and mobile carriers put thousands of real users behind one
+      // address (CGNAT) while every signed-in app refreshes every 15 minutes.
+      // 20 per 5 minutes starved those users of a valid session. A token is
+      // 365-day, rotated and single-use, so brute-forcing this endpoint is
+      // not a practical attack; this cap only blunts floods.
       rateLimit: {
-        max: 20,
+        max: 600,
         timeWindow: '5 minutes',
       },
     },

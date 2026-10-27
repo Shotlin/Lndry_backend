@@ -71,7 +71,8 @@ export class AddressesController {
 
   /** POST /validate-pincode */
   async validatePincode(request, reply) {
-    const result = await this.service.validatePincode(request.body.pincode)
+    const { pincode, lat, lng } = request.body
+    const result = await this.service.validatePincode(pincode, { lat, lng })
     const msg = result.available ? 'Delivery available' : 'Delivery not available in this area'
     return reply.code(200).send(success(result, msg))
   }

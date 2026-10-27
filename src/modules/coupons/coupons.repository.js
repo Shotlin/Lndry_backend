@@ -158,6 +158,43 @@ export class CouponsRepository {
   }
 
   /**
+   * Record a usage INSIDE the caller's order transaction, holding a row lock
+   * on the coupon so concurrent redemptions are serialised and the counts
+   * below are exact. Never throws for an unknown / demo coupon.
+   * @returns {{ recorded: boolean, overLimit?: boolean }}
+   */
+  async recordUsageLocked(client, code, userId, orderId) {
+    const { rows } = await client.query(
+      `SELECT id, usage_limit, used_count, per_user_limit, usage_limit_total, usage_limit_per_user
+         FROM coupons WHERE UPPER(code) = UPPER($1) FOR UPDATE`,
+      [code]
+    )
+    const coupon = rows[0]
+    if (!coupon) return { recorded: false }
+
+    const { rows: counts } = await client.query(
+      `SELECT COUNT(*) FILTER (WHERE user_id = $2)::int AS mine, COUNT(*)::int AS total
+         FROM coupon_usages WHERE coupon_id = $1`,
+      [coupon.id, userId]
+    )
+    const perUser = coupon.per_user_limit ?? coupon.usage_limit_per_user ?? 1
+    const overLimit =
+      counts[0].mine >= perUser ||
+      (coupon.usage_limit_total != null && counts[0].total >= coupon.usage_limit_total) ||
+      (coupon.usage_limit != null && coupon.used_count >= coupon.usage_limit)
+
+    await client.query(
+      `INSERT INTO coupon_usages (coupon_id, user_id, order_id) VALUES ($1, $2, $3)`,
+      [coupon.id, userId, orderId]
+    )
+    await client.query(
+      `UPDATE coupons SET used_count = used_count + 1, updated_at = NOW() WHERE id = $1`,
+      [coupon.id]
+    )
+    return { recorded: true, overLimit }
+  }
+
+  /**
    * Get all active/valid coupons
    */
   async findAvailable() {

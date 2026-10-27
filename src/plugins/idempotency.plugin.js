@@ -1,4 +1,5 @@
 import fp from 'fastify-plugin'
+import crypto from 'node:crypto'
 import { redis } from '../config/redis.js'
 import { logger } from '../config/logger.js'
 
@@ -10,7 +11,7 @@ async function idempotencyPlugin(fastify) {
   // Add preHandler hook globally, but execute only when route requires it or header is present
   fastify.addHook('preHandler', async (request, reply) => {
     const key = request.headers['idempotency-key']
-    const isRequired = reply.context.config?.idempotencyRequired === true
+    const isRequired = reply.routeOptions?.config?.idempotencyRequired === true
 
     if (isRequired && !key) {
       return reply.code(400).send({
@@ -44,7 +45,24 @@ async function idempotencyPlugin(fastify) {
       })
     }
 
-    const redisKey = `${REDIS_PREFIX}${key}`
+    // Scope the key to the caller and the endpoint. A bare client-chosen key was
+    // global, so anyone who learned (or reused) another user's key would have
+    // been replayed that user's cached response.
+    const scope = crypto
+      .createHash('sha256')
+      .update(`${request.headers.authorization || request.ip}|${request.method}|${request.routeOptions?.url || request.url.split('?')[0]}`)
+      .digest('hex')
+      .slice(0, 24)
+    const redisKey = `${REDIS_PREFIX}${scope}:${key}`
+
+    // Take the lock ATOMICALLY (NX). Check-then-set let two simultaneous
+    // double-taps both pass and both execute the request.
+    const acquired = await redis.set(redisKey, 'LOCK', 'EX', LOCK_TTL, 'NX')
+    if (acquired) {
+      request.idempotencyKey = key
+      request.idempotencyRedisKey = redisKey
+      return
+    }
     const stored = await redis.get(redisKey)
 
     if (stored === 'LOCK') {
@@ -77,9 +95,13 @@ async function idempotencyPlugin(fastify) {
       }
     }
 
-    // Set lock
-    await redis.set(redisKey, 'LOCK', 'EX', LOCK_TTL)
-    request.idempotencyKey = key
+    // The key vanished between our failed lock attempt and the read (it expired
+    // or the first request failed with a 5xx): treat this as a fresh request.
+    const retake = await redis.set(redisKey, 'LOCK', 'EX', LOCK_TTL, 'NX')
+    if (retake) {
+      request.idempotencyKey = key
+      request.idempotencyRedisKey = redisKey
+    }
   })
 
   // Add onSend hook to cache success responses
@@ -87,7 +109,7 @@ async function idempotencyPlugin(fastify) {
     const key = request.idempotencyKey
     if (!key) return payload
 
-    const redisKey = `${REDIS_PREFIX}${key}`
+    const redisKey = request.idempotencyRedisKey || `${REDIS_PREFIX}${key}`
 
     // If request failed with 5xx error, release the lock so the client can retry
     if (reply.statusCode >= 500) {

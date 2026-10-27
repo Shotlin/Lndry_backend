@@ -83,6 +83,7 @@ export const ERROR_CODES = Object.freeze({
   // ── Auth / session ────────────────────────────────────────────────
   UNAUTHORIZED: 'UNAUTHORIZED',
   INVALID_CREDENTIALS: 'INVALID_CREDENTIALS',         // R18.14
+  LOGIN_TEMPORARILY_LOCKED: 'LOGIN_TEMPORARILY_LOCKED', // too many wrong passwords for this account
   SESSION_INVALID: 'SESSION_INVALID',                 // R19.6
   USER_INACTIVE: 'USER_INACTIVE',                     // R18.13
   NO_ACTIVE_SHOP_ASSIGNMENTS: 'NO_ACTIVE_SHOP_ASSIGNMENTS', // R18.15
@@ -176,6 +177,7 @@ export const HTTP_STATUS = Object.freeze({
   // 401 — Unauthorized
   [ERROR_CODES.UNAUTHORIZED]: 401,
   [ERROR_CODES.INVALID_CREDENTIALS]: 401,
+  [ERROR_CODES.LOGIN_TEMPORARILY_LOCKED]: 429,
   [ERROR_CODES.SESSION_INVALID]: 401,
 
   // 403 — Forbidden

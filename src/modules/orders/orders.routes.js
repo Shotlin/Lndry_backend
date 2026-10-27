@@ -1,3 +1,4 @@
+import { userRateLimit } from '../../middlewares/userRateLimit.js'
 import { OrdersController } from './orders.controller.js'
 import { OrdersService } from './orders.service.js'
 import { OrdersRepository } from './orders.repository.js'
@@ -30,13 +31,13 @@ export default async function ordersRoutes(fastify) {
   // POST /prepare — Prepare a new order draft before payment
   fastify.post('/prepare', {
     schema: prepareOrderSchema,
-    preHandler: [fastify.authenticate],
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'order-prepare', max: 30, windowSeconds: 60 })],
   }, controller.prepare.bind(controller))
 
   // POST / — Place a new order (supports legacy cart or new LNDRY draft checkout)
   fastify.post('/', {
     schema: placeOrderSchema,
-    preHandler: [fastify.authenticate],
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'order-place', max: 20, windowSeconds: 60 })],
   }, async (request, reply) => {
     if (request.body?.order_draft_id || request.body?.orderDraftId) {
       return controller.placeOrderFromDraft(request, reply)
@@ -65,7 +66,7 @@ export default async function ordersRoutes(fastify) {
   // POST /:id/cancel — Cancel an order
   fastify.post('/:id/cancel', {
     schema: cancelOrderSchema,
-    preHandler: [fastify.authenticate],
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'order-cancel', max: 20, windowSeconds: 60 })],
   }, controller.cancel.bind(controller))
 
   // POST /:id/reorder — Re-order items

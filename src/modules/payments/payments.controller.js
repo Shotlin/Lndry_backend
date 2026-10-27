@@ -17,7 +17,7 @@ export class PaymentsController {
       request.body
     )
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'PAYMENT_FAILED'))
+      return reply.code(400).send(error(result.message, result.code || 'PAYMENT_FAILED'))
     }
     return reply.code(201).send(success(result.data, 'Payment order created'))
   }
@@ -28,7 +28,7 @@ export class PaymentsController {
   async verifyPayment(request, reply) {
     const result = await this.service.verifyPayment(request.user.id, request.body)
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'VERIFY_FAILED'))
+      return reply.code(400).send(error(result.message, result.code || 'VERIFY_FAILED'))
     }
     return reply.send(success(result.payment, 'Payment verified'))
   }
@@ -49,9 +49,30 @@ export class PaymentsController {
    */
   async webhook(request, reply) {
     const signature = request.headers['x-razorpay-signature']
-    const result = await this.service.handleWebhook(request.rawBody, signature)
-    // Always return 200 to Razorpay
-    return reply.send({ status: result.success ? 'ok' : 'error' })
+    const eventId = request.headers['x-razorpay-event-id']
+    // A thrown error becomes a 500, which makes Razorpay retry the delivery —
+    // exactly what we want for a transient failure (database blip, etc.).
+    const result = await this.service.handleWebhook(request.rawBody, signature, eventId)
+    if (!result.success) {
+      // Bad signature / unconfigured secret: say so, so it shows up as a failing
+      // webhook in the Razorpay dashboard instead of silently "succeeding".
+      return reply.code(result.status || 400).send({ status: 'error' })
+    }
+    return reply.send({ status: 'ok' })
+  }
+
+  /**
+   * Checkout / payment status for the app to poll
+   */
+  async status(request, reply) {
+    const { order_draft_id, order_id, payment_id } = request.query
+    const result = await this.service.getPaymentStatus(request.user.id, {
+      orderDraftId: order_draft_id,
+      orderId: order_id,
+      paymentId: payment_id,
+    })
+    reply.header('Cache-Control', 'no-store')
+    return reply.send(success(result.data, 'Payment status'))
   }
 
   /**

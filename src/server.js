@@ -11,6 +11,7 @@ initSentry()
 import { runPermissionAudit } from './utils/permission-audit.js'
 import { startCampaignScheduler, stopCampaignScheduler } from './workers/campaign-scheduler.worker.js'
 import { startPaymentExpiryWorker, stopPaymentExpiryWorker } from './workers/payment-expiry.worker.js'
+import { startPaymentReconcileWorker, stopPaymentReconcileWorker } from './workers/payment-reconcile.worker.js'
 import net from 'net'
 import { execSync } from 'child_process'
 
@@ -141,6 +142,10 @@ const start = async () => {
     // Start payment expiry worker (cleans up abandoned 15-min payment windows)
     startPaymentExpiryWorker()
 
+    // Payment reconciliation: finishes orders for late/lost payment confirmations,
+    // asks the gateway about payments still pending, refunds what can't become an order.
+    startPaymentReconcileWorker()
+
     // PM2 ready signal
     if (process.send) {
       process.send('ready')
@@ -155,6 +160,7 @@ const start = async () => {
 
       // Stop payment expiry worker
       stopPaymentExpiryWorker()
+      stopPaymentReconcileWorker()
 
       // Close Socket.IO
       if (app.io) {
@@ -181,11 +187,14 @@ const start = async () => {
     process.on('SIGINT', () => shutdown('SIGINT'))
     process.on('SIGTERM', () => shutdown('SIGTERM'))
 
-    // Unhandled errors — log and exit
+    // A stray rejected promise (a fire-and-forget notification, one flaky
+    // upstream call) used to terminate the whole API process, dropping every
+    // in-flight request on that instance — under load one bad background
+    // task became an outage. Log + report it and keep serving; a genuinely
+    // corrupted process still dies via uncaughtException below.
     process.on('unhandledRejection', (err) => {
-      logger.fatal({ err }, 'Unhandled rejection')
+      logger.error({ err }, 'Unhandled promise rejection (process kept alive)')
       captureException(err)
-      process.exit(1)
     })
 
     process.on('uncaughtException', (err) => {

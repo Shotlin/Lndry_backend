@@ -1,3 +1,4 @@
+import { userRateLimit } from '../../middlewares/userRateLimit.js'
 import { SlotsController } from './pickup-slots.controller.js'
 import { SlotsService } from './pickup-slots.service.js'
 
@@ -31,7 +32,7 @@ export default async function slotRoutes(fastify) {
 
   // 2. POST /slot-holds
   fastify.post('/slot-holds', {
-    preHandler: [fastify.authenticate],
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'slot-hold', max: 30, windowSeconds: 60 })],
     schema: {
       tags: ['Slots'],
       summary: 'Create a 10-minute hold on a pickup slot',

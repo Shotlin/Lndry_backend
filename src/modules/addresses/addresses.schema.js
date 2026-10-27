@@ -131,6 +131,10 @@ export const validatePincodeSchema = {
     required: ['pincode'],
     properties: {
       pincode: { type: 'string', pattern: '^[1-9][0-9]{5}$' },
+      // Optional: lets the server confirm availability from the exact point
+      // (radius model) instead of relying on pincode lists alone.
+      lat: { type: 'number', minimum: -90, maximum: 90 },
+      lng: { type: 'number', minimum: -180, maximum: 180 },
     },
   },
   response: {

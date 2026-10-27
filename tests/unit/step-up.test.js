@@ -3,11 +3,12 @@ import jwt from 'jsonwebtoken'
 
 // Mock external dependencies before importing middleware
 const JWT_SECRET = 'test-access-secret-32-chars-min-xx'
-vi.mock('../../src/config/env.js', () => ({
-  env: {
-    JWT_ACCESS_SECRET: 'test-access-secret-32-chars-min-xx',
-  },
+const mockEnv = vi.hoisted(() => ({
+  JWT_ACCESS_SECRET: 'test-access-secret-32-chars-min-xx',
+  LOG_LEVEL: 'silent',
+  ADMIN_2FA_ENABLED: true,
 }))
+vi.mock('../../src/config/env.js', () => ({ env: mockEnv }))
 
 import { requireStepUp, issueStepUpToken } from '../../src/middlewares/requireStepUp.js'
 
@@ -37,9 +38,27 @@ function makeReply() {
   return reply
 }
 
+describe('requireStepUp Middleware — authenticator 2FA switched off (ADMIN_2FA_ENABLED=false, the default)', () => {
+  beforeEach(() => { mockEnv.ADMIN_2FA_ENABLED = false })
+
+  it('lets a high-risk request through with NO step-up token, regardless of the stored setting', async () => {
+    const req = makeRequest({ headers: {} })
+    const reply = makeReply()
+    await requireStepUp(req, reply)
+    expect(reply.statusCode).toBeNull()
+    expect(req.stepUpBypassed).toBe(true)
+  })
+
+  it('isStepUpEnforced reports false', async () => {
+    const { isStepUpEnforced } = await import('../../src/middlewares/requireStepUp.js')
+    expect(await isStepUpEnforced()).toBe(false)
+  })
+})
+
 describe('requireStepUp Middleware', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+    mockEnv.ADMIN_2FA_ENABLED = true
   })
 
   it('fails with 403 STEP_UP_REQUIRED if x-step-up-token header is missing', async () => {

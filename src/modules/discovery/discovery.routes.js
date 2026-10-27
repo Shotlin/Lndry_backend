@@ -2,6 +2,7 @@ import { query } from '../../config/database.js'
 import { success, error } from '../../utils/apiResponse.js'
 import { CategoriesRepository } from '../service-categories/service-categories.repository.js'
 import { CategoriesService } from '../service-categories/service-categories.service.js'
+import { eligibilityConditions, distanceKmSql, withinRadiusSql, EFFECTIVE_RADIUS_SQL } from './vendor-visibility.js'
 
 export default async function discoveryRoutes(fastify) {
   const categoriesRepo = new CategoriesRepository()
@@ -24,24 +25,8 @@ export default async function discoveryRoutes(fastify) {
     }
   }
 
-  // Helper to construct eligibility WHERE conditions
-  const getEligibilityConditions = () => {
-    return [
-      'v.vendor_approved = true',
-      'v.account_enabled = true',
-      'v.marketplace_published = true',
-      'v.deleted_at IS NULL',
-      `EXISTS (
-        SELECT 1 FROM vendor_services vs 
-        JOIN vendor_service_rates vsr ON vs.id = vsr.vendor_service_id 
-        WHERE vs.vendor_id = v.id AND vsr.is_active = true AND vs.deleted_at IS NULL AND vs.approval_status = 'APPROVED'
-      )`,
-      `EXISTS (
-        SELECT 1 FROM vendor_slots sl 
-        WHERE sl.vendor_id = v.id AND sl.is_active = true
-      )`
-    ]
-  }
+  // One shared definition of "vendor is orderable" (see vendor-visibility.js).
+  const getEligibilityConditions = () => eligibilityConditions()
 
   // 1. GET /home -> Address-aware dashboard (Categories, nearby vendors, active order, history)
   fastify.get('/home', {
@@ -99,27 +84,13 @@ export default async function discoveryRoutes(fastify) {
 
         // Query allocated/nearby vendors based on Haversine, visibility, configs, and proximity radius
         const conditions = getEligibilityConditions()
-        conditions.push(
-          `(6371 * acos(
-            LEAST(1.0, GREATEST(-1.0,
-              cos(radians($1::float8)) * cos(radians(v.lat::float8))
-                * cos(radians(v.lng::float8) - radians($2::float8))
-                + sin(radians($1::float8)) * sin(radians(v.lat::float8))
-            ))
-          )) <= v.approved_service_radius_km`
-        )
+        conditions.push(withinRadiusSql('$1', '$2'))
 
         const vendorsRes = await query(
           `SELECT v.id, v.name, v.slug, v.description, v.logo_url, v.banner_url,
                   v.address_line1, v.city, v.lat, v.lng, v.operating_hours, v.is_open,
-                  (6371 * acos(
-                    LEAST(1.0, GREATEST(-1.0,
-                      cos(radians($1::float8)) * cos(radians(v.lat::float8))
-                        * cos(radians(v.lng::float8) - radians($2::float8))
-                        + sin(radians($1::float8)) * sin(radians(v.lat::float8))
-                    ))
-                  ))::numeric(7,2) AS distance_km,
-                  v.approved_service_radius_km,
+                  ${distanceKmSql('$1', '$2')}::numeric(7,2) AS distance_km,
+                  ${EFFECTIVE_RADIUS_SQL} AS approved_service_radius_km,
                   COALESCE((SELECT AVG(vendor_rating) FROM reviews r WHERE r.vendor_id = v.id AND r.deleted_at IS NULL), 5.0)::numeric(2,1) AS rating
              FROM vendors v
             WHERE ${conditions.join(' AND ')}
@@ -149,17 +120,17 @@ export default async function discoveryRoutes(fastify) {
       querystring: {
         type: 'object',
         properties: {
-          lat: { type: 'number' },
-          lng: { type: 'number' },
+          lat: { type: 'number', minimum: -90, maximum: 90 },
+          lng: { type: 'number', minimum: -180, maximum: 180 },
           category_id: { type: 'string', format: 'uuid' },
           garment_type_id: { type: 'string', format: 'uuid' },
-          q: { type: 'string' },
+          q: { type: 'string', maxLength: 100 },
           date: { type: 'string' },
           slot: { type: 'string', format: 'uuid' },
           sort: { type: 'string', enum: ['nearest', 'price_asc', 'price_desc', 'best_rating', 'value_for_money'], default: 'nearest' },
           price: { type: 'integer' },
-          page: { type: 'integer', default: 1 },
-          limit: { type: 'integer', default: 20 }
+          page: { type: 'integer', minimum: 1, maximum: 1000, default: 1 },
+          limit: { type: 'integer', minimum: 1, maximum: 50, default: 20 }
         }
       }
     }
@@ -170,7 +141,8 @@ export default async function discoveryRoutes(fastify) {
     let userLat = lat
     let userLng = lng
 
-    if (!userLat || !userLng) {
+    const missingCoords = (v) => v === undefined || v === null || Number.isNaN(Number(v))
+    if (missingCoords(userLat) || missingCoords(userLng)) {
       if (request.user?.id) {
         const addrRes = await query(
           `SELECT lat, lng FROM addresses WHERE user_id = $1 AND is_default = true LIMIT 1`,
@@ -184,28 +156,15 @@ export default async function discoveryRoutes(fastify) {
     }
 
     // Proximity check is strict. If coords missing, return empty.
-    if (!userLat || !userLng) {
+    if (missingCoords(userLat) || missingCoords(userLng)) {
       return reply.code(200).send(success([], 'No coordinates available', {
         pagination: { page, limit, total: 0, totalPages: 0 }
       }))
     }
 
     const params = [userLat, userLng]
-    const distanceSelect = `(6371 * acos(
-      LEAST(1.0, GREATEST(-1.0,
-        cos(radians($1::float8)) * cos(radians(v.lat::float8))
-          * cos(radians(v.lng::float8) - radians($2::float8))
-          + sin(radians($1::float8)) * sin(radians(v.lat::float8))
-      ))
-    ))::numeric(7,2) AS distance_km`
-
-    const distanceWhere = `(6371 * acos(
-      LEAST(1.0, GREATEST(-1.0,
-        cos(radians($1::float8)) * cos(radians(v.lat::float8))
-          * cos(radians(v.lng::float8) - radians($2::float8))
-          + sin(radians($1::float8)) * sin(radians(v.lat::float8))
-      ))
-    )) <= v.approved_service_radius_km`
+    const distanceSelect = `${distanceKmSql('$1', '$2')}::numeric(7,2) AS distance_km`
+    const distanceWhere = withinRadiusSql('$1', '$2')
 
     const conditions = getEligibilityConditions()
     conditions.push(distanceWhere)
@@ -268,7 +227,8 @@ export default async function discoveryRoutes(fastify) {
     if (sort === 'nearest') {
       orderByClause = 'ORDER BY distance_km ASC'
     } else if (sort === 'best_rating') {
-      orderByClause = 'ORDER BY rating DESC'
+      // Vendors with no reviews carry a neutral 5.0 placeholder; they must not outrank genuinely top-rated ones.
+      orderByClause = 'ORDER BY (review_count > 0) DESC, rating DESC, distance_km ASC'
     } else if (sort === 'price_asc') {
       orderByClause = `ORDER BY (
         SELECT MIN(vsr.rate_paise) FROM vendor_services vs
@@ -282,14 +242,14 @@ export default async function discoveryRoutes(fastify) {
         WHERE vs.vendor_id = v.id AND vsr.is_active = true AND vs.deleted_at IS NULL AND vs.approval_status = 'APPROVED'
       ) DESC NULLS LAST`
     } else if (sort === 'value_for_money') {
-      orderByClause = 'ORDER BY rating DESC, distance_km ASC NULLS LAST'
+      orderByClause = 'ORDER BY (review_count > 0) DESC, rating DESC, distance_km ASC NULLS LAST'
     }
 
     const whereClause = conditions.join(' AND ')
     const listQuery = `
       SELECT v.id, v.name, v.slug, v.description, v.logo_url, v.banner_url,
              v.address_line1, v.city, v.lat, v.lng, v.operating_hours, v.is_open,
-             v.approved_service_radius_km,
+             ${EFFECTIVE_RADIUS_SQL} AS approved_service_radius_km,
              ${distanceSelect},
              COALESCE((SELECT AVG(vendor_rating) FROM reviews r WHERE r.vendor_id = v.id AND r.deleted_at IS NULL), 5.0)::numeric(2,1) AS rating,
              COALESCE((SELECT COUNT(*) FROM reviews r WHERE r.vendor_id = v.id AND r.deleted_at IS NULL), 0)::int AS review_count,
@@ -537,9 +497,9 @@ export default async function discoveryRoutes(fastify) {
         type: 'object',
         required: ['q'],
         properties: {
-          q: { type: 'string', minLength: 1 },
-          lat: { type: 'number' },
-          lng: { type: 'number' }
+          q: { type: 'string', minLength: 1, maxLength: 100 },
+          lat: { type: 'number', minimum: -90, maximum: 90 },
+          lng: { type: 'number', minimum: -180, maximum: 180 }
         }
       }
     }
@@ -571,31 +531,16 @@ export default async function discoveryRoutes(fastify) {
     const conditions = getEligibilityConditions()
     conditions.push('v.name ILIKE $1')
 
-    if (lat && lng) {
+    if (lat !== undefined && lng !== undefined) {
       params.push(lat, lng)
-      distSelect = `(6371 * acos(
-        LEAST(1.0, GREATEST(-1.0,
-          cos(radians($2::float8)) * cos(radians(v.lat::float8))
-            * cos(radians(v.lng::float8) - radians($3::float8))
-            + sin(radians($2::float8)) * sin(radians(v.lat::float8))
-        ))
-      ))::numeric(7,2) AS distance_km`
-      
-      conditions.push(
-        `(6371 * acos(
-          LEAST(1.0, GREATEST(-1.0,
-            cos(radians($2::float8)) * cos(radians(v.lat::float8))
-              * cos(radians(v.lng::float8) - radians($3::float8))
-              + sin(radians($2::float8)) * sin(radians(v.lat::float8))
-          ))
-        )) <= v.approved_service_radius_km`
-      )
+      distSelect = `${distanceKmSql('$2', '$3')}::numeric(7,2) AS distance_km`
+      conditions.push(withinRadiusSql('$2', '$3'))
     }
 
     const vendorsRes = await query(
       `SELECT v.id, v.name, v.slug, v.description, v.logo_url, v.banner_url,
               v.address_line1, v.city, v.lat, v.lng, v.is_open,
-              v.approved_service_radius_km,
+              ${EFFECTIVE_RADIUS_SQL} AS approved_service_radius_km,
               ${distSelect},
               COALESCE((SELECT AVG(vendor_rating) FROM reviews r WHERE r.vendor_id = v.id AND r.deleted_at IS NULL), 5.0)::numeric(2,1) AS rating
          FROM vendors v

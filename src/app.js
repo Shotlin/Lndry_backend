@@ -11,6 +11,14 @@ import { captureRawBody } from './utils/rawBody.js'
  * Build and configure the Fastify application
  * Registers plugins, hooks, and routes in the correct order
  */
+function parseTrustProxy(value) {
+  const v = String(value ?? '').trim()
+  if (v === 'true') return true
+  if (v === 'false' || v === '') return false
+  if (/^\d+$/.test(v)) return Number(v)
+  return v.split(',').map((x) => x.trim()).filter(Boolean)
+}
+
 export const buildApp = async () => {
   const app = Fastify({
     logger: {
@@ -39,7 +47,14 @@ export const buildApp = async () => {
         },
       }),
     },
-    trustProxy: true,
+    // Trust only the configured proxies (see TRUST_PROXY in config/env.js) so
+    // request.ip cannot be forged through a client-supplied X-Forwarded-For.
+    trustProxy: parseTrustProxy(env.TRUST_PROXY),
+    // Slow-client / hanging-connection protection under load.
+    connectionTimeout: 0,
+    keepAliveTimeout: 65000, // > typical LB / Cloudflare idle timeout so keep-alive reuse never races a close
+    requestTimeout: 60000,
+    bodyLimit: 2 * 1024 * 1024,
     ajv: {
       customOptions: {
         removeAdditional: 'all',

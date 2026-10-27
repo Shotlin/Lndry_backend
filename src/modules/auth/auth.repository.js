@@ -231,6 +231,22 @@ export class AuthRepository {
   }
 
   /**
+   * Atomically claim one verification attempt on a challenge. Returns the
+   * updated row, or null when the challenge is gone or already used up its
+   * attempts. Being a single UPDATE it cannot be raced by parallel guesses.
+   */
+  async reserveOtpAttempt(challengeId, phone, maxAttempts) {
+    const { rows } = await query(
+      `UPDATE otp_challenges
+          SET attempts = COALESCE(attempts, 0) + 1
+        WHERE id = $1 AND phone = $2 AND COALESCE(attempts, 0) < $3
+        RETURNING attempts`,
+      [challengeId, phone, maxAttempts]
+    )
+    return rows[0] || null
+  }
+
+  /**
    * Increment attempts on an OTP challenge
    */
   async incrementOtpChallengeAttempts(challengeId) {

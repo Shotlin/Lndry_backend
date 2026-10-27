@@ -710,17 +710,176 @@ export class VendorCounterOrdersService {
     if (deliveryMode === 'INVALID') return fail(`deliveryMode must be one of ${DELIVERY_MODES.join(', ')}`)
     const isExpress = parseFlag(patch.isExpress)
     if (isExpress === 'INVALID') return fail('isExpress must be true or false')
-    const { rows } = await query(
-      `UPDATE store_orders SET
-         notes = COALESCE($3, notes), expected_delivery_date = COALESCE($4::date, expected_delivery_date),
-         delivery_address = COALESCE($5, delivery_address), service_zone = COALESCE($6, service_zone),
-         fulfillment_mode = COALESCE($7, fulfillment_mode), delivery_mode = COALESCE($8, delivery_mode), is_express = COALESCE($9::boolean, is_express),
-         version = version + 1, updated_at = NOW()
-       WHERE id = $1 AND vendor_id = $2 RETURNING id`,
-      [id, vendorId, patch.notes ?? null, patch.expectedDeliveryDate ?? null, patch.deliveryAddress ?? null, patch.serviceZone ?? null, patch.fulfillmentMode ?? null, deliveryMode, isExpress]
-    )
-    if (!rows[0]) return fail('Order not found', 'NOT_FOUND', 404)
+    let itemEdit = null
+    if (patch.items !== undefined) {
+      itemEdit = await this._planItemEdit(vendorId, order, patch.items)
+      if (!itemEdit.success) return itemEdit
+      // `preview: true` answers "what would this cost?" without changing anything.
+      if (patch.preview === true) {
+        const { subtotalPaise, chargesPaise, discountsPaise, taxPaise, totalPaise, priced } = itemEdit
+        return { success: true, order, preview: { items: priced, subtotalPaise, chargesPaise, discountsPaise, taxPaise, totalPaise, previousTotalPaise: order.totalPaise, amountPaidPaise: order.amountPaidPaise } }
+      }
+    }
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query(
+        `UPDATE store_orders SET
+           notes = COALESCE($3, notes), expected_delivery_date = COALESCE($4::date, expected_delivery_date),
+           delivery_address = COALESCE($5, delivery_address), service_zone = COALESCE($6, service_zone),
+           fulfillment_mode = COALESCE($7, fulfillment_mode), delivery_mode = COALESCE($8, delivery_mode), is_express = COALESCE($9::boolean, is_express),
+           version = version + 1, updated_at = NOW()
+         WHERE id = $1 AND vendor_id = $2 RETURNING id`,
+        [id, vendorId, patch.notes ?? null, patch.expectedDeliveryDate ?? null, patch.deliveryAddress ?? null, patch.serviceZone ?? null, patch.fulfillmentMode ?? null, deliveryMode, isExpress]
+      )
+      if (!rows[0]) {
+        await client.query('ROLLBACK')
+        return fail('Order not found', 'NOT_FOUND', 404)
+      }
+      if (itemEdit) await this._applyItemEdit(client, vendorId, actor, order, itemEdit)
+      await client.query('COMMIT')
+    } catch (error) {
+      await client.query('ROLLBACK')
+      throw error
+    } finally {
+      client.release()
+    }
+    if (itemEdit) await this._afterItemEdit(vendorId, actor, order, itemEdit)
     return { success: true, order: await this.getOrder(vendorId, id) }
+  }
+
+  /**
+   * Replaces the garment lines of an order that has not started processing, and re-prices it with the SAME rules
+   * the booking used: the price list for the lines, percentage charges/discounts re-applied to the new subtotal,
+   * flat and manual amounts kept, and the GST rate kept. Returns the plan; nothing is written here.
+   */
+  async _planItemEdit(vendorId, order, items) {
+    const locked = fail('Garments can only be changed before processing starts. Cancel this order and book a new one.', 'ITEMS_LOCKED', 409)
+    if (!['BOOKED', 'PICKED_UP'].includes(order.status)) return locked
+    const [units, containers] = await Promise.all([
+      query(`SELECT id, state, store_line_index, sequence, garment_name, active_tag_code FROM vendor_garment_units WHERE vendor_id = $1 AND order_id = $2 AND state <> 'CANCELLED' ORDER BY store_line_index, sequence`, [vendorId, order.id]),
+      query(`SELECT id, state FROM vendor_laundry_containers WHERE vendor_id = $1 AND order_id = $2 AND state <> 'CANCELLED'`, [vendorId, order.id]),
+    ])
+    if (units.rows.some((u) => u.state !== 'INTAKE') || containers.rows.some((c) => c.state !== 'INTAKE')) return locked
+
+    const priced = await this._priceItems(vendorId, items, order.customer.id)
+    if (!priced.success) return priced
+    const subtotal = priced.subtotalPaise
+    const before = order.priceBreakdown || {}
+    const reapply = (line) => ({ ...line, amountPaise: line.percent != null ? Math.round(subtotal * Math.round(line.percent * 100) / 10000) : line.amountPaise })
+    const chargeLines = (before.charges || []).map(reapply).filter((l) => l.amountPaise > 0)
+    const chargesPaise = chargeLines.reduce((sum, l) => sum + l.amountPaise, 0)
+    let room = subtotal + chargesPaise
+    const discountLines = []
+    for (const line of (before.discounts || []).map(reapply)) {
+      const amountPaise = Math.min(line.amountPaise, room)
+      room -= amountPaise
+      if (amountPaise > 0) discountLines.push({ ...line, amountPaise })
+    }
+    const discountsPaise = discountLines.reduce((sum, l) => sum + l.amountPaise, 0)
+    const taxablePaise = subtotal + chargesPaise - discountsPaise
+    const taxRateBps = order.taxRateBps || 0
+    const taxPaise = Math.round(taxablePaise * taxRateBps / 10000)
+    const totalPaise = taxablePaise + taxPaise
+    if (totalPaise < order.amountPaidPaise) {
+      return fail('The new total is less than what the customer has already paid. Refund the difference first, or keep the total at or above the amount paid.', 'TOTAL_BELOW_PAID', 409)
+    }
+    const breakdown = { charges: chargeLines, discounts: discountLines, tax: taxRateBps > 0 ? { label: 'GST', percent: taxRateBps / 100, amountPaise: taxPaise } : null }
+    return { success: true, priced: priced.priced, subtotalPaise: subtotal, chargesPaise, discountsPaise, taxPaise, taxRateBps, totalPaise, breakdown, units: units.rows, containers: containers.rows }
+  }
+
+  async _applyItemEdit(client, vendorId, actor, order, plan) {
+    await client.query(
+      `UPDATE store_orders SET items = $3, subtotal_paise = $4, charges_paise = $5, discount_paise = $6, tax_paise = $7, total_paise = $8, price_breakdown = $9
+       WHERE id = $1 AND vendor_id = $2`,
+      [order.id, vendorId, JSON.stringify(plan.priced), plan.subtotalPaise, plan.chargesPaise, plan.discountsPaise, plan.taxPaise, plan.totalPaise, JSON.stringify(plan.breakdown)]
+    )
+    // Garment tags follow the lines: a line that stays keeps its tags (extra ones are cancelled, missing ones issued).
+    const lineKey = (line) => `${line.garmentId}:${line.serviceId}`
+    const oldItems = order.items || []
+    const oldIndexByKey = new Map(oldItems.map((line, index) => [lineKey(line), index]))
+    const isPiece = (line) => PIECE_UNITS.has(String(line.unit).toLowerCase())
+    const keep = new Set()
+    plan.newUnits = []
+    plan.cancelledUnits = []
+    // Free the (line, sequence) slots first so lines can be re-indexed without a unique-index clash.
+    await client.query(`UPDATE vendor_garment_units SET store_line_index = NULL WHERE vendor_id = $1 AND order_id = $2 AND state <> 'CANCELLED'`, [vendorId, order.id])
+    for (let index = 0; index < plan.priced.length; index += 1) {
+      const line = plan.priced[index]
+      if (!isPiece(line)) continue
+      const oldIndex = oldIndexByKey.get(lineKey(line))
+      const existing = oldIndex === undefined ? [] : plan.units.filter((u) => u.store_line_index === oldIndex).sort((a, b) => a.sequence - b.sequence)
+      const kept = existing.slice(0, line.qty)
+      for (const [position, unit] of kept.entries()) {
+        keep.add(unit.id)
+        await client.query('UPDATE vendor_garment_units SET store_line_index = $2, sequence = $3 WHERE id = $1', [unit.id, index, position + 1])
+      }
+      for (let sequence = kept.length + 1; sequence <= line.qty; sequence += 1) {
+        const tagCode = tag('ELT')
+        const unit = (await client.query(
+          `INSERT INTO vendor_garment_units (vendor_id, order_id, order_line_id, store_line_index, customer_user_id, garment_type_id, garment_name, sequence, active_tag_code, created_by)
+           VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+          [vendorId, order.id, index, order.customer.id, line.garmentTypeId, line.name, sequence, tagCode, actor.userId]
+        )).rows[0]
+        await client.query('INSERT INTO vendor_garment_tag_history (unit_id, tag_code, issued_by) VALUES ($1,$2,$3)', [unit.id, tagCode, actor.userId])
+        await client.query(
+          `INSERT INTO vendor_garment_unit_events (unit_id, event_type, to_state, location, actor_id, note) VALUES ($1,'CREATED','INTAKE','Intake',$2,'Added when the order was edited')`,
+          [unit.id, actor.userId]
+        )
+        plan.newUnits.push(unit.id)
+      }
+    }
+    for (const unit of plan.units) {
+      if (keep.has(unit.id)) continue
+      await client.query(`UPDATE vendor_garment_units SET state = 'CANCELLED', updated_at = NOW() WHERE id = $1`, [unit.id])
+      await client.query(
+        `INSERT INTO vendor_garment_unit_events (unit_id, event_type, from_state, to_state, location, actor_id, note) VALUES ($1,'STATE_TRANSITION','INTAKE','CANCELLED','Intake',$2,'Removed when the order was edited')`,
+        [unit.id, actor.userId]
+      )
+      plan.cancelledUnits.push(unit.id)
+    }
+    // Weight-billed lines live in bags: keep the bag weight right, add a bag if the order now needs one, drop them if not.
+    const bulk = plan.priced.filter((line) => !isPiece(line))
+    const bulkWeightKg = Math.round(bulk.reduce((sum, line) => sum + line.qty, 0) * 100) / 100
+    if (!bulk.length) {
+      await client.query(`UPDATE vendor_laundry_containers SET state = 'CANCELLED', updated_at = NOW() WHERE vendor_id = $1 AND order_id = $2 AND state = 'INTAKE'`, [vendorId, order.id])
+    } else if (!plan.containers.length) {
+      const container = (await client.query(
+        `INSERT INTO vendor_laundry_containers (vendor_id, order_id, customer_user_id, tag_code, sequence, total_count, weight_kg, created_by)
+         VALUES ($1,$2,$3,$4,1,1,$5,$6) RETURNING id`,
+        [vendorId, order.id, order.customer.id, tag('ELB'), bulkWeightKg, actor.userId]
+      )).rows[0]
+      await client.query(
+        `INSERT INTO vendor_laundry_container_events (container_id, event_type, to_state, location, actor_id, note) VALUES ($1,'CREATED','INTAKE','Intake',$2,'Added when the order was edited')`,
+        [container.id, actor.userId]
+      )
+    } else if (plan.containers.length === 1) {
+      await client.query('UPDATE vendor_laundry_containers SET weight_kg = $2, updated_at = NOW() WHERE id = $1', [plan.containers[0].id, bulkWeightKg])
+    }
+  }
+
+  async _afterItemEdit(vendorId, actor, order, plan) {
+    try {
+      for (const unitId of plan.newUnits) {
+        await this.productionTasks.onGarmentUnitTransitioned(vendorId, actor.userId, { garmentUnitId: unitId, orderId: order.id, nextState: 'INTAKE', note: 'Added when the order was edited' })
+      }
+      for (const unitId of plan.cancelledUnits) {
+        await this.productionTasks.onGarmentUnitTransitioned(vendorId, actor.userId, { garmentUnitId: unitId, orderId: order.id, nextState: 'CANCELLED', note: 'Removed when the order was edited' })
+      }
+      const delta = plan.totalPaise - order.totalPaise
+      if (delta !== 0) {
+        const reason = `Order ${order.orderNumber} edited`
+        await this.ledger.append(vendorId, actor, delta > 0
+          ? { customerUserId: order.customer.id, entryType: 'INVOICE_DEBIT', debitPaise: delta, referenceType: 'store_order', referenceId: order.id, reason }
+          : { customerUserId: order.customer.id, entryType: 'ADJUSTMENT', creditPaise: -delta, referenceType: 'store_order', referenceId: order.id, reason })
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'counter order edit bookkeeping failed')
+    }
+    emitAudit('vendor_counter_order_items_edited', {
+      actor_user_id: actor.userId, actor_role: actor.role, target_type: 'store_order', target_id: order.id,
+      before: { totalPaise: order.totalPaise }, after: { totalPaise: plan.totalPaise, lines: plan.priced.length }, ip_address: actor.ip, user_agent: actor.userAgent,
+    })
   }
 
   /**

@@ -27,6 +27,16 @@ const envSchema = z.object({
   // suffix (instead of trusting any *.vercel.app deployment). Optional —
   // unset preserves the broader suffix-match default.
   CORS_ALLOWED_VERCEL_HOSTS: z.string().optional(),
+  // Which proxies may set X-Forwarded-For. Default trusts only private /
+  // loopback addresses (nginx, cloudflared, an AWS load balancer on the VPC),
+  // so the client IP is whatever the last PUBLIC hop reported and a client can
+  // never forge it with its own X-Forwarded-For header. Accepts proxy-addr
+  // syntax ("loopback,uniquelocal"), a hop count ("2"), or "true" (trust all —
+  // only safe if the origin is unreachable except through your proxy).
+  TRUST_PROXY: z.string().default('loopback,linklocal,uniquelocal'),
+  // EMERGENCY ROLLBACK ONLY. Restores the old behaviour where a shop employee's
+  // token counts as platform ADMIN (see utils/actor-role.js).
+  LEGACY_SHOP_STAFF_ADMIN_ROLE: booleanFromEnv.default(false),
 
   // JWT
   JWT_ACCESS_SECRET: z.string().min(32),
@@ -47,7 +57,14 @@ const envSchema = z.object({
   DB_POOL_MIN: z.coerce.number().default(5),
   DB_POOL_MAX: z.coerce.number().default(20),
   DB_IDLE_TIMEOUT: z.coerce.number().default(30000),
-  DB_CONNECTION_TIMEOUT: z.coerce.number().default(2000),
+  // How long a request may WAIT for a free pooled connection. 2s was far too
+  // tight for a burst (hundreds of simultaneous orders queue on a 20-conn
+  // pool); a queued request should wait, not 500.
+  DB_CONNECTION_TIMEOUT: z.coerce.number().default(10000),
+  // Server-side guards so one runaway query / abandoned transaction can never
+  // hold a pooled connection (and its row locks) forever.
+  DB_STATEMENT_TIMEOUT_MS: z.coerce.number().default(60000),
+  DB_IDLE_IN_TX_TIMEOUT_MS: z.coerce.number().default(60000),
   DB_CONNECT_RETRIES: z.coerce.number().default(20),
   DB_CONNECT_RETRY_DELAY: z.coerce.number().default(1000),
   DB_SSL: booleanFromEnv.default(false),
@@ -95,10 +112,24 @@ const envSchema = z.object({
 
   // Rate Limiting
   RATE_LIMIT_ENABLED: booleanFromEnv.default(true),
+  // Authenticator-app (TOTP) two-factor for the admin dashboard: sign-in code and
+  // step-up before high-risk actions. Off by default; set true to bring it back.
+  ADMIN_2FA_ENABLED: booleanFromEnv.default(false),
   RATE_LIMIT_MAX: z.coerce.number().default(100),
   RATE_LIMIT_WINDOW: z.coerce.number().default(60000),
-  OTP_RATE_LIMIT_MAX: z.coerce.number().default(5),
+  // Per-IP cap on /send-otp. The strict control is the per-PHONE limit in the
+  // auth service (5 per 10 min); this per-IP cap only stops one address from
+  // spraying many numbers, so it must be generous enough for carrier-grade NAT
+  // where thousands of real users share a handful of public IPs.
+  OTP_RATE_LIMIT_MAX: z.coerce.number().default(30),
   OTP_RATE_LIMIT_WINDOW: z.coerce.number().default(300000),
+  // Blanket limits applied to EVERY route (the per-route limits above stay in
+  // force on top). Per client IP, and per bearer token (so one logged-in user
+  // cannot hog the API from many IPs, and many users behind one NAT do not
+  // starve each other).
+  RATE_LIMIT_GLOBAL_IP_MAX: z.coerce.number().default(1800),
+  RATE_LIMIT_GLOBAL_TOKEN_MAX: z.coerce.number().default(900),
+  RATE_LIMIT_GLOBAL_WINDOW: z.coerce.number().default(60000),
 
   // File Upload
   MAX_FILE_SIZE: z.coerce.number().default(5242880),
@@ -205,6 +236,68 @@ if (!parsed.success) {
   console.error('❌ Invalid environment variables:')
   console.error(parsed.error.flatten().fieldErrors)
   process.exit(1)
+}
+
+/**
+ * Production safety gate. Each of these flags exists for local development or
+ * pre-launch testing and is dangerous live; a production process refuses to
+ * start rather than quietly run with the door open.
+ */
+export function findProductionConfigProblems(cfg) {
+  const fatal = []
+  const warn = []
+  if (cfg.NODE_ENV !== 'production') return { fatal, warn }
+
+  if ((cfg.TEST_BYPASS_OTP_PHONES || '').split(',').some((p) => p.trim() === '*')) {
+    fatal.push('TEST_BYPASS_OTP_PHONES="*" lets anyone log in as any phone number. List specific review/test numbers or leave it empty.')
+  }
+  if (cfg.ALLOW_DEMO_OTP) fatal.push('ALLOW_DEMO_OTP must be false in production.')
+  if (cfg.ALLOW_MOCK_PAYMENT) fatal.push('ALLOW_MOCK_PAYMENT must be false in production.')
+  if (cfg.ALLOW_ALL_PINCODES) fatal.push('ALLOW_ALL_PINCODES must be false in production.')
+  if (cfg.ALLOW_DEMO_DELIVERY_ACTIONS) fatal.push('ALLOW_DEMO_DELIVERY_ACTIONS must be false in production.')
+  if (cfg.ALLOW_AUTO_APPROVE_VENDOR) fatal.push('ALLOW_AUTO_APPROVE_VENDOR must be false in production.')
+  if (!cfg.RATE_LIMIT_ENABLED) fatal.push('RATE_LIMIT_ENABLED must be true in production.')
+  if (cfg.JWT_ACCESS_SECRET === cfg.JWT_REFRESH_SECRET) {
+    fatal.push('JWT_ACCESS_SECRET and JWT_REFRESH_SECRET must be different values.')
+  }
+  const placeholder = /replace|change[-_ ]?me|example|your[-_ ]|secret123|password123/i
+  for (const key of ['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET', 'DB_PASSWORD']) {
+    if (placeholder.test(cfg[key] || '')) fatal.push(`${key} still looks like a placeholder value.`)
+  }
+  if (cfg.RAZORPAY_KEY_ID && !cfg.RAZORPAY_WEBHOOK_SECRET) {
+    warn.push('RAZORPAY_KEY_ID is set without RAZORPAY_WEBHOOK_SECRET — payments that complete after the app closes can only be recovered by the polling safety-net, not by webhook (unless keys are saved in the dashboard).')
+  }
+  if (cfg.RAZORPAY_KEY_ID?.startsWith('rzp_test_')) {
+    warn.push('Razorpay is using TEST keys in production.')
+  }
+  if (!cfg.CORS_ALLOWED_VERCEL_HOSTS) {
+    warn.push('CORS trusts every *.vercel.app origin. Set CORS_ALLOWED_VERCEL_HOSTS to your exact hostnames.')
+  }
+  if (!cfg.DB_SSL && cfg.DB_HOST && !['localhost', '127.0.0.1', 'postgres', 'db'].includes(cfg.DB_HOST)) {
+    warn.push('DB_SSL is off while DB_HOST is remote — database traffic is unencrypted.')
+  }
+  if (!cfg.FCM_ENABLED || !cfg.FIREBASE_PROJECT_ID) {
+    warn.push('Push notifications are OFF (FCM_ENABLED=false or no Firebase project) — customers and laundries will not receive order / payment push messages.')
+  }
+  if (cfg.SMS_PROVIDER === 'none' && !cfg.TWO_FACTOR_API_KEY) {
+    warn.push('No SMS provider in the environment (SMS_PROVIDER=none, no TWO_FACTOR_API_KEY). Login works only if an SMS provider is saved in the dashboard settings; otherwise send-otp returns 503.')
+  }
+  if (!cfg.REDIS_PASSWORD) warn.push('REDIS_PASSWORD is empty.')
+  if (!cfg.SENTRY_DSN) warn.push('SENTRY_DSN is not set — production errors will not be reported.')
+  if (cfg.STRICT_SESSION_VERSION_CHECK === false) {
+    warn.push('STRICT_SESSION_VERSION_CHECK is off — tokens without a session_version claim are accepted.')
+  }
+  return { fatal, warn }
+}
+
+{
+  const { fatal, warn } = findProductionConfigProblems(parsed.data)
+  for (const w of warn) console.warn(`⚠️  production config: ${w}`)
+  if (fatal.length > 0) {
+    console.error('❌ Refusing to start in production with an unsafe configuration:')
+    for (const f of fatal) console.error(`   - ${f}`)
+    process.exit(1)
+  }
 }
 
 export const env = {

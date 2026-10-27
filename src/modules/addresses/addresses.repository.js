@@ -1,6 +1,6 @@
 import { query, getClient } from '../../config/database.js'
+import { eligibilityConditions, withinRadiusSql } from '../discovery/vendor-visibility.js'
 
-const EARTH_RADIUS_KM = 6371
 
 /**
  * Addresses repository — all SQL queries for delivery addresses
@@ -151,27 +151,27 @@ export class AddressesRepository {
   }
 
   /**
-   * Count how many active, non-deleted vendors serve the given coords using Haversine formula
+   * How many vendors could actually serve a customer standing at (lat, lng):
+   * orderable (approved, published, has services & slots) AND the point is
+   * inside the vendor's service radius. Uses the same predicates as the
+   * discovery list, so "this address is serviceable" and "vendors are shown
+   * here" can never disagree.
    */
   async countServiceableVendorsAtCoords(lat, lng) {
+    const where = [...eligibilityConditions(), withinRadiusSql('$1', '$2')].join(' AND ')
     const { rows } = await query(
-      `SELECT COUNT(*)::int AS count
-       FROM (
-         SELECT s.id,
-                (${EARTH_RADIUS_KM} * acos(
-                  LEAST(1.0, GREATEST(-1.0,
-                    cos(radians($1::float8)) * cos(radians(s.lat::float8))
-                      * cos(radians(s.lng::float8) - radians($2::float8))
-                      + sin(radians($1::float8)) * sin(radians(s.lat::float8))
-                  ))
-                ))::numeric(7,2) AS distance_km,
-                s.delivery_radius_km
-           FROM vendors s
-          WHERE s.is_active = true
-            AND s.deleted_at IS NULL
-       ) candidates
-       WHERE distance_km <= delivery_radius_km`,
+      `SELECT COUNT(*)::int AS count FROM vendors v WHERE ${where}`,
       [lat, lng]
+    )
+    return rows[0]?.count || 0
+  }
+
+  /** Orderable vendors registered in a pincode (legacy-client fallback for the pincode check). */
+  async countServiceableVendorsInPincode(pincode) {
+    const where = [...eligibilityConditions(), 'v.pincode = $1'].join(' AND ')
+    const { rows } = await query(
+      `SELECT COUNT(*)::int AS count FROM vendors v WHERE ${where}`,
+      [String(pincode)]
     )
     return rows[0]?.count || 0
   }

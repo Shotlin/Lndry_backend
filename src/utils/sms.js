@@ -68,8 +68,7 @@ export async function verifySmsOtp(sessionId, otp) {
 
   try {
     // VERIFY uses sessionId (not VERIFY3 which expects phone number)
-    const url = `${TWO_FACTOR_BASE}/${cfg.apiKey}/SMS/VERIFY/${sessionId}/${otp}`
-    logger.debug({ sessionId, otp, otpLength: otp?.length, otpType: typeof otp }, '2Factor verify — submitting')
+    const url = `${TWO_FACTOR_BASE}/${cfg.apiKey}/SMS/VERIFY/${encodeURIComponent(sessionId)}/${encodeURIComponent(otp)}`
 
     const res = await fetch(url, {
       method: 'GET',

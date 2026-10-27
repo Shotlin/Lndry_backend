@@ -20,6 +20,8 @@ export default async function quotesRoutes(fastify) {
         required: ['vendor_id'],
         properties: {
           vendor_id: { type: 'string', format: 'uuid' },
+          // The address the customer is ordering to (defaults to their default address).
+          address_id: { type: 'string', format: 'uuid' },
           // Informational only — no longer used to constrain rate lookup,
           // since a single order can span multiple of this vendor's
           // services (e.g. a per-kg wash line and a per-piece dry-clean
@@ -29,12 +31,13 @@ export default async function quotesRoutes(fastify) {
           service_id: { type: 'string', format: 'uuid' },
           garment_lines: {
             type: 'array',
+            maxItems: 50,
             items: {
               type: 'object',
               required: ['garment_type_id', 'quantity'],
               properties: {
                 garment_type_id: { type: 'string', format: 'uuid' },
-                quantity: { type: 'integer', minimum: 1 }
+                quantity: { type: 'integer', minimum: 1, maximum: 1000 }
               }
             }
           },
@@ -47,11 +50,11 @@ export default async function quotesRoutes(fastify) {
       }
     }
   }, async (request, reply) => {
-    const { vendor_id, service_id, garment_lines, estimated_weight_kg, booking_type } = request.body
+    const { vendor_id, address_id, service_id, garment_lines, estimated_weight_kg, booking_type } = request.body
     const customerId = request.user.id
 
     // 1. Verify eligibility (approved, enabled, published, configurations, proximity)
-    const eligibility = await checkVendorEligibility(customerId, vendor_id)
+    const eligibility = await checkVendorEligibility(customerId, vendor_id, { addressId: address_id || null })
     if (!eligibility.eligible) {
       return reply.code(400).send(error(eligibility.message, eligibility.code))
     }

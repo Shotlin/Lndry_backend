@@ -6,7 +6,7 @@ import { getSmsConfig } from '../../utils/sms-config.js'
 import { generateTokenPair, signAccessToken, signRefreshToken, verifyToken } from '../../utils/jwt.js'
 import { orderQueue } from '../../config/bullmq.js'
 import { redis } from '../../config/redis.js'
-import { storeRefreshToken, isRefreshTokenValid, revokeRefreshToken, revokeAllRefreshTokens } from './refresh-token-store.js'
+import { storeRefreshToken, isRefreshTokenValid, revokeRefreshToken, revokeAllRefreshTokens, ROTATION_GRACE_SECONDS } from './refresh-token-store.js'
 import { env } from '../../config/env.js'
 import { logger } from '../../config/logger.js'
 import { query } from '../../config/database.js'
@@ -16,6 +16,9 @@ const SMS_SESSION_PREFIX = 'sms:session:'
 // assignments and must select one before getting a full session JWT.
 // Requirement 13.3
 const TEMP_TOKEN_EXPIRY = '10m'
+// Wrong-code guesses allowed per OTP challenge, and per phone before a lock.
+const MAX_CHALLENGE_ATTEMPTS = 3
+const MAX_PHONE_FAILURES = 10
 
 function normalizePhoneForOtp(phone) {
   const digits = `${phone || ''}`.replace(/\D/g, '')
@@ -68,9 +71,33 @@ export class AuthService {
   }
 
   /**
+   * Count a failed verification against the phone itself and lock the phone
+   * out of verifying for OTP_LOCKOUT_SECONDS once it crosses the threshold.
+   */
+  async _recordOtpFailure(phone, lockKey) {
+    const failKey = `otp:verify_fail:${phone}`
+    const [, [, failures]] = await redis
+      .multi()
+      .set(failKey, 0, 'EX', env.OTP_LOCKOUT_SECONDS, 'NX')
+      .incr(failKey)
+      .exec()
+    if (failures >= MAX_PHONE_FAILURES) {
+      await redis.set(lockKey, '1', 'EX', env.OTP_LOCKOUT_SECONDS)
+      await redis.del(failKey)
+      logger.warn({ phone: phone.slice(-4) }, 'Phone locked out of OTP verification after repeated failures')
+    }
+  }
+
+  /**
    * Send OTP to a phone number
    * Production: sends via 2Factor.in SMS
    * Development: returns OTP in response for testing
+   *
+   * SECURITY: the locally stored challenge hash must NEVER be derived from a
+   * guessable value for a real phone. When the SMS provider delivers the code
+   * (2Factor generates it), the local hash is built from random bytes nobody
+   * knows, so the local-compare fallback in verifyOtp can't be satisfied by
+   * typing a well-known code like 123456.
    */
   async sendOtp(phone, accountType = 'CUSTOMER') {
     // Rate limit: max 5 OTP requests per phone per 10 minutes. Numbers on the
@@ -79,18 +106,21 @@ export class AuthService {
     const isTestBypass = this._isTestBypassPhone(phone)
     if (!isTestBypass) {
       const rateLimitKey = `otp_limit:${phone}`
-      const rateCount = await redis.incr(rateLimitKey)
-      if (rateCount === 1) {
-        await redis.expire(rateLimitKey, 600) // 10 minutes
-      }
+      // INCR + EXPIRE as one atomic unit so a crash between them can never
+      // leave a counter with no TTL (a permanent lock-out for that phone).
+      const [, [, rateCount]] = await redis
+        .multi()
+        .set(rateLimitKey, 0, 'EX', 600, 'NX')
+        .incr(rateLimitKey)
+        .exec()
       if (rateCount > 5) {
         throw { statusCode: 429, message: 'Too many OTP requests. Please wait 10 minutes.', code: 'RATE_LIMIT_EXCEEDED' }
       }
     }
 
-    let otpCode = '123456'
+    const isProduction = env.NODE_ENV === 'production'
+    let otpCode = null
     let isDemo = false
-    let isSmsSent = false
     const smsConfig = await getSmsConfig()
 
     if (this._isDemoOtpPhone(phone)) {
@@ -99,41 +129,35 @@ export class AuthService {
       await redis.del(`${SMS_SESSION_PREFIX}${phone}`)
       logger.info({ phone: phone.slice(-4) }, 'Demo OTP bypass used')
     } else if (isTestBypass) {
+      otpCode = '123456'
       await redis.del(`${SMS_SESSION_PREFIX}${phone}`)
       logger.info({ phone: phone.slice(-4) }, 'Test-bypass OTP phone used')
-    } else if (env.NODE_ENV === 'production' && (smsConfig || env.SMS_PROVIDER === '2factor')) {
-      const smsResult = await sendSmsOtp(phone)
-      if (!smsResult.success) {
-        logger.error({ phone: phone.slice(-4) }, '2Factor SMS failed, falling back to local OTP')
-      } else {
-        isSmsSent = true
-        await redis.set(
-          `${SMS_SESSION_PREFIX}${phone}`,
-          smsResult.sessionId,
-          'EX',
-          env.OTP_EXPIRY_SECONDS
-        )
-        logger.info({ phone: phone.slice(-4) }, 'OTP sent via 2Factor SMS')
-      }
-    } else if (smsConfig) {
+    } else if (smsConfig || (isProduction && env.SMS_PROVIDER === '2factor')) {
       const smsResult = await sendSmsOtp(phone)
       if (smsResult.success) {
-        isSmsSent = true
         await redis.set(
           `${SMS_SESSION_PREFIX}${phone}`,
           smsResult.sessionId,
           'EX',
           env.OTP_EXPIRY_SECONDS
         )
-        logger.info({ phone: phone.slice(-4) }, 'OTP sent via 2Factor SMS (dev)')
+        // Unknown-to-everyone secret: only the SMS provider's own verify call
+        // can approve this login.
+        otpCode = crypto.randomBytes(16).toString('hex')
+        logger.info({ phone: phone.slice(-4) }, 'OTP sent via 2Factor SMS')
+      } else if (isProduction) {
+        // Never pretend an OTP was sent when it wasn't — the user would wait
+        // for an SMS that is never coming.
+        logger.error({ phone: phone.slice(-4) }, '2Factor SMS failed — OTP not delivered')
+        throw { statusCode: 503, message: 'We could not send the OTP right now. Please try again in a minute.', code: 'OTP_DELIVERY_FAILED' }
       }
+    } else if (isProduction) {
+      logger.error('OTP requested in production but no SMS provider is configured')
+      throw { statusCode: 503, message: 'OTP service is temporarily unavailable. Please try again later.', code: 'OTP_UNAVAILABLE' }
     }
 
-    // Test-bypass phones (TEST_BYPASS_OTP_PHONES) must also keep the fixed
-    // '123456' code — previously this fell through to a random generateOTP(),
-    // silently defeating the point of a small, memorable allow-list of Play
-    // Store review / demo accounts.
-    if (!isSmsSent && !isDemo && !isTestBypass) {
+    // Development only: no SMS provider → locally generated code, echoed back.
+    if (otpCode === null) {
       otpCode = generateOTP()
     }
 
@@ -157,7 +181,10 @@ export class AuthService {
       expires_in: 300,
     }
 
-    if (env.NODE_ENV === 'development' || isDemo || isTestBypass) {
+    // The code is only ever echoed back outside production. (A fixed test /
+    // review code is known to the tester already; echoing it from a public
+    // endpoint would let anyone who knows the number log in.)
+    if (!isProduction && (env.NODE_ENV === 'development' || isDemo || isTestBypass)) {
       data.otp = otpCode
     }
 
@@ -195,6 +222,15 @@ export class AuthService {
       }
     }
 
+    // Phone-level lock that outlives any single challenge: without it an
+    // attacker could burn a challenge (3 guesses), request a fresh one and
+    // keep guessing indefinitely.
+    const isTestBypass = this._isTestBypassPhone(phone)
+    const verifyLockKey = `otp:verify_lock:${phone}`
+    if (!isTestBypass && (await redis.get(verifyLockKey))) {
+      return { success: false, message: 'Too many failed attempts. Please try again after some time.' }
+    }
+
     const challenge = challengeId ? await this.repo.getOtpChallenge(challengeId, phone) : null
     if (!challenge) {
       // If challenge not found in DB, try direct Redis verification for fallback compatibility
@@ -206,6 +242,17 @@ export class AuthService {
       if (new Date(challenge.expires_at) <= new Date()) {
         await this.repo.deleteOtpChallenge(challenge.id)
         return { success: false, message: 'OTP expired. Request a new one.' }
+      }
+
+      // Reserve an attempt ATOMICALLY before looking at the code. Counting
+      // after the comparison let a burst of parallel requests each read
+      // attempts=0 and all get evaluated, so the "3 attempts" cap did not
+      // hold against concurrent guessing.
+      const reserved = await this.repo.reserveOtpAttempt(challenge.id, phone, MAX_CHALLENGE_ATTEMPTS)
+      if (!reserved) {
+        await this.repo.deleteOtpChallenge(challenge.id)
+        await redis.del(`otp:${phone}`)
+        return { success: false, message: 'Too many failed attempts. Locked out.' }
       }
 
       let otpValid = false
@@ -226,23 +273,27 @@ export class AuthService {
       }
 
       if (!otpValid) {
-        const hashedInput = crypto.createHash('sha256').update(otp).digest('hex')
-        if (challenge.otp_hash === hashedInput) {
+        // Constant-time compare of the stored hash (the hash is never a
+        // guessable value for SMS-delivered codes — see sendOtp).
+        const hashedInput = crypto.createHash('sha256').update(`${otp || ''}`).digest()
+        const stored = Buffer.from(challenge.otp_hash || '', 'hex')
+        if (stored.length === hashedInput.length && crypto.timingSafeEqual(stored, hashedInput)) {
           otpValid = true
         }
       }
 
       if (!otpValid) {
-        const attempts = await this.repo.incrementOtpChallengeAttempts(challenge.id)
-        if (attempts >= 3) {
+        if (!isTestBypass) await this._recordOtpFailure(phone, verifyLockKey)
+        if (reserved.attempts >= MAX_CHALLENGE_ATTEMPTS) {
           await this.repo.deleteOtpChallenge(challenge.id)
+          await redis.del(`otp:${phone}`)
           return { success: false, message: 'Too many failed attempts. Locked out.' }
         }
-        return { success: false, message: `Invalid OTP. ${3 - attempts} attempts remaining.` }
+        return { success: false, message: `Invalid OTP. ${MAX_CHALLENGE_ATTEMPTS - reserved.attempts} attempts remaining.` }
       }
 
       await this.repo.deleteOtpChallenge(challenge.id)
-      await redis.del(`otp:${phone}`)
+      await redis.del(`otp:${phone}`, `otp:verify_fail:${phone}`)
     }
 
     // Normalize role: RIDER, DELIVERY → 'RIDER' (canonical value)
@@ -510,7 +561,7 @@ export class AuthService {
         role: decoded.role,
       })
       await storeRefreshToken(user.id, newRefreshToken)
-      await revokeRefreshToken(user.id, refreshToken)
+      await revokeRefreshToken(user.id, refreshToken, { graceSeconds: ROTATION_GRACE_SECONDS })
 
       return {
         success: true,
@@ -526,9 +577,14 @@ export class AuthService {
   /**
    * Logout — invalidate refresh token
    */
-  async logout(userId) {
+  async logout(userId, { refreshToken = null } = {}) {
+    if (refreshToken) {
+      await revokeRefreshToken(userId, refreshToken, { graceSeconds: 0 })
+      logger.info({ userId }, 'User logged out of one session')
+      return
+    }
     await revokeAllRefreshTokens(userId)
-    logger.info({ userId }, 'User logged out')
+    logger.info({ userId }, 'User logged out of all sessions')
   }
 
   /**

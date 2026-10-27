@@ -30,6 +30,9 @@ const STEP_UP_MAX_AGE_SECONDS = 300 // 5 minutes
  * a missing row, garbage value or DB error all fail CLOSED (enforced).
  */
 export async function isStepUpEnforced() {
+  // Master switch: with ADMIN_2FA_ENABLED unset/false the authenticator-code
+  // requirement is off everywhere, regardless of the stored setting.
+  if (!env.ADMIN_2FA_ENABLED) return false
   try {
     const { rows } = await query(
       `SELECT value FROM app_settings WHERE key = 'admin_step_up_enabled'`

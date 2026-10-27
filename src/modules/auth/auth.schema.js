@@ -40,7 +40,7 @@ export const verifyOtpSchema = {
     required: ['phone', 'otp'],
     properties: {
       phone: { type: 'string', minLength: 10, maxLength: 15 },
-      otp: { type: 'string', minLength: 4, maxLength: 8 },
+      otp: { type: 'string', pattern: '^[0-9]{4,8}$' },
       role: { type: 'string', enum: ['CUSTOMER', 'RIDER', 'DELIVERY', 'vendor', 'VENDOR'] },
       challenge_id: { type: 'string', format: 'uuid' },
       device: {
@@ -140,8 +140,15 @@ export const refreshTokenSchema = {
 
 export const logoutSchema = {
   tags: ['Auth'],
-  summary: 'Logout — invalidate refresh token',
+  summary: 'Logout — invalidate this session (or all sessions with all:true)',
   security: [{ bearerAuth: [] }],
+  body: {
+    type: ['object', 'null'],
+    properties: {
+      refreshToken: { type: 'string', maxLength: 2048 },
+      all: { type: 'boolean' },
+    },
+  },
   response: {
     200: {
       type: 'object',

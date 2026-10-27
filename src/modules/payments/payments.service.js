@@ -1,4 +1,6 @@
 import crypto from 'node:crypto'
+import { PaymentSettlement } from './payments.settlement.js'
+import { friendlyPaymentFailure } from './payment-failure.js'
 import { logger } from '../../config/logger.js'
 import { env } from '../../config/env.js'
 import { getRazorpay } from '../../config/razorpay.js'
@@ -35,6 +37,14 @@ export class PaymentsService {
     this.repo = repository
     this.ordersRepo = new OrdersRepository()
     this.walletRepo = new WalletRepository()
+    this.settlement = new PaymentSettlement({ repo: repository, ordersRepo: this.ordersRepo, walletRepo: this.walletRepo })
+  }
+
+  /** Constant-time string equality for signatures. */
+  _safeEqual(a, b) {
+    const x = Buffer.from(String(a || ''), 'utf8')
+    const y = Buffer.from(String(b || ''), 'utf8')
+    return x.length === y.length && crypto.timingSafeEqual(x, y)
   }
 
   /**
@@ -70,6 +80,39 @@ export class PaymentsService {
         return { success: false, message: 'Order draft not found' }
       }
       purpose = purpose || 'ADVANCE'
+
+      // Already paid (e.g. the confirmation arrived late, after the customer
+      // had given up waiting): never charge a second advance.
+      const alreadyPaid = await this.repo.findPaidByOrderDraftId(orderDraftIdVal)
+      if (alreadyPaid) {
+        return { success: false, message: 'Advance payment already completed', code: 'ALREADY_PAID' }
+      }
+
+      // Still-open gateway order for this draft: hand back the SAME one so a
+      // customer who reopens checkout pays one order, not several parallel ones.
+      const open = await query(
+        `SELECT id, razorpay_order_id, amount FROM payments
+          WHERE order_draft_id = $1 AND status = 'PENDING' AND purpose = $2
+            AND razorpay_order_id IS NOT NULL AND razorpay_order_id NOT LIKE 'order_mock_%'
+            AND expires_at > NOW() + INTERVAL '2 minutes'
+          ORDER BY created_at DESC LIMIT 1`,
+        [orderDraftIdVal, purpose]
+      )
+      const reusableRzp = open.rows[0] ? await getRazorpay() : null
+      if (open.rows[0] && reusableRzp) {
+        return {
+          success: true,
+          data: {
+            paymentId: open.rows[0].id,
+            razorpayOrderId: open.rows[0].razorpay_order_id,
+            amount: Number(open.rows[0].amount),
+            currency: 'INR',
+            keyId: reusableRzp.keyId,
+            purpose,
+            reused: true,
+          },
+        }
+      }
       const advancePaise = await this._getAdvanceAmountPaise()
       // Never charge more than the order's own estimate, so a tiny order
       // isn't forced to overpay the configured advance. An assisted booking
@@ -230,16 +273,13 @@ export class PaymentsService {
 
     let amountPaise = 0
     let purpose
+    let order = null
 
     if (orderDraftIdVal) {
       const draftRes = await query('SELECT id, payable_amount_paise, booking_type FROM order_drafts WHERE id = $1 AND user_id = $2', [orderDraftIdVal, userId])
       const draft = draftRes.rows[0]
       if (!draft) {
         return { success: false, message: 'Order draft not found' }
-      }
-      const existingPaid = await this.repo.findPaidByOrderDraftId(orderDraftIdVal)
-      if (existingPaid) {
-        return { success: false, message: 'Advance payment already completed' }
       }
       purpose = 'ADVANCE'
       const advancePaise = await this._getAdvanceAmountPaise()
@@ -248,42 +288,64 @@ export class PaymentsService {
         ? advancePaise
         : Math.min(advancePaise, draft.payable_amount_paise)
     } else if (orderId) {
-      const order = await this.ordersRepo.findByIdAndUser(orderId, userId)
+      order = await this.ordersRepo.findByIdAndUser(orderId, userId)
       if (!order) {
         return { success: false, message: 'Order not found' }
-      }
-
-      const alreadyPaidRupees = await this.repo.sumPaidByOrderId(orderId)
-      purpose = alreadyPaidRupees > 0 ? 'BALANCE' : 'FULL'
-
-      if (purpose === 'FULL') {
-        if (order.paymentStatus === 'PAID') {
-          return { success: false, message: 'Order is already paid' }
-        }
-        amountPaise = Math.round(order.totalAmount * 100)
-      } else {
-        const balancePaise = Math.round(order.totalAmount * 100) - Math.round(alreadyPaidRupees * 100)
-        amountPaise = Math.max(0, balancePaise)
-        if (amountPaise === 0) {
-          return { success: false, message: 'No balance due' }
-        }
       }
     } else {
       return { success: false, message: 'Either orderId or order_draft_id must be provided' }
     }
 
-    const amountRupees = amountPaise / 100
     const client = await getClient()
     let payment
+    let amountRupees
 
     try {
       await client.query('BEGIN')
 
+      // Locking the wallet row serialises every wallet payment of this user.
+      // All "has this already been paid?" checks happen AFTER this lock: done
+      // before it (as they used to be), two quick taps both passed the check
+      // and both debited the wallet.
       const wallet = await this.walletRepo.getForUpdate(client, userId)
       if (!wallet) {
         await client.query('ROLLBACK')
         return { success: false, message: 'Wallet not found' }
       }
+
+      if (orderDraftIdVal) {
+        const dup = await client.query(
+          `SELECT 1 FROM payments WHERE order_draft_id = $1 AND status = 'PAID' AND purpose = 'ADVANCE' LIMIT 1`,
+          [orderDraftIdVal]
+        )
+        if (dup.rows.length > 0) {
+          await client.query('ROLLBACK')
+          return { success: false, message: 'Advance payment already completed' }
+        }
+      } else {
+        const paidRes = await client.query(
+          `SELECT COALESCE(SUM(amount), 0) AS paid FROM payments WHERE order_id = $1 AND status = 'PAID'`,
+          [orderId]
+        )
+        const alreadyPaidRupees = parseFloat(paidRes.rows[0].paid)
+        purpose = alreadyPaidRupees > 0 ? 'BALANCE' : 'FULL'
+        if (purpose === 'FULL') {
+          if (order.paymentStatus === 'PAID') {
+            await client.query('ROLLBACK')
+            return { success: false, message: 'Order is already paid' }
+          }
+          amountPaise = Math.round(order.totalAmount * 100)
+        } else {
+          amountPaise = Math.max(0, Math.round(order.totalAmount * 100) - Math.round(alreadyPaidRupees * 100))
+          if (amountPaise === 0) {
+            await client.query('ROLLBACK')
+            return { success: false, message: 'No balance due' }
+          }
+        }
+      }
+
+      amountRupees = amountPaise / 100
+
       // What can be spent right now = balance minus any amount reserved for an in-store sale the customer approved.
       const { availablePaise, heldPaise } = await new WalletRedemptionRepository().availablePaise(userId, client)
       if (availablePaise < amountPaise) {
@@ -328,18 +390,19 @@ export class PaymentsService {
       await client.query('COMMIT')
     } catch (err) {
       await client.query('ROLLBACK')
+      if (err.code === '23505') {
+        // The database's one-paid-advance-per-draft guard fired: a concurrent request won.
+        return { success: false, message: 'Advance payment already completed' }
+      }
       logger.error({ err, userId, orderId, orderDraftId: orderDraftIdVal }, 'Wallet payment failed')
-      return { success: false, message: 'Payment failed: ' + err.message }
+      return { success: false, message: 'Payment failed. Your wallet was not charged. Please try again.' }
     } finally {
       client.release()
     }
 
-    // Run the same post-paid side effects verifyPayment runs, keyed by
-    // purpose — ADVANCE needs none here: placeOrderFromDraft (called next
-    // by the client, exactly like after a Razorpay verify) does the rest.
+    // Same post-paid side effects as every other confirmation path.
     if (orderId && purpose === 'BALANCE') {
-      await this.ordersRepo.updateStatus(orderId, undefined, { paymentStatus: 'PAID' })
-      await this._announceBalancePaid(orderId, Math.round(Number(amountRupees) * 100), `wallet:${amountRupees}`)
+      await this.settlement.applyPaidSideEffects(payment, { source: 'wallet' })
     } else if (orderId && purpose === 'FULL') {
       await this.ordersRepo.updateStatus(orderId, 'WAITING_VENDOR_CONFIRMATION', { paymentStatus: 'PAID' })
       try {
@@ -355,6 +418,9 @@ export class PaymentsService {
       await emitLifecycleEvent('ORDER_PLACED', { orderId })
       await emitLifecycleEvent('VENDOR_NEW_ORDER', { orderId })
     }
+    // ADVANCE: the client calls placeOrderFromDraft next (exactly like after a
+    // Razorpay verify); if it never does, the reconciliation worker places the
+    // order from this PAID row, or refunds the wallet.
 
     if (purpose !== 'BALANCE') {
       try {
@@ -401,6 +467,10 @@ export class PaymentsService {
     const rzpPaymentId = body.razorpayPaymentId || body.payment_id
     const rzpSignature = body.razorpaySignature || body.signature
 
+    if (!rzpOrderId || !rzpPaymentId) {
+      return { success: false, message: 'Missing payment details' }
+    }
+
     const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
     if (!payment) {
       return { success: false, message: 'Payment record not found' }
@@ -423,71 +493,31 @@ export class PaymentsService {
         .update(`${rzpOrderId}|${rzpPaymentId}`)
         .digest('hex')
 
-      if (expectedSignature !== rzpSignature) {
-        logger.warn({ rzpOrderId }, 'Payment signature verification failed')
-
-        await this.repo.updatePayment(payment.id, { status: 'FAILED' })
-        if (payment.orderId) {
-          await this.ordersRepo.updateStatus(payment.orderId, 'PAYMENT_FAILED', {
-            paymentStatus: 'FAILED',
-          })
-        }
-        if (payment.orderDraftId) {
-          await this._releaseSlotHold(payment.orderDraftId)
-        }
-
-        return { success: false, message: 'Payment verification failed' }
+      if (!this._safeEqual(expectedSignature, rzpSignature)) {
+        // Reject the request only. A bad signature must NOT move a real
+        // payment to FAILED: the customer may genuinely have paid, and the
+        // webhook / reconciliation will confirm it. (Failing it here used to
+        // cancel the order of a customer whose money had in fact been taken.)
+        logger.warn({ rzpOrderId, paymentId: payment.id }, 'Payment signature verification failed')
+        return { success: false, message: 'Payment verification failed. If money was deducted it will be confirmed automatically within a few minutes.' }
       }
     }
 
-    // Update payment record
-    const updated = await this.repo.updatePayment(payment.id, {
+    const result = await this.settlement.settle(payment, {
       razorpayPaymentId: rzpPaymentId,
-      razorpaySignature: rzpSignature,
-      status: 'PAID',
+      signature: rzpSignature,
+      source: 'client-verify',
     })
 
-    if (payment.orderId && payment.purpose === 'BALANCE') {
-      // Balance-at-delivery leg: just mark paid and tell the customer.
-      // Must NOT run any of the FULL-path side effects below — this order
-      // is already well past PAYMENT_PENDING (e.g. out for delivery), so
-      // forcing it back to WAITING_VENDOR_CONFIRMATION or re-queuing an
-      // auto-reject job would corrupt its real lifecycle state.
-      await this.ordersRepo.updateStatus(payment.orderId, undefined, {
-        paymentStatus: 'PAID',
-      })
-      await this._announceBalancePaid(payment.orderId, Math.round(Number(updated.amount) * 100), `payment:${payment.id}`)
-    } else if (payment.orderId && payment.purpose === 'FULL') {
-      // Update order payment status (legacy path)
-      await this.ordersRepo.updateStatus(payment.orderId, 'WAITING_VENDOR_CONFIRMATION', {
-        paymentStatus: 'PAID',
-      })
-      try {
-        await orderQueue.add(
-          'auto-reject',
-          {
-            type: 'auto-reject',
-            orderId: payment.orderId,
-          },
-          {
-            jobId: `auto-reject-${payment.orderId}`,
-            delay: 15 * 60 * 1000,
-            removeOnComplete: true,
-          }
-        )
-      } catch (err) {
-        logger.warn({ err: err.message, orderId: payment.orderId }, 'Failed to queue auto-reject on verified payment')
+    if (result.payment?.status === 'REFUNDED' || result.outcome === 'REFUNDED' || result.outcome === 'DUPLICATE_REFUNDED') {
+      return {
+        success: false,
+        message: result.outcome === 'DUPLICATE_REFUNDED'
+          ? 'You had already paid for this booking. The extra payment is being refunded.'
+          : 'Your payment was received but the booking could not be confirmed, so it is being refunded to your original payment method.',
+        code: 'PAYMENT_REFUNDED',
       }
-
-      // Send order placed notification after confirmed payment
-      // Customer + laundry notifications (idempotent with the status-change path).
-      await emitLifecycleEvent('ORDER_PLACED', { orderId: payment.orderId })
-      await emitLifecycleEvent('VENDOR_NEW_ORDER', { orderId: payment.orderId })
     }
-    // payment.purpose === 'ADVANCE' never reaches here with payment.orderId
-    // set — at this point only order_draft_id is set, the order doesn't
-    // exist yet (it's created by placeOrderFromDraft once this verify
-    // succeeds), exactly as before this change.
 
     // Clear the cart - only after payment is confirmed. Skipped for a
     // BALANCE payment: the customer may have an unrelated new order's items
@@ -504,122 +534,208 @@ export class PaymentsService {
     }
 
     logger.info(
-      { paymentId: payment.id, razorpayPaymentId: rzpPaymentId, orderId: payment.orderId },
+      { paymentId: payment.id, razorpayPaymentId: rzpPaymentId, orderId: payment.orderId, outcome: result.outcome },
       'Payment verified successfully'
     )
 
-    return { success: true, payment: updated }
+    return { success: true, payment: result.payment }
   }
 
   /**
-   * Handle Razorpay webhook events
+   * Handle Razorpay webhook events.
+   *
+   * Contract with the HTTP layer:
+   *   { success: false, status: 400 }  bad / missing signature
+   *   { success: true }                handled (or a duplicate we already handled)
+   *   throws                           something transient broke → 500 → Razorpay retries (up to 24h)
    */
-  async handleWebhook(rawBody, signature) {
+  async handleWebhook(rawBody, signature, eventIdHeader) {
     const rzpCfg = await getRazorpay()
     const webhookSecret = rzpCfg?.webhookSecret
     if (!webhookSecret) {
-      logger.warn('Razorpay webhook secret not configured')
-      return { success: false }
+      logger.error('Razorpay webhook received but no webhook secret is configured')
+      return { success: false, status: 400 }
     }
 
-    // The real HTTP path passes the exact pristine bytes captured by the
-    // `captureRawBody` preParsing hook (see payments.routes.js / app.js).
-    // The HMAC must be computed over those exact bytes — not a
-    // re-serialization of the already-JSON-parsed body — or a legitimate
-    // Razorpay signature will never match. The string/object fallbacks
-    // below exist only for direct unit-test callers.
+    // The HMAC must be computed over the exact bytes Razorpay sent (captured by
+    // the `captureRawBody` preParsing hook), not a re-serialisation of parsed JSON.
     const rawBuffer = Buffer.isBuffer(rawBody)
       ? rawBody
       : Buffer.from(typeof rawBody === 'string' ? rawBody : JSON.stringify(rawBody), 'utf8')
 
-    const expectedSignature = crypto
-      .createHmac('sha256', webhookSecret)
-      .update(rawBuffer)
-      .digest('hex')
-
-    const expectedBuf = Buffer.from(expectedSignature, 'utf8')
-    const providedBuf = Buffer.from(String(signature || ''), 'utf8')
-    const signatureValid =
-      expectedBuf.length === providedBuf.length &&
-      crypto.timingSafeEqual(expectedBuf, providedBuf)
-
-    if (!signatureValid) {
+    const expectedSignature = crypto.createHmac('sha256', webhookSecret).update(rawBuffer).digest('hex')
+    if (!this._safeEqual(expectedSignature, signature)) {
       logger.warn('Webhook signature mismatch')
-      return { success: false }
+      return { success: false, status: 400 }
     }
 
     const body = JSON.parse(rawBuffer.toString('utf8'))
     const event = body.event
-    const payload = body.payload
+    const payload = body.payload || {}
+    const paymentEntity = payload.payment?.entity
+    const eventId = eventIdHeader || crypto.createHash('sha256').update(rawBuffer).digest('hex')
 
-    logger.info({ event }, 'Razorpay webhook received')
+    // Exactly-once processing: Razorpay retries any delivery that did not get a 2xx.
+    const seen = await query(
+      `INSERT INTO payment_webhook_events (event_id, event_type, razorpay_order_id, razorpay_payment_id)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (event_id) DO UPDATE SET attempts = payment_webhook_events.attempts + 1
+       RETURNING processed_at`,
+      [eventId, event, paymentEntity?.order_id || payload.order?.entity?.id || null, paymentEntity?.id || null]
+    )
+    if (seen.rows[0]?.processed_at) {
+      logger.info({ event, eventId }, 'Duplicate Razorpay webhook ignored')
+      return { success: true, duplicate: true }
+    }
 
+    logger.info({ event, eventId }, 'Razorpay webhook received')
+
+    try {
+      await this._processWebhookEvent(event, payload)
+      await query(`UPDATE payment_webhook_events SET processed_at = NOW(), last_error = NULL WHERE event_id = $1`, [eventId])
+    } catch (err) {
+      await query(`UPDATE payment_webhook_events SET last_error = $2 WHERE event_id = $1`, [eventId, String(err?.message || err).slice(0, 500)]).catch(() => {})
+      logger.error({ err: err?.message, event, eventId }, 'Webhook processing failed — Razorpay will retry')
+      throw err
+    }
+    return { success: true }
+  }
+
+  async _processWebhookEvent(event, payload) {
     switch (event) {
-      case 'payment.captured': {
-        const rzpPaymentId = payload.payment?.entity?.id
-        const rzpOrderId = payload.payment?.entity?.order_id
+      case 'payment.captured':
+      case 'order.paid': {
+        const entity = payload.payment?.entity
+        const rzpOrderId = entity?.order_id || payload.order?.entity?.id
+        if (!rzpOrderId) return
 
-        if (rzpOrderId) {
-          const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
-          if (payment && payment.status !== 'PAID') {
-            await this.repo.updatePayment(payment.id, {
-              razorpayPaymentId: rzpPaymentId,
-              status: 'PAID',
-              method: payload.payment?.entity?.method,
-            })
-            
-            // Finalize the order from draft
-            const { OrdersService } = await import('../orders/orders.service.js')
-            const { OrdersRepository } = await import('../orders/orders.repository.js')
-            const ordersService = new OrdersService(new OrdersRepository())
-            
-            try {
-              const checkRes = await ordersService.placeOrderFromDraft(payment.userId, { orderDraftId: payment.orderDraftId })
-              if (checkRes.success) {
-                logger.info({ orderId: checkRes.order.id }, 'Order finalized successfully on webhook capture')
-              }
-            } catch (err) {
-              logger.error({ err: err.message, draftId: payment.orderDraftId }, 'Failed to finalize order on webhook capture')
-            }
-
-            logger.info({ paymentId: payment.id }, 'Payment captured via webhook')
-          }
+        const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
+        if (payment) {
+          await this.settlement.settle(payment, {
+            razorpayPaymentId: entity?.id,
+            method: entity?.method,
+            source: `webhook:${event}`,
+          })
+          return
         }
-        break
+        // Not an order payment: it may be a wallet top-up whose app was
+        // closed before it could call the verify endpoint.
+        const { WalletService } = await import('../wallet/wallet.service.js')
+        await new WalletService(this.walletRepo).settleTopUp(rzpOrderId, entity?.id)
+        return
+      }
+
+      case 'payment.authorized': {
+        // Accounts on manual capture leave a good payment "authorized"; an
+        // un-captured one is eventually auto-refunded by Razorpay. Capture it
+        // now (settlement does that and settles) — duplicates are harmless.
+        const rzpOrderId = payload.payment?.entity?.order_id
+        if (!rzpOrderId) return
+        const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
+        if (payment && payment.status !== 'PAID') {
+          await this.settlement.checkGateway(payment, { source: 'webhook:payment.authorized' })
+        }
+        return
       }
 
       case 'payment.failed': {
-        const rzpOrderId = payload.payment?.entity?.order_id
-        if (rzpOrderId) {
-          const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
-          if (payment) {
-            await this.repo.updatePayment(payment.id, { status: 'FAILED' })
-            if (payment.orderId) {
-              await this.ordersRepo.updateStatus(payment.orderId, 'PAYMENT_FAILED', {
-                paymentStatus: 'FAILED',
-              })
-            }
-            if (payment.orderDraftId) {
-              await this._releaseSlotHold(payment.orderDraftId)
-            }
-            logger.info({ paymentId: payment.id }, 'Payment failed via webhook')
+        const entity = payload.payment?.entity
+        const rzpOrderId = entity?.order_id
+        if (!rzpOrderId) return
+        const payment = await this.repo.findByRazorpayOrderId(rzpOrderId)
+        if (!payment || payment.status === 'PAID' || payment.status === 'REFUNDED') return
+
+        // Remember WHY (shown to the customer). The payment is not ended here:
+        // the customer can retry on the same gateway order and a later success
+        // must still settle it.
+        const failure = await this.settlement.recordGatewayFailure(payment, entity, { terminal: false })
+        logger.info({ paymentId: payment.id, failure: failure.code }, 'Payment attempt failed')
+
+        // Legacy order-first flow only: and only for an order that has not started yet. A failed
+        // BALANCE attempt (card declined at the door) must never touch an order that is mid-delivery.
+        if (payment.orderId && payment.purpose === 'FULL') {
+          const order = await this.ordersRepo.findById(payment.orderId)
+          if (order && order.status === 'PENDING') {
+            await this.ordersRepo.updateStatus(payment.orderId, 'PAYMENT_FAILED', { paymentStatus: 'FAILED' })
           }
         }
-        break
+        return
       }
 
-      case 'refund.processed': {
+      case 'refund.processed':
+      case 'refund.created': {
         const rzpPaymentId = payload.refund?.entity?.payment_id
-        // Handle refund event if needed
-        logger.info({ razorpayPaymentId: rzpPaymentId }, 'Refund processed via webhook')
-        break
+        logger.info({ razorpayPaymentId: rzpPaymentId, event }, 'Refund event received')
+        return
       }
 
       default:
         logger.debug({ event }, 'Unhandled webhook event')
     }
+  }
 
-    return { success: true }
+  /**
+   * Where does this checkout stand? Polled by the app after the payment sheet
+   * closes (and from the order screen) so a slow gateway is shown honestly as
+   * "confirming" rather than as a failure, and a real failure shows its reason.
+   *
+   * status: PAID | CONFIRMING | FAILED | EXPIRED | REFUNDED | NONE
+   */
+  async getPaymentStatus(userId, { orderDraftId, orderId, paymentId } = {}) {
+    let payment = null
+    if (paymentId) payment = await this.repo.findById(paymentId)
+    else if (orderDraftId) payment = await this.repo.findLatestByOrderDraftId(orderDraftId)
+    else if (orderId) payment = await this.repo.findByOrderId(orderId)
+    if (!payment || payment.userId !== userId) return { success: true, data: { status: 'NONE' } }
+
+    // Catch up with the gateway right away instead of waiting for the next
+    // reconciliation tick (throttled so a polling app cannot hammer Razorpay).
+    if (['PENDING', 'EXPIRED', 'FAILED'].includes(payment.status)) {
+      const last = payment.lastGatewayCheckAt ? new Date(payment.lastGatewayCheckAt).getTime() : 0
+      if (Date.now() - last > 10_000) {
+        const check = await this.settlement.checkGateway(payment, { source: 'status-poll' })
+        if (check.payment) payment = (await this.repo.findById(payment.id)) || payment
+      }
+    }
+
+    const draftId = payment.orderDraftId
+    let placedOrderId = payment.orderId
+    if (!placedOrderId && draftId && payment.status === 'PAID') {
+      const o = await query('SELECT id FROM orders WHERE id = $1 AND user_id = $2', [draftId, userId])
+      placedOrderId = o.rows[0]?.id || null
+    }
+
+    let status
+    let message = null
+    if (payment.status === 'PAID') {
+      status = placedOrderId || payment.purpose === 'BALANCE' ? 'PAID' : 'CONFIRMING'
+      if (status === 'CONFIRMING') message = 'Payment received. We are confirming your booking — this usually takes a few seconds.'
+    } else if (payment.status === 'REFUNDED') {
+      status = 'REFUNDED'
+      message = 'This payment was refunded to your original payment method.'
+    } else if (payment.failureReason) {
+      status = 'FAILED'
+      message = payment.failureReason
+    } else if (payment.status === 'EXPIRED' || payment.status === 'FAILED') {
+      status = payment.status === 'EXPIRED' ? 'EXPIRED' : 'FAILED'
+      message = friendlyPaymentFailure({ code: payment.status === 'EXPIRED' ? 'timeout' : '' }).message
+    } else {
+      status = 'CONFIRMING'
+      message = 'Waiting for your bank to confirm the payment. If money was deducted, your booking will be confirmed automatically — you do not need to pay again.'
+    }
+
+    return {
+      success: true,
+      data: {
+        status,
+        message,
+        paymentId: payment.id,
+        orderId: placedOrderId || null,
+        purpose: payment.purpose,
+        amount: payment.amount,
+        failureCode: payment.failureCode,
+      },
+    }
   }
 
   /**
@@ -655,8 +771,14 @@ export class PaymentsService {
       return { success: false, message: 'Only paid payments can be refunded' }
     }
 
-    if (!payment.razorpayPaymentId) {
-      return { success: false, message: 'No Razorpay payment ID — cannot refund' }
+    if (payment.method === 'LNDRY_WALLET' || !payment.razorpayPaymentId) {
+      // Paid from the LNDRY wallet (no gateway payment to reverse): credit the wallet back.
+      if (amount && Number(amount) < Number(payment.amount)) {
+        return { success: false, message: 'Wallet payments can only be refunded in full' }
+      }
+      const walletRefund = await this.settlement.refundPayment(payment, { reason: reason || 'Admin initiated refund' })
+      if (!walletRefund.success) return { success: false, message: walletRefund.message || 'Refund failed' }
+      return { success: true, payment: await this.repo.findById(payment.id) }
     }
 
     const refundAmount = amount || payment.amount
@@ -676,10 +798,12 @@ export class PaymentsService {
         refundStatus: 'PROCESSED',
       })
 
-      // Update order status to refunded
-      await this.ordersRepo.updateStatus(payment.orderId, 'REFUNDED', {
-        paymentStatus: 'REFUNDED',
-      })
+      // Update order status to refunded (a payment for a draft has no order yet)
+      if (payment.orderId) {
+        await this.ordersRepo.updateStatus(payment.orderId, 'REFUNDED', {
+          paymentStatus: 'REFUNDED',
+        })
+      }
 
       logger.info({ paymentId, refundId: rzpRefund.id, refundAmount }, 'Refund initiated')
       return { success: true, payment: updated }

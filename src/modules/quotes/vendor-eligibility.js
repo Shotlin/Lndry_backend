@@ -1,13 +1,14 @@
 import { query } from '../../config/database.js'
+import { effectiveRadiusKm } from '../discovery/vendor-visibility.js'
 
 /**
  * Checks if a vendor is eligible for a customer based on visibility rules and proximity radius.
  * Returns { eligible: boolean, message: string }
  */
-export async function checkVendorEligibility(customerId, vendorId) {
+export async function checkVendorEligibility(customerId, vendorId, { addressId = null } = {}) {
   // 1. Fetch vendor visibility flags and radius
   const eligibilityRes = await query(
-    `SELECT v.id, v.lat, v.lng, v.approved_service_radius_km, v.vendor_approved, v.account_enabled, v.marketplace_published
+    `SELECT v.id, v.lat, v.lng, v.approved_service_radius_km, v.delivery_radius_km, v.vendor_approved, v.account_enabled, v.marketplace_published
      FROM vendors v
      WHERE v.id = $1 AND v.deleted_at IS NULL`,
     [vendorId]
@@ -47,14 +48,24 @@ export async function checkVendorEligibility(customerId, vendorId) {
     return { eligible: false, message: 'Vendor pickup capacity is not configured yet', code: 'VENDOR_NOT_ELIGIBLE' }
   }
 
-  // 4. Proximity check using customer default address
-  const addrRes = await query(
-    `SELECT lat, lng 
-     FROM addresses 
-     WHERE user_id = $1 AND is_default = true 
-     LIMIT 1`,
-    [customerId]
-  )
+  // 4. Proximity check against the address the customer is actually ordering to.
+  // Checkout lets them pick any saved address; checking only the default one
+  // rejected valid orders (and let invalid ones through) whenever the two differed.
+  const addrRes = addressId
+    ? await query(
+        `SELECT lat, lng FROM addresses WHERE id = $2 AND user_id = $1 LIMIT 1`,
+        [customerId, addressId]
+      )
+    : await query(
+        `SELECT lat, lng
+         FROM addresses
+         WHERE user_id = $1 AND is_default = true
+         LIMIT 1`,
+        [customerId]
+      )
+  if (addressId && addrRes.rows.length === 0) {
+    return { eligible: false, message: 'Delivery address not found', code: 'ADDRESS_NOT_FOUND' }
+  }
   if (addrRes.rows.length > 0) {
     const addr = addrRes.rows[0]
     if (addr.lat && addr.lng && v.lat && v.lng) {
@@ -69,7 +80,7 @@ export async function checkVendorEligibility(customerId, vendorId) {
         [addr.lat, addr.lng, v.lat, v.lng]
       )
       const dist = Number(distanceRes.rows[0]?.distance_km || 0)
-      if (dist > Number(v.approved_service_radius_km)) {
+      if (dist > effectiveRadiusKm(v)) {
         return { eligible: false, message: 'Vendor does not deliver to your location', code: 'VENDOR_OUT_OF_RADIUS' }
       }
     }

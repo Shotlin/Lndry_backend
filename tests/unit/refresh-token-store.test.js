@@ -68,4 +68,48 @@ describe('refresh-token-store', () => {
     expect(await isRefreshTokenValid('u1', 't1')).toBe(false)
     expect(await isRefreshTokenValid('u1', 't11')).toBe(true)
   })
+
+  describe('rotation grace window (prevents random logouts on flaky networks)', () => {
+    it('a rotated-away token still works briefly so a lost response can be retried', async () => {
+      await storeRefreshToken('u1', 'old')
+      await storeRefreshToken('u1', 'new')
+      await revokeRefreshToken('u1', 'old', { graceSeconds: 120 })
+      expect(await isRefreshTokenValid('u1', 'old')).toBe(true)
+      expect(await isRefreshTokenValid('u1', 'new')).toBe(true)
+    })
+
+    it('stops working once the grace window has elapsed', async () => {
+      await storeRefreshToken('u1', 'old')
+      await revokeRefreshToken('u1', 'old', { graceSeconds: 120 })
+      for (const k of [...kv.keys()]) if (k.startsWith('refresh_grace:')) kv.delete(k) // TTL expiry
+      expect(await isRefreshTokenValid('u1', 'old')).toBe(false)
+    })
+
+    it('an explicit logout of a session is immediate (no grace)', async () => {
+      await storeRefreshToken('u1', 'a')
+      await revokeRefreshToken('u1', 'a', { graceSeconds: 0 })
+      expect(await isRefreshTokenValid('u1', 'a')).toBe(false)
+    })
+
+    it('logout-everywhere also kills tokens that are inside a grace window', async () => {
+      await storeRefreshToken('u1', 'old')
+      await storeRefreshToken('u1', 'new')
+      await revokeRefreshToken('u1', 'old', { graceSeconds: 120 })
+      await revokeAllRefreshTokens('u1')
+      expect(await isRefreshTokenValid('u1', 'old')).toBe(false)
+      expect(await isRefreshTokenValid('u1', 'new')).toBe(false)
+    })
+
+    it('a fresh login right after logout-everywhere still works', async () => {
+      await revokeAllRefreshTokens('u1')
+      await storeRefreshToken('u1', 'fresh')
+      expect(await isRefreshTokenValid('u1', 'fresh')).toBe(true)
+    })
+
+    it('grace is per user — it never lets another user in', async () => {
+      await storeRefreshToken('u1', 'old')
+      await revokeRefreshToken('u1', 'old', { graceSeconds: 120 })
+      expect(await isRefreshTokenValid('u2', 'old')).toBe(false)
+    })
+  })
 })

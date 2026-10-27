@@ -1,16 +1,24 @@
 /**
- * Payment Expiry Worker
- * Polls every 2 minutes for PENDING online payments past their 15-minute window.
- * Marks them EXPIRED and cancels the associated order.
+ * Payment Expiry Worker (order-first / legacy online payments)
+ * Polls every 2 minutes for PENDING online payments past their window and
+ * cancels the associated order — but only AFTER asking the payment gateway
+ * whether the customer in fact paid (or is still mid-payment). A slow bank
+ * confirmation must not cancel an order whose money is already on its way;
+ * that case is settled (or given more time) instead.
  *
- * Safe: uses SELECT FOR UPDATE SKIP LOCKED to avoid double-processing
- * on multi-instance deployments.
+ * Draft-based advance payments (no order yet) are handled by
+ * payment-reconcile.worker.js.
+ *
+ * Safe on multi-instance deployments: SELECT ... FOR UPDATE SKIP LOCKED in the
+ * cancel phase, and every gateway check / settlement is idempotent.
  *
  * Stock correctness: restores vendor_services.stock_quantity for each
  * cancelled order's items so stock is not permanently lost on payment expiry.
  */
-import { getClient } from '../config/database.js'
+import { getClient, query } from '../config/database.js'
 import { logger } from '../config/logger.js'
+import { PaymentsRepository } from '../modules/payments/payments.repository.js'
+import { PaymentSettlement } from '../modules/payments/payments.settlement.js'
 
 let _intervalHandle = null
 const POLL_INTERVAL_MS = 2 * 60 * 1000 // 2 minutes
@@ -43,22 +51,41 @@ export function stopPaymentExpiryWorker() {
 }
 
 async function _processExpiredPayments() {
+  // Phase 1 (no transaction held while we talk to the gateway): of the order-first
+  // payments past their window, which are truly dead?
+  const repo = new PaymentsRepository()
+  const settlement = new PaymentSettlement({ repo })
+  const { rows: candidates } = await query(
+    `SELECT id FROM payments
+      WHERE status = 'PENDING' AND order_id IS NOT NULL
+        AND expires_at IS NOT NULL AND expires_at <= NOW()
+      ORDER BY expires_at ASC
+      LIMIT 20`
+  )
+  const expiredPaymentIds = []
+  for (const { id } of candidates) {
+    const payment = await repo.findById(id)
+    if (!payment || payment.status !== 'PENDING') continue
+    const outcome = await settlement.expireOrExtend(payment)
+    if (outcome === 'EXPIRED') expiredPaymentIds.push(id)
+    else logger.info({ paymentId: id, outcome }, 'Payment past its window was not expired')
+  }
+
+  // Phase 2: cancel the orders behind payments that really expired.
   const client = await getClient()
   try {
     await client.query('BEGIN')
 
-    // 1. Find expired pending payments (new flow with expires_at)
     const { rows: expired } = await client.query(
       `SELECT p.id AS payment_id, p.order_id, p.razorpay_order_id
        FROM payments p
-       WHERE p.status = 'PENDING'
-         AND p.expires_at IS NOT NULL
-         AND p.expires_at <= NOW()
-       LIMIT 20
-       FOR UPDATE SKIP LOCKED`
+       WHERE p.status = 'EXPIRED' AND p.id = ANY($1::uuid[])
+         AND p.order_id IS NOT NULL
+       FOR UPDATE SKIP LOCKED`,
+      [expiredPaymentIds]
     )
 
-    // 2. Also find legacy ONLINE PENDING orders without expires_at older than 30 min
+    // Legacy ONLINE PENDING orders without expires_at older than 30 min
     const { rows: legacy } = await client.query(
       `SELECT id AS order_id, NULL::uuid AS payment_id
        FROM orders

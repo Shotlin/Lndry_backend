@@ -10,31 +10,37 @@ import { logger } from '../config/logger.js'
 import jwt from 'jsonwebtoken'
 import { redis } from '../config/redis.js'
 import { query } from '../config/database.js'
+import { normalizeActorRole } from '../utils/actor-role.js'
+import { buildOriginChecker, parseCookieHeader } from '../utils/origin-allowlist.js'
 
 const RIDER_LOCATION_PREFIX = 'rider:location:'
 const RIDER_LOCATION_TTL = 300 // 5 minutes
 let activeIo = null
 
-function expandLoopbackOrigins(originList) {
-  const expanded = new Set(originList)
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
-  for (const origin of originList) {
-    try {
-      const url = new URL(origin)
-      if (url.hostname === 'localhost') {
-        url.hostname = '127.0.0.1'
-        expanded.add(url.toString().replace(/\/$/, ''))
-      } else if (url.hostname === '127.0.0.1') {
-        url.hostname = 'localhost'
-        expanded.add(url.toString().replace(/\/$/, ''))
-      }
-    } catch {
-      expanded.add(origin)
-    }
-  }
-
-  return Array.from(expanded)
+/**
+ * True when the socket's user is a party to the order: the customer who placed
+ * it, the vendor (shop) it belongs to, an assigned rider, or platform HQ.
+ */
+async function canTrackOrder(user, orderId) {
+  if (!user?.id) return false
+  if (user.platform_role) return true
+  if (user.role === 'ADMIN') return true // genuine HQ tokens only — shop staff are normalised to SHOP_STAFF
+  const { rows } = await query(
+    `SELECT o.user_id, o.vendor_id,
+            EXISTS (SELECT 1 FROM order_assignments da WHERE da.order_id = o.id AND da.rider_id = $2) AS is_assigned_rider
+       FROM orders o WHERE o.id = $1`,
+    [orderId, user.id]
+  )
+  const order = rows[0]
+  if (!order) return false
+  if (order.user_id === user.id) return true
+  if (order.is_assigned_rider) return true
+  const shopId = user.shopId || user.vendor_id
+  return Boolean(shopId && order.vendor_id === shopId)
 }
+
 
 export function getSocketIo() {
   return activeIo
@@ -95,16 +101,20 @@ export function emitSectionUpdate(io, tabKey, action) {
  *   themes:live         — all users (theme updates)
  */
 async function socketioPlugin(fastify) {
-  const corsOrigins = expandLoopbackOrigins(
-    env.CORS_ORIGINS.split(',').map((s) => s.trim())
-  )
+  const isOriginAllowed = buildOriginChecker()
 
   const io = new Server(fastify.server, {
+    // A WebSocket upgrade is not subject to CORS, so browser Origins are checked
+    // explicitly (same list as the REST API). Without this, any web page could
+    // open a socket using a signed-in admin's session cookie.
+    allowRequest: (req, callback) => callback(null, isOriginAllowed(req.headers.origin)),
     cors: {
-      origin: corsOrigins,
+      origin: (origin, cb) => cb(null, isOriginAllowed(origin)),
       methods: ['GET', 'POST'],
       credentials: true,
     },
+    maxHttpBufferSize: 1e5, // 100 KB — events here are tiny; stops memory-pressure abuse
+    connectTimeout: 20000,
     pingTimeout: 60000,
     pingInterval: 25000,
     transports: ['websocket', 'polling'],
@@ -123,9 +133,13 @@ async function socketioPlugin(fastify) {
 
   // ─── AUTH MIDDLEWARE ──────────────────────────────────
   io.use((socket, next) => {
+    // Mobile apps send the token explicitly. The admin dashboard keeps its access
+    // token in an httpOnly cookie (JS cannot read it), which the browser attaches
+    // to the handshake itself.
     const token =
       socket.handshake.auth?.token ||
-      socket.handshake.headers?.authorization?.replace('Bearer ', '')
+      socket.handshake.headers?.authorization?.replace('Bearer ', '') ||
+      parseCookieHeader(socket.handshake.headers?.cookie).accessToken
 
     if (!token) {
       return next(new Error('Authentication required'))
@@ -133,7 +147,7 @@ async function socketioPlugin(fastify) {
 
     try {
       const decoded = jwt.verify(token, env.JWT_ACCESS_SECRET)
-      socket.user = decoded // { id, phone, role }
+      socket.user = normalizeActorRole(decoded) // { id, phone, role }
       next()
     } catch (err) {
       logger.warn({ err: err.message }, 'Socket auth failed')
@@ -186,10 +200,20 @@ async function socketioPlugin(fastify) {
     }
 
     // ─── ORDER TRACKING ──────────────────────────────
-    socket.on('order:track', (orderId) => {
-      if (orderId) {
-        socket.join(`order:${orderId}`)
-        logger.debug({ userId, orderId }, 'Joined order tracking room')
+    // A tracking room carries live order updates (addresses, status, rider
+    // movement), so a socket may only join the room of an order it is a party
+    // to. Previously any logged-in socket could subscribe to any order id.
+    socket.on('order:track', async (orderId) => {
+      if (typeof orderId !== 'string' || !UUID_REGEX.test(orderId)) return
+      try {
+        if (await canTrackOrder(socket.user, orderId)) {
+          socket.join(`order:${orderId}`)
+          logger.debug({ userId, orderId }, 'Joined order tracking room')
+        } else {
+          logger.warn({ userId, orderId }, 'Socket order:track denied — not a party to this order')
+        }
+      } catch (err) {
+        logger.warn({ err: err.message, userId, orderId }, 'Socket order:track check failed')
       }
     })
 

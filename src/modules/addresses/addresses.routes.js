@@ -1,3 +1,4 @@
+import { userRateLimit } from '../../middlewares/userRateLimit.js'
 import { AddressesController } from './addresses.controller.js'
 import { AddressesService } from './addresses.service.js'
 import { AddressesRepository } from './addresses.repository.js'
@@ -38,6 +39,7 @@ export default async function addressesRoutes(fastify) {
   // POST / — Create address
   fastify.post('/', {
     schema: createAddressSchema,
+    preHandler: [userRateLimit({ name: 'address-create', max: 20, windowSeconds: 60 })],
   }, controller.create.bind(controller))
 
   // PUT /:id — Update address
@@ -58,6 +60,7 @@ export default async function addressesRoutes(fastify) {
   // POST /validate-location — Check delivery availability by coordinates
   fastify.post('/validate-location', {
     schema: validateLocationSchema,
+    preHandler: [userRateLimit({ name: 'address-validate', max: 60, windowSeconds: 60 })],
   }, controller.validateLocation.bind(controller))
 
   // POST /validate-pincode — Check delivery availability

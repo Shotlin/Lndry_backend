@@ -3,7 +3,9 @@ import { query } from '../../config/database.js'
 // Explicit column list (R14.7 — no SELECT *), matches every field _format() reads.
 const PAYMENT_COLUMNS = `id, order_id, user_id, razorpay_order_id, razorpay_payment_id,
   razorpay_signature, amount, currency, status, method, refund_id, refund_amount,
-  refund_status, metadata, created_at, updated_at, expires_at, order_draft_id, purpose`
+  refund_status, metadata, created_at, updated_at, expires_at, order_draft_id, purpose,
+  failure_code, failure_reason, failure_source, paid_at, recovery_attempts,
+  recovery_next_at, recovery_last_error, last_gateway_check_at`
 
 /**
  * Payments repository — all SQL queries for payments
@@ -15,8 +17,8 @@ export class PaymentsRepository {
   async create(data, client = null) {
     const exec = client ? (text, params) => client.query(text, params) : query
     const { rows } = await exec(
-      `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, expires_at, metadata, order_draft_id, purpose)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+      `INSERT INTO payments (order_id, user_id, razorpay_order_id, amount, currency, status, method, expires_at, metadata, order_draft_id, purpose, paid_at)
+       VALUES ($1, $2, $3, $4, $5, $6::varchar, $7, $8, $9, $10, $11, CASE WHEN $6::varchar = 'PAID' THEN NOW() END)
        RETURNING ${PAYMENT_COLUMNS}`,
       [
         data.orderId || null,
@@ -165,6 +167,71 @@ export class PaymentsRepository {
   }
 
   /**
+   * Atomically move a payment to PAID. Returns `{ transitioned, payment }`;
+   * `transitioned` is false when it was already PAID/REFUNDED (a concurrent
+   * verify / webhook / poll got there first), and `{ duplicate: true }` when
+   * the database refuses a second PAID advance for the same draft (the
+   * customer paid twice) or a Razorpay payment id that is already recorded.
+   */
+  async markPaid(id, { razorpayPaymentId = null, signature = null, method = null } = {}) {
+    try {
+      const { rows } = await query(
+        `UPDATE payments
+            SET status = 'PAID',
+                razorpay_payment_id = COALESCE($2, razorpay_payment_id),
+                razorpay_signature  = COALESCE($3, razorpay_signature),
+                method              = COALESCE($4, method),
+                paid_at             = COALESCE(paid_at, NOW()),
+                failure_code = NULL, failure_reason = NULL, failure_source = NULL,
+                updated_at = NOW()
+          WHERE id = $1 AND status NOT IN ('PAID', 'REFUNDED')
+          RETURNING ${PAYMENT_COLUMNS}`,
+        [id, razorpayPaymentId, signature, method]
+      )
+      if (rows.length === 0) return { transitioned: false, payment: await this.findById(id) }
+      return { transitioned: true, payment: this._format(rows[0]) }
+    } catch (err) {
+      if (err.code === '23505') return { transitioned: false, duplicate: true, constraint: err.constraint, payment: null }
+      throw err
+    }
+  }
+
+  /**
+   * Remember why an attempt failed without ending the payment's life: a
+   * customer can retry inside the same gateway order, and a later success
+   * must still be able to settle it. `terminal` additionally marks it FAILED.
+   */
+  async recordFailure(id, { code, message, source }, { terminal = false } = {}) {
+    const { rows } = await query(
+      `UPDATE payments
+          SET failure_code = $2, failure_reason = $3, failure_source = $4,
+              status = CASE WHEN $5::boolean AND status IN ('PENDING','EXPIRED') THEN 'FAILED' ELSE status END,
+              updated_at = NOW()
+        WHERE id = $1 AND status <> 'PAID' AND status <> 'REFUNDED'
+        RETURNING ${PAYMENT_COLUMNS}`,
+      [id, code || null, message || null, source || null, terminal]
+    )
+    return rows[0] ? this._format(rows[0]) : null
+  }
+
+  async findByRazorpayPaymentId(razorpayPaymentId) {
+    const { rows } = await query(
+      `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE razorpay_payment_id = $1`,
+      [razorpayPaymentId]
+    )
+    return rows[0] ? this._format(rows[0]) : null
+  }
+
+  /** Latest payment for a draft (any status) — for the app's status polling. */
+  async findLatestByOrderDraftId(orderDraftId) {
+    const { rows } = await query(
+      `SELECT ${PAYMENT_COLUMNS} FROM payments WHERE order_draft_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [orderDraftId]
+    )
+    return rows[0] ? this._format(rows[0]) : null
+  }
+
+  /**
    * Update refund fields
    */
   async updateRefund(id, refundData) {
@@ -226,6 +293,14 @@ export class PaymentsRepository {
       metadata: typeof row.metadata === 'string' ? JSON.parse(row.metadata) : row.metadata,
       orderDraftId: row.order_draft_id,
       purpose: row.purpose,
+      failureCode: row.failure_code ?? null,
+      failureReason: row.failure_reason ?? null,
+      failureSource: row.failure_source ?? null,
+      paidAt: row.paid_at ?? null,
+      recoveryAttempts: row.recovery_attempts ?? 0,
+      recoveryNextAt: row.recovery_next_at ?? null,
+      recoveryLastError: row.recovery_last_error ?? null,
+      lastGatewayCheckAt: row.last_gateway_check_at ?? null,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     }

@@ -112,6 +112,18 @@ export class SlotsService {
       }
       const slot = slotRows[0]
 
+      // 1b. One live hold per customer per laundry. The checkout screen asks for
+      // a hold every time it refreshes the quote (address change, slot change,
+      // coupon ...); stacking them let a single customer silently use up a
+      // slot's whole capacity and show "fully booked" to everyone else.
+      // Supersede this customer's earlier holds with this laundry first, so
+      // their capacity is counted once, then re-check capacity.
+      await client.query(
+        `UPDATE slot_holds SET status = 'RELEASED'
+          WHERE customer_id = $1 AND vendor_id = $2 AND status = 'ACTIVE' AND expires_at > NOW()`,
+        [userId, vendorId]
+      )
+
       // 2. Count current active holds and orders
       const { rows: holdRows } = await client.query(
         `SELECT COUNT(*)::int AS count FROM slot_holds WHERE slot_id = $1 AND booking_date = $2 AND expires_at > NOW() AND status = 'ACTIVE'`,
@@ -149,7 +161,7 @@ export class SlotsService {
 
   async releaseHold(userId, holdId) {
     const { rowCount } = await query(
-      `UPDATE slot_holds SET status = 'RELEASED', updated_at = NOW() WHERE id = $1 AND customer_id = $2 AND status = 'ACTIVE'`,
+      `UPDATE slot_holds SET status = 'RELEASED' WHERE id = $1 AND customer_id = $2 AND status = 'ACTIVE'`,
       [holdId, userId]
     )
     return rowCount > 0
