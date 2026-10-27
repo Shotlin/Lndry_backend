@@ -94,7 +94,7 @@ export default async function discoveryRoutes(fastify) {
                   COALESCE((SELECT AVG(vendor_rating) FROM reviews r WHERE r.vendor_id = v.id AND r.deleted_at IS NULL), 5.0)::numeric(2,1) AS rating
              FROM vendors v
             WHERE ${conditions.join(' AND ')}
-            ORDER BY distance_km ASC NULLS LAST
+            ORDER BY distance_km ASC NULLS LAST, v.id ASC
             LIMIT 10`,
           [lat, lng]
         )
@@ -259,7 +259,7 @@ export default async function discoveryRoutes(fastify) {
              ) AS min_rate_paise
       FROM vendors v
       WHERE ${whereClause}
-      ${orderByClause}
+      ${orderByClause}, v.id ASC
       LIMIT $${pIdx} OFFSET $${pIdx + 1}
     `
     const countQuery = `
