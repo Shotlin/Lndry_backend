@@ -26,6 +26,10 @@ export default async function publicBlogRoutes(fastify) {
  * Admin blog management. Prefix: /api/v1/admin/blog
  * The dashboard's Blog and Blog Categories pages call these.
  */
+// The article body is HTML. The global request sanitizer would delete every tag,
+// so it is exempted here; BlogService runs sanitizeBlogHtml (an allowlist) on it.
+const RICH_TEXT = { rawBodyFields: ['contentHtml'] }
+
 export async function adminBlogRoutes(fastify) {
   const c = build()
 
@@ -37,8 +41,8 @@ export async function adminBlogRoutes(fastify) {
   fastify.get('/posts', { schema: s.adminListSchema }, c.adminList.bind(c))
   fastify.get('/stats', { schema: s.adminStatsSchema }, c.adminStats.bind(c))
   fastify.get('/posts/:id', { schema: s.adminGetSchema }, c.adminGet.bind(c))
-  fastify.post('/posts', { schema: s.adminCreateSchema }, c.adminCreate.bind(c))
-  fastify.put('/posts/:id', { schema: s.adminUpdateSchema }, c.adminUpdate.bind(c))
+  fastify.post('/posts', { schema: s.adminCreateSchema, config: RICH_TEXT }, c.adminCreate.bind(c))
+  fastify.put('/posts/:id', { schema: s.adminUpdateSchema, config: RICH_TEXT }, c.adminUpdate.bind(c))
   fastify.delete('/posts/:id', { schema: s.adminDeleteSchema }, c.adminDelete.bind(c))
 
   fastify.get('/categories', { schema: s.adminCategoriesSchema }, c.adminCategories.bind(c))

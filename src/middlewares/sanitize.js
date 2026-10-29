@@ -4,14 +4,20 @@
  */
 export async function sanitize(request) {
   if (request.body && typeof request.body === 'object') {
-    request.body = sanitizeObject(request.body)
+    // A route that accepts rich text (the blog's article body) names those
+    // top-level fields in `config.rawBodyFields`. They skip the blanket
+    // tag-stripping below — otherwise every heading, list and link is deleted
+    // before the route can see it — and that route MUST sanitize them itself
+    // with an allowlist sanitizer (the blog service does: sanitizeBlogHtml).
+    const raw = request.routeOptions?.config?.rawBodyFields
+    request.body = sanitizeObject(request.body, Array.isArray(raw) ? raw : null)
   }
 }
 
 /**
  * Recursively sanitize an object's string values
  */
-function sanitizeObject(obj) {
+function sanitizeObject(obj, rawFields = null) {
   if (Array.isArray(obj)) {
     return obj.map(sanitizeValue)
   }
@@ -19,7 +25,7 @@ function sanitizeObject(obj) {
   if (obj !== null && typeof obj === 'object') {
     const cleaned = {}
     for (const [key, value] of Object.entries(obj)) {
-      cleaned[key] = sanitizeValue(value)
+      cleaned[key] = rawFields?.includes(key) && typeof value === 'string' ? value : sanitizeValue(value)
     }
     return cleaned
   }
