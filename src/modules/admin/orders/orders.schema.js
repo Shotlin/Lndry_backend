@@ -115,6 +115,23 @@ export const exportSchema = {
   },
 }
 
+export const refundPaymentSchema = {
+  tags: ['Admin Orders'],
+  summary: 'Refund all or part of one payment (Razorpay or wallet)',
+  params: {
+    type: 'object',
+    required: ['id', 'paymentId'],
+    properties: { id: { type: 'string', format: 'uuid' }, paymentId: { type: 'string', format: 'uuid' } },
+  },
+  body: {
+    type: 'object',
+    properties: {
+      amount: { type: 'number', minimum: 0.01 },
+      reason: { type: 'string', maxLength: 500 },
+    },
+  },
+}
+
 export const refundOrderSchema = {
   tags: ['Admin Orders'],
   summary: 'Refund an order (credits wallet or initiates payment refund)',

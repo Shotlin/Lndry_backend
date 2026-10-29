@@ -1,7 +1,8 @@
 import { notificationQueue, orderQueue } from '../../../config/bullmq.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { InvoicesService } from '../../invoices/invoices.service.js'
-import { query as dbQuery } from '../../../config/database.js'
+import { query as dbQuery, getClient } from '../../../config/database.js'
+import { getRazorpay } from '../../../config/razorpay.js'
 import ExcelJS from 'exceljs'
 
 const ASSIGNABLE_ORDER_STATUSES = new Set(['CONFIRMED', 'PREPARING', 'PACKED'])
@@ -18,6 +19,69 @@ const ALLOWED_TRANSITIONS = {
   DELIVERED: [],
   CANCELLED: ['REFUNDED'],
   REFUNDED: [],
+}
+
+const money = (v) => Math.round(Number(v || 0) * 100) / 100
+
+/** Items saved on the order row itself (used when there are no order_lines). */
+function itemsFromJson(raw) {
+  const list = Array.isArray(raw) ? raw : []
+  return list.map((i, idx) => ({
+    id: i.id ?? `json-${idx}`,
+    name: i.name ?? i.garment_name ?? 'Item',
+    quantity: Number(i.quantity ?? i.qty ?? 1),
+    unit: i.unit ?? null,
+    price: money(i.price),
+    total: money(i.total ?? Number(i.price || 0) * Number(i.quantity ?? i.qty ?? 1)),
+  }))
+}
+
+function presentPayment(p) {
+  const amount = money(p.amount)
+  const refunded = money(p.refund_amount)
+  const hasMoney = ['PAID', 'REFUNDED'].includes(p.status)
+  return {
+    id: p.id,
+    purpose: p.purpose,
+    status: p.status,
+    method: p.method,
+    amount,
+    currency: p.currency || 'INR',
+    razorpay_order_id: p.razorpay_order_id,
+    razorpay_payment_id: p.razorpay_payment_id,
+    paid_at: p.paid_at,
+    created_at: p.created_at,
+    failure_reason: p.failure_reason,
+    refunded_amount: refunded,
+    refundable_amount: hasMoney ? Math.max(0, money(amount - refunded)) : 0,
+    refunds: Array.isArray(p.metadata?.refunds) ? p.metadata.refunds : [],
+  }
+}
+
+/** What the customer owes, has paid, got back — all in rupees, from the payments ledger. */
+export function computeOrderFinancials(order, payments) {
+  const hasFinalAmount = Number(order.payable_amount_paise) > 0
+  const isEstimate = order.booking_type === 'ASSISTED' && !hasFinalAmount
+  const total = hasFinalAmount ? money(order.payable_amount_paise / 100) : money(order.total_amount)
+  const paid = money(payments.filter((p) => ['PAID', 'REFUNDED'].includes(p.status)).reduce((s, p) => s + Number(p.amount || 0), 0))
+  const refunded = money(payments.reduce((s, p) => s + Number(p.refund_amount || 0), 0))
+  const netPaid = money(paid - refunded)
+  const cancelled = ['CANCELLED', 'REFUNDED'].includes(order.status)
+  const balanceDue = cancelled ? 0 : Math.max(0, money(total - netPaid))
+  let paymentState = 'UNPAID'
+  if (refunded > 0 && netPaid <= 0) paymentState = 'REFUNDED'
+  else if (refunded > 0) paymentState = 'PARTIALLY_REFUNDED'
+  else if (paid > 0 && balanceDue <= 0) paymentState = 'PAID'
+  else if (paid > 0) paymentState = 'PARTIALLY_PAID'
+  return {
+    total, paid, refunded, net_paid: netPaid, balance_due: balanceDue, payment_state: paymentState,
+    is_estimate: isEstimate,
+    breakdown: {
+      subtotal: money(order.subtotal), discount: money(order.discount_amount), delivery_fee: money(order.delivery_fee),
+      platform_fee: money(order.platform_fee), handling_fee: money(order.handling_fee), late_night_fee: money(order.late_night_fee),
+      tax: money(order.tax_amount), tip: money(order.tip_amount),
+    },
+  }
 }
 
 export class AdminOrdersService {
@@ -45,15 +109,113 @@ export class AdminOrdersService {
   }
 
   async findById(orderId) {
-    const [order, items, timeline, payment, delivery] = await Promise.all([
+    const [order, items, timeline, payment, payments, delivery] = await Promise.all([
       this.repository.findById(orderId),
       this.repository.getOrderItems(orderId),
       this.repository.getOrderTimeline(orderId),
       this.repository.getOrderPayment(orderId),
+      this.repository.getOrderPayments(orderId),
       this.repository.getOrderDelivery(orderId),
     ])
     if (!order) throw { statusCode: 404, message: 'Order not found' }
-    return { ...order, items, timeline, payment, delivery }
+    const financials = computeOrderFinancials(order, payments)
+    return {
+      ...order,
+      items: items.length ? items : itemsFromJson(order.items),
+      timeline,
+      payment,
+      payments: payments.map(presentPayment),
+      financials,
+      delivery,
+    }
+  }
+
+  /**
+   * Refund all or part of one payment of an order. Razorpay payments are
+   * refunded through the gateway; wallet payments go back to the customer's
+   * wallet. Row-locked so a double click can never refund the same money twice.
+   * Does not change the order's status — the order lifecycle stays with the
+   * vendor/rider workflow.
+   */
+  async refundPayment(orderId, paymentId, { amount, reason } = {}, adminId, ip) {
+    const client = await getClient()
+    let result
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query(
+        `SELECT p.*, o.order_number, o.user_id AS order_user_id
+           FROM payments p JOIN orders o ON o.id = p.order_id
+          WHERE p.id = $1 AND p.order_id = $2 FOR UPDATE OF p`,
+        [paymentId, orderId]
+      )
+      const payment = rows[0]
+      if (!payment) throw { statusCode: 404, message: 'Payment not found for this order' }
+      if (!['PAID', 'REFUNDED'].includes(payment.status)) {
+        throw { statusCode: 400, message: 'Only a paid payment can be refunded' }
+      }
+
+      const paid = Number(payment.amount)
+      const alreadyRefunded = Number(payment.refund_amount || 0)
+      const refundable = Math.round((paid - alreadyRefunded) * 100) / 100
+      if (refundable <= 0) throw { statusCode: 400, message: 'This payment has already been fully refunded' }
+      const refundAmount = amount == null ? refundable : Math.round(Number(amount) * 100) / 100
+      if (!(refundAmount > 0)) throw { statusCode: 400, message: 'Enter a valid refund amount' }
+      if (refundAmount > refundable) {
+        throw { statusCode: 400, message: `Refund cannot exceed the ₹${refundable.toFixed(2)} still refundable on this payment` }
+      }
+      const note = (reason || '').trim() || 'Admin initiated refund'
+
+      let refundId
+      let destination
+      if (payment.method === 'LNDRY_WALLET' || !payment.razorpay_payment_id) {
+        const { AdminCustomersRepository } = await import('../customers/customers.repository.js')
+        await new AdminCustomersRepository().creditWallet(
+          payment.order_user_id, refundAmount, `Refund for order ${payment.order_number}: ${note}`
+        )
+        refundId = `WALLET-${Date.now()}`
+        destination = 'WALLET'
+      } else {
+        const rzp = await getRazorpay()
+        if (!rzp) throw { statusCode: 503, message: 'Razorpay is not configured, so an online refund cannot be sent' }
+        try {
+          const rzpRefund = await rzp.client.payments.refund(payment.razorpay_payment_id, {
+            amount: Math.round(refundAmount * 100),
+            speed: 'normal',
+            notes: { reason: note, order: payment.order_number, admin: String(adminId) },
+          })
+          refundId = rzpRefund.id
+          destination = 'ORIGINAL_PAYMENT'
+        } catch (err) {
+          const msg = err?.error?.description || err?.message || 'Razorpay rejected the refund'
+          throw { statusCode: 502, message: `Razorpay refund failed: ${msg}` }
+        }
+      }
+
+      const totalRefunded = Math.round((alreadyRefunded + refundAmount) * 100) / 100
+      const fully = totalRefunded >= paid
+      const history = Array.isArray(payment.metadata?.refunds) ? payment.metadata.refunds : []
+      history.push({ id: refundId, amount: refundAmount, reason: note, destination, by: adminId, at: new Date().toISOString() })
+      await client.query(
+        `UPDATE payments
+            SET refund_id = $1, refund_amount = $2, refund_status = 'PROCESSED',
+                status = CASE WHEN $3 THEN 'REFUNDED' ELSE status END,
+                metadata = COALESCE(metadata, '{}'::jsonb) || jsonb_build_object('refunds', $4::jsonb),
+                updated_at = NOW()
+          WHERE id = $5`,
+        [refundId, totalRefunded, fully, JSON.stringify(history), paymentId]
+      )
+      await client.query('COMMIT')
+      result = { paymentId, refundId, refundAmount, totalRefunded, fullyRefunded: fully, destination, orderNumber: payment.order_number }
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch { /* already closed */ }
+      throw err
+    } finally {
+      client.release()
+    }
+
+    logAdminActivity(adminId, `Refund ₹${result.refundAmount} (${result.destination}) on payment for order ${result.orderNumber}`,
+      'order', orderId, null, { paymentId, refundId: result.refundId, refundAmount: result.refundAmount }, ip)
+    return result
   }
 
   async updateStatus(orderId, newStatus, adminId, note, ip) {

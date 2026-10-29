@@ -89,6 +89,21 @@ export class AdminOrdersController {
     }
   }
 
+  async refundPayment(request, reply) {
+    try {
+      const data = await this.service.refundPayment(
+        request.params.id,
+        request.params.paymentId,
+        request.body || {},
+        request.user.id,
+        request.ip
+      )
+      return reply.send(success(data, 'Refund processed'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Refund failed'))
+    }
+  }
+
   async refundOrder(request, reply) {
     try {
       const data = await this.service.refundOrder(

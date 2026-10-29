@@ -90,6 +90,18 @@ export class AdminOrdersRepository {
     return rows[0] || null
   }
 
+  /** Every payment row for the order (advance, balance, full) — newest last. */
+  async getOrderPayments(orderId) {
+    const { rows } = await query(
+      `SELECT id, order_id, purpose, status, method, amount, currency,
+              razorpay_order_id, razorpay_payment_id, refund_id, refund_amount, refund_status,
+              failure_reason, paid_at, created_at, updated_at, metadata
+       FROM payments WHERE order_id = $1 ORDER BY created_at ASC`,
+      [orderId]
+    )
+    return rows
+  }
+
   async getOrderDelivery(orderId) {
     const { rows } = await query(
       'SELECT * FROM order_assignments WHERE order_id = $1 ORDER BY created_at DESC LIMIT 1',

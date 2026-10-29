@@ -5,7 +5,7 @@ import {
   listOrdersSchema, statsByStatusSchema, orderDetailSchema,
   updateStatusSchema, assignRiderSchema, bulkAssignSchema,
   manualOrderSchema, invoiceSchema, packingSlipSchema, exportSchema,
-  refundOrderSchema, cancelOrderSchema, bulkStatusSchema,
+  refundOrderSchema, refundPaymentSchema, cancelOrderSchema, bulkStatusSchema,
 } from './orders.schema.js'
 
 import { requireStepUp } from '../../../middlewares/requireStepUp.js'
@@ -34,6 +34,9 @@ export default async function adminOrdersRoutes(fastify) {
   fastify.put('/:id/assign-rider', { schema: assignRiderSchema, preHandler: blockedAdminWrite }, ctrl.assignRider.bind(ctrl))
   fastify.get('/:id/invoice', { schema: invoiceSchema, preHandler: adminAuth }, ctrl.getInvoice.bind(ctrl))
   fastify.get('/:id/packing-slip', { schema: packingSlipSchema, preHandler: adminAuth }, ctrl.getPackingSlip.bind(ctrl))
+  // Money-only: refunds one payment (Razorpay or wallet) without touching the order's lifecycle,
+  // so it is not subject to the legacy-lifecycle block. Step-up (2FA) still applies.
+  fastify.post('/:id/payments/:paymentId/refund', { schema: refundPaymentSchema, preHandler: highRiskAuth }, ctrl.refundPayment.bind(ctrl))
   fastify.post('/:id/refund', { schema: refundOrderSchema, preHandler: blockedHighRiskWrite }, ctrl.refundOrder.bind(ctrl))
   fastify.post('/:id/cancel', { schema: cancelOrderSchema, preHandler: blockedHighRiskWrite }, ctrl.cancelOrder.bind(ctrl))
   fastify.post('/bulk-status', { schema: bulkStatusSchema, preHandler: blockedAdminWrite }, ctrl.bulkUpdateStatus.bind(ctrl))
