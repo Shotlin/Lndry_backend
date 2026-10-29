@@ -3,6 +3,7 @@ import { loadVendorActor } from '../../middlewares/vendor-permission.js'
 import { VENDOR_APP_PERMISSION_MODULES } from '../../utils/permissions.js'
 import {
   createVendorEmployeeSchema,
+  parseCreateVendorEmployeeBody,
   updateVendorEmployeeSchema,
   listVendorEmployeeQuerySchema,
   vendorEmployeeIdParamSchema,
@@ -64,7 +65,7 @@ export class VendorEmployeesController {
    * Response: 201 Created
    */
   async create(request, reply) {
-    const parsed = createVendorEmployeeSchema.safeParse(request.body)
+    const parsed = parseCreateVendorEmployeeBody(request.body)
     if (!parsed.success) {
       return reply.code(400).send(
         error(

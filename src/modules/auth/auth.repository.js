@@ -17,7 +17,24 @@ export class AuthRepository {
        FROM users WHERE phone = $1`,
       [phone]
     )
-    return rows[0] || null
+    if (rows[0]) return rows[0]
+
+    // An account saved earlier with the number written differently ("+91…",
+    // spaces, dashes) is still the same person. Without this fallback they
+    // look brand new at login, get a second empty account, and a staff member
+    // lands on the new-vendor sign-up instead of the shop they were added to.
+    const tail = `${phone || ''}`.replace(/\D/g, '').slice(-10)
+    if (tail.length !== 10) return null
+    const { rows: loose } = await query(
+      `SELECT id, phone, email, name, role, avatar_url, is_active, created_at,
+              deletion_scheduled_at
+       FROM users
+       WHERE RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = $1
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [tail]
+    )
+    return loose[0] || null
   }
 
   /**

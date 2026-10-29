@@ -18,6 +18,13 @@ import { setGoogleBusinessForVendor } from './google-business.js'
 // split slip through inconsistently. Keep them referencing this constant.
 const REQUIRED_APPLICATION_DOCS = ['owner_identity', 'shop_photo', 'service_list']
 
+// Indian mobile -> bare 10 digits (drops +91 / 91), or null if it is not one.
+function normalizeIndianPhone(raw) {
+  let d = `${raw || ''}`.replace(/\D/g, '')
+  if (d.length === 12 && d.startsWith('91')) d = d.slice(2)
+  return /^[6-9]\d{9}$/.test(d) ? d : null
+}
+
 export class VendorsService {
   constructor(repository, deps = {}) {
     this.repo = repository
@@ -326,6 +333,138 @@ export class VendorsService {
     )
 
     return vendor
+  }
+
+  /**
+   * Admin onboarding: creates a vendor directly (no self-service wizard).
+   * Finds or creates the owner's login account by phone, records the same
+   * details a vendor would have submitted, and approves + promotes it in one
+   * step. Documents are added afterwards with adminAddVendorDocument.
+   */
+  async adminCreateVendor(adminUserId, data) {
+    const phone = normalizeIndianPhone(data.phone)
+    if (!phone) {
+      throw { statusCode: 400, message: 'Enter a valid 10-digit owner mobile number.' }
+    }
+    const name = `${data.name || ''}`.trim()
+    const ownerName = `${data.owner_name || ''}`.trim()
+    if (name.length < 2) throw { statusCode: 400, message: 'Business name is required.' }
+    if (!ownerName) throw { statusCode: 400, message: 'Owner name is required.' }
+
+    // The vendors table cannot hold a shop without a full address and map
+    // position, so refuse up front instead of failing halfway through.
+    for (const [field, label] of [['address_line1', 'Address'], ['city', 'City'], ['state', 'State'], ['pincode', 'Pincode']]) {
+      if (!`${data[field] || ''}`.trim()) throw { statusCode: 400, message: `${label} is required.` }
+    }
+    if (typeof data.lat !== 'number' || typeof data.lng !== 'number') {
+      throw { statusCode: 400, message: 'Shop location (latitude and longitude) is required.' }
+    }
+
+    const email = data.email ? `${data.email}`.trim().toLowerCase() : null
+    if (email) {
+      const { rows } = await query(
+        `SELECT id FROM users WHERE LOWER(email) = $1 AND RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) <> $2 LIMIT 1`,
+        [email, phone]
+      )
+      if (rows[0]) throw { statusCode: 409, message: 'That email belongs to a different account.' }
+    }
+
+    const client = await getClient()
+    try {
+      await client.query('BEGIN')
+
+      const { rows: found } = await client.query(
+        `SELECT id, is_active FROM users WHERE RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = $1 ORDER BY created_at ASC LIMIT 1`,
+        [phone]
+      )
+      let ownerId = found[0]?.id
+      if (found[0] && found[0].is_active === false) {
+        throw { statusCode: 409, message: 'This mobile number belongs to a blocked account.' }
+      }
+      if (!ownerId) {
+        const code = Math.random().toString(36).substring(2, 8).toUpperCase()
+        const { rows } = await client.query(
+          `INSERT INTO users (phone, name, role, referral_code) VALUES ($1, $2, 'CUSTOMER', $3) RETURNING id`,
+          [phone, ownerName, code]
+        )
+        ownerId = rows[0].id
+      }
+
+      const { rows: existingApp } = await client.query(
+        `SELECT id FROM vendor_applications WHERE owner_id = $1 LIMIT 1`, [ownerId]
+      )
+      const { rows: existingVendor } = await client.query(
+        `SELECT id FROM vendors WHERE created_by = $1 AND deleted_at IS NULL LIMIT 1`, [ownerId]
+      )
+      if (existingApp[0] || existingVendor[0]) {
+        throw { statusCode: 409, message: 'This mobile number already owns a vendor or has an application.' }
+      }
+      const { rows: roster } = await client.query(
+        `SELECT 1 FROM vendor_employees WHERE user_id = $1 AND is_active = true AND deleted_at IS NULL LIMIT 1`, [ownerId]
+      )
+      if (roster[0]) {
+        throw { statusCode: 409, message: 'This mobile number is already on another vendor’s team. Use a different number for the owner.' }
+      }
+
+      const radius = data.service_radius_km ?? 5
+      const capacity = data.daily_capacity ?? null
+      const { rows: appRows } = await client.query(
+        `INSERT INTO vendor_applications (
+           owner_id, name, phone, owner_name, email, description, address_line1, address_line2,
+           city, state, pincode, lat, lng, gst_number, pan_number,
+           bank_account_number, bank_ifsc, bank_name, bank_holder_name,
+           requested_service_radius_km, approved_service_radius_km, requested_daily_capacity, status)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$20,$21,'APPROVED')
+         RETURNING *`,
+        [ownerId, name, phone, ownerName, email, data.description ?? null, data.address_line1 ?? null,
+         data.address_line2 ?? null, data.city ?? null, data.state ?? null, data.pincode ?? null,
+         data.lat ?? null, data.lng ?? null, data.gst_number ?? null, data.pan_number ?? null,
+         data.bank_account_number ?? null, data.bank_ifsc ?? null, data.bank_name ?? null,
+         data.bank_holder_name ?? null, radius, capacity]
+      )
+      await client.query('COMMIT')
+
+      let vendor
+      try {
+        vendor = await this._promoteApplicationToVendor(appRows[0], radius, capacity)
+      } catch (promoteErr) {
+        // Don't leave an approved application with no vendor behind: the
+        // owner number would be stuck as "already has an application".
+        await query(`DELETE FROM vendor_applications WHERE id = $1`, [appRows[0].id])
+        throw promoteErr
+      }
+      logger.info({ vendorId: vendor.id, adminUserId }, 'Vendor created by admin')
+      emitAudit('vendor_created_by_admin', {
+        actor_user_id: adminUserId,
+        target_type: 'vendors',
+        target_id: vendor.id,
+        before: null,
+        after: { id: vendor.id, name, owner_id: ownerId },
+      })
+      return vendor
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch { /* already finished */ }
+      throw err
+    } finally {
+      client.release()
+    }
+  }
+
+  async adminAddVendorDocument(vendorId, type, fileUrl) {
+    const vendor = await this.repo.findById(vendorId)
+    if (!vendor) throw { statusCode: 404, message: 'Vendor not found' }
+    // A re-upload replaces the earlier document of the same type.
+    await query(`DELETE FROM vendor_documents WHERE vendor_id = $1 AND document_type = $2`, [vendorId, type])
+    const doc = await this.repo.addDocument(vendorId, type, fileUrl)
+    // Admin-supplied documents are verified by the admin who uploaded them.
+    return this.repo.updateDocumentStatus(doc.id, 'APPROVED', null)
+  }
+
+  async adminDeleteVendorDocument(vendorId, docId) {
+    const doc = await this.repo.getDocumentById(docId)
+    if (!doc || doc.vendor_id !== vendorId) throw { statusCode: 404, message: 'Document not found' }
+    await query('DELETE FROM vendor_documents WHERE id = $1', [docId])
+    return { success: true }
   }
 
   _isAutoApproveVendorEnabled() {

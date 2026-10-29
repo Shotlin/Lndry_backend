@@ -71,15 +71,20 @@ const newUserCreateSchema = z
     ...baseStaffFields,
     // R20 AC#2 — email is RFC-5322-compliant up to 255 chars, lowercased
     // before persistence so the case-insensitive uniqueness check (R20 AC#5)
-    // can use a plain `=` comparison. Optional overall: a VENDOR_RIDER logs
-    // in via phone-OTP only and never uses the email+password admin login,
-    // so email is meaningless for that role (enforced below).
-    email: z
-      .string()
-      .email('email must be a valid RFC-5322 address')
-      .max(255)
-      .transform((s) => s.toLowerCase())
-      .optional(),
+    // can use a plain `=` comparison. Optional for every role: staff and
+    // captains both sign in to the Partner app with a phone OTP, so an
+    // email (and the password that used to go with it) is never needed. A
+    // blank value is treated as "not given".
+    email: z.preprocess(
+      (v) => (typeof v === 'string' && v.trim() === '' ? undefined : v),
+      z
+        .string()
+        .trim()
+        .email('email must be a valid RFC-5322 address')
+        .max(255)
+        .transform((s) => s.toLowerCase())
+        .optional(),
+    ),
     // R20 AC#2 — full_name 1..200 chars
     name: z.string().trim().min(1).max(200),
     // Phone (E.164-style, max 20 chars to match users.phone column).
@@ -96,7 +101,10 @@ const newUserCreateSchema = z
         const digits = raw.replace(/[\s-]/g, '').replace(/^\+/, '')
         return digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : digits
       })
-      .refine((digits) => /^[0-9]{10}$/.test(digits), {
+      // Same rule the OTP login enforces (validatePhone): an Indian mobile
+      // starts with 6-9. A number that passes here but not there would create
+      // an account that can never sign in.
+      .refine((digits) => /^[6-9][0-9]{9}$/.test(digits), {
         message: 'Enter a valid 10-digit mobile number.',
       })
       .optional(),
@@ -115,19 +123,16 @@ const newUserCreateSchema = z
       .optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.role === 'VENDOR_RIDER') {
-      if (!data.phone) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          message: 'phone is required for a VENDOR_RIDER — it is their only login credential',
-          path: ['phone'],
-        })
-      }
-    } else if (!data.email) {
+    // Everyone on a vendor's roster signs in with a phone OTP, so the phone
+    // is the one required contact — without it the account could never log in.
+    if (!data.phone) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'email is required',
-        path: ['email'],
+        message:
+          data.role === 'VENDOR_RIDER'
+            ? 'phone is required for a VENDOR_RIDER — it is their only login credential'
+            : 'phone is required — staff sign in with a mobile-number OTP',
+        path: ['phone'],
       })
     }
   })
@@ -146,6 +151,17 @@ export const createVendorEmployeeSchema = z.union([
   existingUserCreateSchema,
   newUserCreateSchema,
 ])
+
+/**
+ * Parses a create body and, on failure, reports the field errors of the branch
+ * the caller was actually aiming for. A bare `z.union` failure collapses to the
+ * unhelpful ": Invalid input"; picking the branch by the presence of `user_id`
+ * says which field is wrong ("phone: Enter a valid 10-digit mobile number.").
+ */
+export function parseCreateVendorEmployeeBody(body) {
+  const branch = body && typeof body === 'object' && body.user_id ? existingUserCreateSchema : newUserCreateSchema
+  return branch.safeParse(body)
+}
 
 // ─── UPDATE SHOP STAFF ───────────────────────────────────
 export const updateVendorEmployeeSchema = z

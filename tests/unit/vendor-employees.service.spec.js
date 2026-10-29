@@ -662,6 +662,7 @@ describe('createVendorEmployeeSchema — permissions and role validation', () =>
     const parsed = createVendorEmployeeSchema.safeParse({
       vendor_id: SHOP_ID,
       email: 'NewStaff@Example.com',
+      phone: '9876543210',
       name: 'New Staff',
       role: 'VENDOR_STAFF',
       generate_temp_password: true,
@@ -673,10 +674,41 @@ describe('createVendorEmployeeSchema — permissions and role validation', () =>
     }
   })
 
-  it('rejects new-user shape without email', () => {
+  it('accepts a phone-only staff member (no email, no password)', () => {
     const parsed = createVendorEmployeeSchema.safeParse({
       vendor_id: SHOP_ID,
       name: 'New Staff',
+      phone: '+91 98765 43210',
+      role: 'VENDOR_STAFF',
+    })
+    expect(parsed.success).toBe(true)
+    if (parsed.success) expect(parsed.data.phone).toBe('9876543210')
+  })
+
+  it('treats a blank email as not given', () => {
+    const parsed = createVendorEmployeeSchema.safeParse({
+      name: 'New Staff',
+      email: '',
+      phone: '9876543210',
+      role: 'VENDOR_STAFF',
+    })
+    expect(parsed.success).toBe(true)
+  })
+
+  it('rejects new-user shape without a phone', () => {
+    const parsed = createVendorEmployeeSchema.safeParse({
+      vendor_id: SHOP_ID,
+      name: 'New Staff',
+      email: 'a@b.com',
+      role: 'VENDOR_STAFF',
+    })
+    expect(parsed.success).toBe(false)
+  })
+
+  it('rejects a number the OTP login would refuse (must start 6-9)', () => {
+    const parsed = createVendorEmployeeSchema.safeParse({
+      name: 'New Staff',
+      phone: '1234567890',
       role: 'VENDOR_STAFF',
     })
     expect(parsed.success).toBe(false)
@@ -686,6 +718,7 @@ describe('createVendorEmployeeSchema — permissions and role validation', () =>
     const parsed = createVendorEmployeeSchema.safeParse({
       vendor_id: SHOP_ID,
       email: 'a@b.com',
+      phone: '9876543210',
       name: 'A B',
       role: 'VENDOR_STAFF',
       generate_temp_password: false,

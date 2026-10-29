@@ -95,6 +95,55 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.adminList.bind(controller))
 
+  fastify.post('/admin/create', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Create and approve a vendor directly [Admin]',
+      body: {
+        type: 'object',
+        required: ['phone', 'name', 'owner_name', 'address_line1', 'city', 'state', 'pincode', 'lat', 'lng'],
+        properties: {
+          phone: { type: 'string', minLength: 10, maxLength: 15 },
+          name: { type: 'string', minLength: 2, maxLength: 200 },
+          owner_name: { type: 'string', minLength: 1, maxLength: 200 },
+          email: { type: 'string', maxLength: 255 },
+          description: { type: 'string' },
+          address_line1: { type: 'string' }, address_line2: { type: 'string' },
+          city: { type: 'string' }, state: { type: 'string' }, pincode: { type: 'string', maxLength: 10 },
+          lat: { type: 'number' }, lng: { type: 'number' },
+          gst_number: { type: 'string' }, pan_number: { type: 'string' },
+          bank_account_number: { type: 'string' }, bank_ifsc: { type: 'string' },
+          bank_name: { type: 'string' }, bank_holder_name: { type: 'string' },
+          service_radius_km: { type: 'number', minimum: 0 },
+          daily_capacity: { type: 'integer', minimum: 0 }
+        }
+      }
+    }
+  }, controller.adminCreateVendor.bind(controller))
+
+  fastify.post('/admin/:id/documents', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Upload a KYC document for a vendor [Admin]',
+      consumes: ['multipart/form-data'],
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } }
+    }
+  }, controller.adminUploadVendorDocument.bind(controller))
+
+  fastify.delete('/admin/:id/documents/:documentId', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Remove a vendor KYC document [Admin]',
+      params: {
+        type: 'object', required: ['id', 'documentId'],
+        properties: { id: { type: 'string', format: 'uuid' }, documentId: { type: 'string', format: 'uuid' } }
+      }
+    }
+  }, controller.adminDeleteVendorDocument.bind(controller))
+
   fastify.get('/admin/:id', {
     preHandler: adminPreHandlers,
     schema: {

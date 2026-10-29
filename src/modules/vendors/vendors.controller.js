@@ -78,6 +78,48 @@ export class VendorsController {
     }
   }
 
+  async adminCreateVendor(request, reply) {
+    try {
+      const vendor = await this.service.adminCreateVendor(request.user.id, request.body)
+      return reply.code(201).send(success(vendor, 'Vendor created'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Could not create vendor'))
+    }
+  }
+
+  async adminUploadVendorDocument(request, reply) {
+    const data = await request.file()
+    if (!data) return reply.code(400).send(error('No file provided'))
+    const documentType = data.fields.document_type?.value
+    if (!documentType) return reply.code(400).send(error('document_type is required'))
+    try {
+      const filename = `${crypto.randomUUID()}${path.extname(data.filename)}`
+      const storageDir = path.join(process.cwd(), 'storage', 'documents')
+      fs.mkdirSync(storageDir, { recursive: true })
+      const writeStream = fs.createWriteStream(path.join(storageDir, filename))
+      await new Promise((resolve, reject) => {
+        data.file.pipe(writeStream)
+        writeStream.on('finish', resolve)
+        writeStream.on('error', reject)
+        data.file.on('error', reject)
+      })
+      const doc = await this.service.adminAddVendorDocument(request.params.id, documentType, `private://documents/${filename}`)
+      return reply.code(201).send(success(doc, 'Document uploaded'))
+    } catch (err) {
+      request.log.error({ err }, 'Admin vendor document upload failed')
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Upload failed'))
+    }
+  }
+
+  async adminDeleteVendorDocument(request, reply) {
+    try {
+      await this.service.adminDeleteVendorDocument(request.params.id, request.params.documentId)
+      return reply.send(success(null, 'Document removed'))
+    } catch (err) {
+      return reply.code(err.statusCode || 500).send(error(err.message || 'Could not remove document'))
+    }
+  }
+
   async adminUpdateDetails(request, reply) {
     try {
       const vendor = await this.service.adminUpdateDetails(request.params.id, request.body)

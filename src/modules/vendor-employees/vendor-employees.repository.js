@@ -190,8 +190,13 @@ export class VendorEmployeesRepository {
       params.push(email)
     }
     if (hasPhone) {
-      conditions.push(`phone = $${idx++}`)
+      // Same person whether the number was saved as 9876543210, +919876543210
+      // or with spaces — see AuthRepository.findByPhone.
+      conditions.push(
+        `(phone = $${idx} OR RIGHT(regexp_replace(phone, '[^0-9]', '', 'g'), 10) = RIGHT($${idx}, 10))`
+      )
       params.push(phone)
+      idx++
     }
 
     const { rows } = await client.query(
