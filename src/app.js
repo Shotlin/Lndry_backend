@@ -64,6 +64,31 @@ export const buildApp = async () => {
     },
   })
 
+  // Fastify's built-in JSON parser rejects a zero-length body sent with
+  // `Content-Type: application/json` (FST_ERR_CTP_EMPTY_JSON_BODY), which
+  // every client here (Dio in both Flutter apps, axios in the dashboard)
+  // sets by default even on a bodyless DELETE/POST. That made every no-body
+  // DELETE — vendor_employees, pickup slots, garment rates, etc. — 400
+  // before the request ever reached a route handler, no matter what the
+  // route itself required. Treat an empty JSON body as `{}` instead of an
+  // error; a non-empty body still has to parse as valid JSON.
+  app.addContentTypeParser(
+    'application/json',
+    { parseAs: 'string' },
+    (request, body, done) => {
+      if (body === '' || body === undefined || body === null) {
+        done(null, {})
+        return
+      }
+      try {
+        done(null, JSON.parse(body))
+      } catch (err) {
+        err.statusCode = 400
+        done(err, undefined)
+      }
+    }
+  )
+
   // ─── PLUGINS (order matters) ────────────────────────────
   await app.register(import('./plugins/errorHandler.plugin.js'))
   await app.register(import('./plugins/cors.plugin.js'))
