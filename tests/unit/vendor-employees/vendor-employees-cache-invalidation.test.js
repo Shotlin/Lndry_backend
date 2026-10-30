@@ -141,6 +141,39 @@ describe('VendorEmployeesService.update — cache invalidation', () => {
     expect(result.code).toBe('STAFF_NOT_FOUND')
     expect(invalidateStaffActiveCache).not.toHaveBeenCalled()
   })
+
+  // Regression: a Redis hiccup during cache invalidation must never turn an
+  // already-committed row update into a 500 for the caller — the row update
+  // happened on the pool/repo before this call, so the response must still
+  // report success (see vendor-employees.service.js update()).
+  it('still reports success when cache invalidation throws', async () => {
+    const repo = makeRepoMock()
+    repo.findById.mockResolvedValueOnce({
+      id: STAFF_ID,
+      user_id: TARGET_USER_ID,
+      vendor_id: SHOP_ID,
+      role: 'VENDOR_STAFF',
+      is_active: true,
+    })
+    repo.update.mockResolvedValueOnce({
+      id: STAFF_ID,
+      user_id: TARGET_USER_ID,
+      vendor_id: SHOP_ID,
+      role: 'VENDOR_STAFF',
+      is_active: false,
+    })
+    invalidateStaffActiveCache.mockRejectedValueOnce(new Error('ECONNREFUSED'))
+    const service = new VendorEmployeesService(repo)
+
+    const result = await service.update(
+      STAFF_ID,
+      { is_active: false },
+      SHOP_ID,
+      REQUESTER_ID
+    )
+
+    expect(result.success).toBe(true)
+  })
 })
 
 describe('VendorEmployeesService.delete — cache invalidation', () => {
@@ -192,5 +225,27 @@ describe('VendorEmployeesService.delete — cache invalidation', () => {
     expect(result.success).toBe(false)
     expect(result.code).toBe('STAFF_NOT_FOUND')
     expect(invalidateStaffActiveCache).not.toHaveBeenCalled()
+  })
+
+  // Regression: the soft-delete transaction has already committed by the
+  // time cache invalidation runs (deactivate() does it post-commit), so a
+  // Redis error there must never surface as a failed delete — previously
+  // this call was unguarded (unlike create()'s equivalent) and would throw
+  // straight through the controller as a 500 / "Something went wrong" for
+  // a staff member who was, in fact, already removed.
+  it('still reports success when cache invalidation throws', async () => {
+    const repo = makeRepoMock()
+    repo.findById.mockResolvedValueOnce({
+      id: STAFF_ID,
+      user_id: TARGET_USER_ID,
+      vendor_id: SHOP_ID,
+    })
+    repo.softDelete.mockResolvedValueOnce(true)
+    invalidateStaffActiveCache.mockRejectedValueOnce(new Error('ECONNREFUSED'))
+    const service = new VendorEmployeesService(repo)
+
+    const result = await service.delete(STAFF_ID, SHOP_ID, REQUESTER_ID)
+
+    expect(result.success).toBe(true)
   })
 })

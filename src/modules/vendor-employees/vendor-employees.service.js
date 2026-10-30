@@ -1156,8 +1156,16 @@ export class VendorEmployeesService {
     // referencing this assignment is rejected within 5 minutes (cache TTL).
     // We do this for any update because the active state is derived from
     // vendor_employees.is_active AND vendor_employees.deleted_at AND shop.is_active —
-    // any of those can change here.
-    await invalidateStaffActiveCache(updated.user_id, updated.vendor_id)
+    // any of those can change here. The row has already been updated above,
+    // so a Redis error here must not fail the request (see deactivate()).
+    try {
+      await invalidateStaffActiveCache(updated.user_id, updated.vendor_id)
+    } catch (err) {
+      logger.warn(
+        { err: err.message, staffId: id, shopId },
+        'Staff cache invalidation after update failed (non-critical)',
+      )
+    }
 
     // Either direction of an active-state flip can strand jobs. Going
     // active → true (e.g. re-enabled after being toggled off) might be
@@ -1347,7 +1355,19 @@ export class VendorEmployeesService {
     // the staff row is definitively soft-deleted. If the tx had rolled
     // back we would have re-thrown above and skipped this line, leaving
     // the cache untouched — coherent with the unchanged DB state.
-    await invalidateStaffActiveCache(existing.user_id, existing.vendor_id)
+    // The DB mutation has ALREADY committed at this point, so a Redis
+    // hiccup here must never surface as a request failure — that would
+    // show the caller "Something went wrong" for a removal that actually
+    // succeeded (and a retry would then 404 on an already-deleted row).
+    // Mirrors the fire-and-forget-with-logging pattern used after create().
+    try {
+      await invalidateStaffActiveCache(existing.user_id, existing.vendor_id)
+    } catch (err) {
+      logger.warn(
+        { err: err.message, staffId: id, shopId },
+        'Staff cache invalidation after deactivate failed (non-critical)',
+      )
+    }
 
     // This employee may have been actively holding pickup/delivery jobs
     // (order_assignments rows) at the moment they were deactivated — hand
