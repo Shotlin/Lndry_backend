@@ -64,6 +64,25 @@ async function _autocompleteViaOla(queryText, locationBias) {
 export default async function mapsRoutes(fastify) {
   fastify.addHook('preHandler', fastify.authenticate)
 
+  // GET /maps/ola/style-url -> MapLibre style URL for rendering Ola's vector
+  // (3D-capable) map in the customer app. The key is dashboard-configured
+  // and only ever handed to authenticated clients; when Ola isn't
+  // configured/enabled the app falls back to a plain raster map.
+  fastify.get('/ola/style-url', {
+    schema: {
+      tags: ['Maps'],
+      summary: 'Ola Maps vector style URL for the map widget',
+      security: [{ bearerAuth: [] }],
+    },
+  }, async (request, reply) => {
+    const settings = await olaMapsSettingsRepository.getCached()
+    if (!settings?.isEnabled || !settings?.apiKey) {
+      return reply.code(200).send(success({ configured: false, styleUrl: null }, 'Ola Maps is not configured'))
+    }
+    const styleUrl = `${OLA_MAPS_BASE_URL}/tiles/vector/v1/styles/default-light-standard/style.json?api_key=${encodeURIComponent(settings.apiKey)}`
+    return reply.code(200).send(success({ configured: true, styleUrl }, 'Ola Maps style fetched'))
+  })
+
   // GET /maps/ola/reverse-geocode -> lat/lng to address, via Ola Maps.
   // Ola's response carries a landmark field the phone's own OS geocoder
   // never provides, and is far more reliable for Indian addresses than the
