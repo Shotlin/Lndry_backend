@@ -31,10 +31,25 @@ const olaMapsSettingsRepository = new OlaMapsSettingsRepository()
  * Returns null when Ola isn't configured/enabled or the call fails, so
  * callers can fall back to Google/mock.
  */
-async function _autocompleteViaOla(queryText, locationBias) {
+async function _autocompleteViaOla(queryText, locationBias, log) {
   const settings = await olaMapsSettingsRepository.getCached()
-  if (!settings?.isEnabled || !settings?.apiKey) return null
+  if (!settings?.isEnabled || !settings?.apiKey) {
+    log?.warn('Ola Maps autocomplete skipped: not enabled or no API key in dashboard settings')
+    return null
+  }
 
+  const shape = (p) => ({
+    description: p.description || p.formatted_address || '',
+    place_id: p.place_id || '',
+    formatted_address: null,
+    lat: p.geometry?.location?.lat ?? null,
+    lng: p.geometry?.location?.lng ?? null,
+    postal_code: null,
+    city: null,
+    state: null,
+  })
+
+  let predictions = []
   try {
     const params = { input: queryText, api_key: settings.apiKey }
     if (locationBias) {
@@ -45,20 +60,32 @@ async function _autocompleteViaOla(queryText, locationBias) {
       params,
       timeout: 8000,
     })
-    const predictions = response.data.predictions || []
-    return predictions.map((p) => ({
-      description: p.description || '',
-      place_id: p.place_id || '',
-      formatted_address: null,
-      lat: p.geometry?.location?.lat ?? null,
-      lng: p.geometry?.location?.lng ?? null,
-      postal_code: null,
-      city: null,
-      state: null,
-    }))
+    predictions = response.data.predictions || []
   } catch (err) {
-    return null
+    log?.error(
+      { status: err.response?.status, body: err.response?.data, err: err.message },
+      'Ola Maps autocomplete failed'
+    )
   }
+
+  // Autocomplete is tuned for place names and often returns nothing for a
+  // bare PIN code or a full address — forward geocode handles those.
+  if (predictions.length === 0) {
+    try {
+      const response = await axios.get(`${OLA_MAPS_BASE_URL}/places/v1/geocode`, {
+        params: { address: queryText, api_key: settings.apiKey },
+        timeout: 8000,
+      })
+      predictions = response.data.geocodingResults || []
+    } catch (err) {
+      log?.error(
+        { status: err.response?.status, body: err.response?.data, err: err.message },
+        'Ola Maps geocode fallback failed'
+      )
+      return null
+    }
+  }
+  return predictions.map(shape)
 }
 
 export default async function mapsRoutes(fastify) {
@@ -162,7 +189,7 @@ export default async function mapsRoutes(fastify) {
     // production, and Ola's autocomplete already carries coordinates for
     // each prediction (see _autocompleteViaOla), so no place-details round
     // trip is needed for Ola-sourced results either.
-    const olaSuggestions = await _autocompleteViaOla(input, location_bias)
+    const olaSuggestions = await _autocompleteViaOla(input, location_bias, request.log)
     if (olaSuggestions !== null) {
       return reply.code(200).send(success(olaSuggestions, 'Autocomplete suggestions fetched'))
     }
@@ -171,7 +198,10 @@ export default async function mapsRoutes(fastify) {
 
     if (!apiKey) {
       if (env.NODE_ENV === 'production') {
-        return reply.code(400).send(error('Google Maps API key is missing', 'CONFIG_ERROR'))
+        // Ola is the only provider in production; an outage/misconfig there
+        // must read as "no suggestions", not an error toast while typing.
+        request.log.error('Place autocomplete unavailable: Ola Maps failed and no Google key set')
+        return reply.code(200).send(success([], 'No suggestions available'))
       }
       // Return structured mock fallback
       const mockSuggestions = [

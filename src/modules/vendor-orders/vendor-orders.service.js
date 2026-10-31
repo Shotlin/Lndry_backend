@@ -137,13 +137,15 @@ export class VendorOrdersService {
       `SELECT o.id, o.order_number, o.status, o.user_id, o.items, o.subtotal,
               o.delivery_fee, o.platform_fee, o.tax_amount, o.handling_fee, o.total_amount,
               o.payment_method, o.payment_status,
-              o.delivery_address, o.vendor_slot_id, o.pickup_date,
+              o.delivery_address, o.vendor_slot_id, o.pickup_date, o.is_express_pickup,
+              vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time,
               o.estimated_amount_paise, o.payable_amount_paise, o.fee_breakdown,
               o.processing_stage, o.pickup_otp, o.delivery_otp, o.booking_type,
               o.created_at, o.updated_at,
               u.name AS customer_name, u.phone AS customer_phone
        FROM orders o
        LEFT JOIN users u ON o.user_id = u.id
+       LEFT JOIN vendor_slots vs ON vs.id = o.vendor_slot_id
        WHERE ${whereClause}
        ORDER BY o.updated_at DESC
        LIMIT $${pIdx} OFFSET $${pIdx + 1}`,
@@ -173,10 +175,12 @@ export class VendorOrdersService {
 
     const res = await query(
       `SELECT o.*,
+              vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time,
               u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email,
               r.vendor_rating, r.rider_rating AS delivery_rating, r.comment AS review_comment
        FROM orders o
        LEFT JOIN users u ON o.user_id = u.id
+       LEFT JOIN vendor_slots vs ON vs.id = o.vendor_slot_id
        LEFT JOIN reviews r ON r.order_id = o.id AND r.deleted_at IS NULL
        WHERE o.id = $1 AND o.vendor_id = $2`,
       [orderId, vendor.vendorId]

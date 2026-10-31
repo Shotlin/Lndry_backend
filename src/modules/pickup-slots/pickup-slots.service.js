@@ -3,6 +3,20 @@ import { logger } from '../../config/logger.js'
 
 const SLOT_TZ_OFFSET_MS = 330 * 60 * 1000 // IST, UTC+05:30
 
+// A pickup can't be arranged in the last stretch of a window, so a slot stops
+// being offered once this little time (or less) is left before it ends.
+// e.g. the 2:00-4:00 PM slot disappears at 3:30 PM.
+const SLOT_MIN_REMAINING_SECONDS = 30 * 60
+
+const timeToSeconds = (value) => {
+  const [h = '0', m = '0', s = '0'] = `${value}`.split(':')
+  return Number(h) * 3600 + Number(m) * 60 + Number(s)
+}
+
+/** True when a slot ending at [endTime] (HH:MM[:SS]) can still take a pickup at [nowTimeIst]. */
+const hasEnoughTimeLeft = (endTime, nowTimeIst) =>
+  timeToSeconds(endTime) - timeToSeconds(nowTimeIst) > SLOT_MIN_REMAINING_SECONDS
+
 export class SlotsService {
   /**
    * The pickup slots this ONE vendor offers on [bookingDate] (a calendar day),
@@ -37,15 +51,15 @@ export class SlotsService {
       [vendorId, dayOfWeek]
     )
 
-    // A slot that has already ended today can't be booked. (Pickups are served
-    // in India Standard Time.)
+    // A slot that has ended today, or has only 30 minutes or less left, can't
+    // be booked. (Pickups are served in India Standard Time.)
     const ist = new Date(now.getTime() + SLOT_TZ_OFFSET_MS)
     const todayIst = ist.toISOString().slice(0, 10)
     const nowTimeIst = ist.toISOString().slice(11, 19)
     const bookingDay = dayMatch ? `${dayMatch[1]}-${dayMatch[2]}-${dayMatch[3]}` : null
     const slots =
       bookingDay === todayIst
-        ? allSlots.filter((slot) => `${slot.end_time}` > nowTimeIst)
+        ? allSlots.filter((slot) => hasEnoughTimeLeft(slot.end_time, nowTimeIst))
         : allSlots
 
     if (slots.length === 0) {
@@ -104,13 +118,23 @@ export class SlotsService {
 
       // 1. SELECT FOR UPDATE to lock slot and enforce atomic holds
       const { rows: slotRows } = await client.query(
-        `SELECT id, max_orders FROM vendor_slots WHERE id = $1 FOR UPDATE`,
+        `SELECT id, max_orders, end_time FROM vendor_slots WHERE id = $1 FOR UPDATE`,
         [slotId]
       )
       if (slotRows.length === 0) {
         throw { statusCode: 404, message: 'Pickup slot not found' }
       }
       const slot = slotRows[0]
+
+      // Same cut-off as the listing: a slot with 30 minutes or less left today
+      // is closed, even if the customer's screen was still showing it.
+      const nowIst = new Date(Date.now() + SLOT_TZ_OFFSET_MS)
+      if (
+        `${bookingDate}`.slice(0, 10) === nowIst.toISOString().slice(0, 10) &&
+        !hasEnoughTimeLeft(slot.end_time, nowIst.toISOString().slice(11, 19))
+      ) {
+        throw { statusCode: 409, message: 'This pickup slot is no longer available' }
+      }
 
       // 1b. One live hold per customer per laundry. The checkout screen asks for
       // a hold every time it refreshes the quote (address change, slot change,
