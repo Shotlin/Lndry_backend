@@ -7,49 +7,55 @@ const OLA_MAPS_BASE_URL = 'https://api.olamaps.io'
 const olaMapsSettingsRepository = new OlaMapsSettingsRepository()
 
 /**
- * Forward-geocodes a free-text query via Ola Maps and shapes each result
- * into a self-contained suggestion with the resolved address/coordinates
- * embedded directly (lat/lng/formattedAddress/city/state/postalCode) —
- * "select this suggestion" never needs a second lookup call at all
- * (unlike Google Places' autocomplete-then-details two-step), since
- * Ola's geocode response already includes everything a details call
- * would give. This also sidesteps a real bug hit while building this:
- * encoding all of that into `place_id` itself (to reuse the existing
- * two-step client contract) produced base64 blobs 100+ characters long,
- * and *something* in this stack (nginx or find-my-way's own router —
- * not narrowed down further since the fix here is simpler) silently
- * 404s any :placeId path segment past roughly 100-120 characters, with
- * no length-related error to point at the real cause. `place_id` here
- * is just Ola's own short real one, kept for API shape compatibility;
- * nothing calls /place-details for an Ola-sourced suggestion.
+ * Autocompletes a partial free-text query via Ola Maps and shapes each
+ * prediction into a suggestion with coordinates embedded directly
+ * (lat/lng straight from `geometry.location`) — picking a suggestion
+ * still never needs a Google-style details round trip just to get
+ * coordinates. `place_id` here is Ola's own short real one (e.g.
+ * `ola-platform:<hash>`), kept for API shape compatibility; nothing
+ * calls /place-details for an Ola-sourced suggestion.
+ *
+ * This used to call `/places/v1/geocode` (forward geocode) instead,
+ * which is tuned for accurate resolution of *complete* addresses, not
+ * live suggestions for partial as-you-type input — it returned sparse
+ * or empty results for the prefixes a user actually types, making the
+ * search box look broken. `/places/v1/autocomplete` is Ola's actual
+ * typeahead endpoint, built for exactly this.
+ *
+ * Unlike the old geocode response, autocomplete predictions don't carry
+ * address_components (no postal_code/city/state breakdown) — only a
+ * geocode/reverse-geocode call does. Callers that need those fields
+ * reverse-geocode the picked coordinates after selection instead (see
+ * `map_address_page.dart`'s `_selectSuggestion`).
+ *
  * Returns null when Ola isn't configured/enabled or the call fails, so
  * callers can fall back to Google/mock.
  */
-async function _geocodeViaOla(queryText) {
+async function _autocompleteViaOla(queryText, locationBias) {
   const settings = await olaMapsSettingsRepository.getCached()
   if (!settings?.isEnabled || !settings?.apiKey) return null
 
   try {
-    const response = await axios.get(`${OLA_MAPS_BASE_URL}/places/v1/geocode`, {
-      params: { address: queryText, api_key: settings.apiKey },
+    const params = { input: queryText, api_key: settings.apiKey }
+    if (locationBias) {
+      params.location = locationBias
+      params.radius = 50000
+    }
+    const response = await axios.get(`${OLA_MAPS_BASE_URL}/places/v1/autocomplete`, {
+      params,
       timeout: 8000,
     })
-    const results = response.data.geocodingResults || []
-    return results.map((r) => {
-      const components = r.address_components || []
-      const findComponent = (type) =>
-        components.find((c) => (c.types || []).includes(type))?.long_name || null
-      return {
-        description: r.formatted_address || '',
-        place_id: r.place_id || '',
-        formatted_address: r.formatted_address || null,
-        lat: r.geometry?.location?.lat ?? null,
-        lng: r.geometry?.location?.lng ?? null,
-        postal_code: findComponent('postal_code'),
-        city: findComponent('locality') || findComponent('administrative_area_level_2'),
-        state: findComponent('administrative_area_level_1'),
-      }
-    })
+    const predictions = response.data.predictions || []
+    return predictions.map((p) => ({
+      description: p.description || '',
+      place_id: p.place_id || '',
+      formatted_address: null,
+      lat: p.geometry?.location?.lat ?? null,
+      lng: p.geometry?.location?.lng ?? null,
+      postal_code: null,
+      city: null,
+      state: null,
+    }))
   } catch (err) {
     return null
   }
@@ -134,10 +140,10 @@ export default async function mapsRoutes(fastify) {
     const { query: input, session_token, location_bias } = request.query
 
     // Ola Maps first — Google's key here is a known-broken placeholder in
-    // production, and Ola's geocode response already carries everything
-    // a suggestion needs (see _geocodeViaOla), so no place-details round
+    // production, and Ola's autocomplete already carries coordinates for
+    // each prediction (see _autocompleteViaOla), so no place-details round
     // trip is needed for Ola-sourced results either.
-    const olaSuggestions = await _geocodeViaOla(input)
+    const olaSuggestions = await _autocompleteViaOla(input, location_bias)
     if (olaSuggestions !== null) {
       return reply.code(200).send(success(olaSuggestions, 'Autocomplete suggestions fetched'))
     }
