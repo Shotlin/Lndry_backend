@@ -13,7 +13,8 @@ const ORDER_COLUMNS = `id, order_number, user_id, rider_id, vendor_id, status, i
   estimated_delivery, delivered_at, proof_photo_url, cancelled_reason, handling_fee,
   late_night_fee, tip_amount, delivery_instructions, savings_total, delivery_mode,
   scheduled_delivery_at, scheduled_slot_start, scheduled_slot_end, scheduled_slot_label,
-  vendor_slot_id, pickup_date, is_express_pickup, fee_breakdown, auto_assignment_status, booking_type, created_at, updated_at`
+  vendor_slot_id, pickup_date, is_express_pickup, fee_breakdown, auto_assignment_status, booking_type, created_at, updated_at,
+  vendor_delivery_slot_label, vendor_delivery_slot_at`
 
 // Same projection, `o.`-qualified for the queries that LEFT JOIN users (ru).
 const ORDER_COLUMNS_O = ORDER_COLUMNS
@@ -626,6 +627,9 @@ export class OrdersRepository {
       scheduledSlotStart: row.scheduled_slot_start || null,
       scheduledSlotEnd: row.scheduled_slot_end || null,
       scheduledSlotLabel: row.scheduled_slot_label || null,
+      // The delivery time the laundry chose when it packed the order.
+      vendorDeliverySlotLabel: row.vendor_delivery_slot_label || null,
+      vendorDeliverySlotAt: row.vendor_delivery_slot_at || null,
       vendorSlotId: row.vendor_slot_id || null,
       pickupDate: row.pickup_date || null,
       pickupSlotStartTime: row.pickup_slot_start_time || null,

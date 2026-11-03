@@ -98,6 +98,8 @@ const orderResponseSchema = {
     scheduledSlotStart: { type: ['string', 'null'] },
     scheduledSlotEnd: { type: ['string', 'null'] },
     scheduledSlotLabel: { type: ['string', 'null'] },
+    vendorDeliverySlotLabel: { type: ['string', 'null'] },
+    vendorDeliverySlotAt: { type: ['string', 'null'] },
     // Pickup slot fields — computed by OrdersRepository._format() /
     // joined from vendor_slots, but omitted here until now, which meant
     // fast-json-stringify silently stripped them before the app ever saw

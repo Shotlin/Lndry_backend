@@ -137,7 +137,7 @@ export class VendorOrdersService {
       `SELECT o.id, o.order_number, o.status, o.user_id, o.items, o.subtotal,
               o.delivery_fee, o.platform_fee, o.tax_amount, o.handling_fee, o.total_amount,
               o.payment_method, o.payment_status,
-              o.delivery_address, o.vendor_slot_id, o.pickup_date, o.is_express_pickup,
+              o.delivery_address, o.vendor_slot_id, o.pickup_date::text AS pickup_date, o.is_express_pickup,
               vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time,
               o.estimated_amount_paise, o.payable_amount_paise, o.fee_breakdown,
               o.processing_stage, o.pickup_otp, o.delivery_otp, o.booking_type,
@@ -174,7 +174,7 @@ export class VendorOrdersService {
     if (!vendor) throw { statusCode: 403, message: 'Not a vendor', code: 'NOT_VENDOR' }
 
     const res = await query(
-      `SELECT o.*,
+      `SELECT o.*, o.pickup_date::text AS pickup_date,
               vs.start_time AS pickup_slot_start_time, vs.end_time AS pickup_slot_end_time,
               u.name AS customer_name, u.phone AS customer_phone, u.email AS customer_email,
               r.vendor_rating, r.rider_rating AS delivery_rating, r.comment AS review_comment
