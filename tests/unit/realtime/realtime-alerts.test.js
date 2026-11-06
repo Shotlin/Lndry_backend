@@ -12,7 +12,10 @@ vi.mock('../../../src/config/redis.js', () => ({
 }))
 vi.mock('@socket.io/redis-adapter', () => ({ createAdapter: () => Adapter }))
 vi.mock('../../../src/config/database.js', () => ({
-  query: vi.fn(async () => ({ rows: [{ order_number: 'LNDR-TEST-001' }] })),
+  query: vi.fn(async (sql) =>
+    String(sql).includes('vendor_employees')
+      ? { rows: [{ vendor_id: 'shop-D' }] }
+      : { rows: [{ order_number: 'LNDR-TEST-001' }] }),
   getClient: vi.fn(),
 }))
 
@@ -59,6 +62,31 @@ describe('vendor new-order alert (order.created -> shop room)', () => {
     })
     expect(await gotA).toMatchObject({ order_number: 'LNDR-1', total_amount: 499 })
     expect(await gotB).toBeNull()
+  })
+})
+
+describe('paid-online order (VENDOR_NEW_ORDER lifecycle) rings the shop', () => {
+  it('emits order.created to the shop room even though checkout code was not used', async () => {
+    const { LifecycleNotificationService } = await import('../../../src/modules/lifecycle-notifications/lifecycle-notifications.service.js')
+    const shop = await login({ id: 'u-owner-c', role: 'ADMIN', shopId: 'shop-C', shopRole: 'VENDOR_OWNER' })
+    const svc = Object.create(LifecycleNotificationService.prototype)
+    svc._context = async () => ({ id: 'o-paid', order_number: 'LNDR-PAID', vendor_id: 'shop-C', status: 'WAITING_VENDOR_CONFIRMATION', total_amount: '799.00' })
+    svc._template = async () => ({ recipient: 'VENDOR' })
+    svc._recipients = async () => []
+    svc._captainName = async () => null
+    const got = nextEvent(shop, 'order.created')
+    await svc.emit('VENDOR_NEW_ORDER', { orderId: 'o-paid' })
+    expect(await got).toMatchObject({ order_id: 'o-paid', order_number: 'LNDR-PAID', total_amount: 799 })
+  })
+})
+
+describe('token without shopId', () => {
+  it('still joins the shop room (resolved from DB) and hears new orders', async () => {
+    const owner = await login({ id: 'u-owner-d', role: 'VENDOR' })
+    await new Promise((r) => setTimeout(r, 200))
+    const got = nextEvent(owner, 'order.created')
+    app.io.to('shop:shop-D').emit('order.created', { order_id: 'o-d', order_number: 'LNDR-D' })
+    expect(await got).toMatchObject({ order_number: 'LNDR-D' })
   })
 })
 

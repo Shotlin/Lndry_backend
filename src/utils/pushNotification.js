@@ -72,8 +72,10 @@ export function buildMessage(fcmToken, { title, body, imageUrl, deepLink, data =
       priority: 'high',
       ...(ttlSeconds > 0 ? { ttl: Math.min(Math.floor(ttlSeconds), 2419200) * 1000 } : {}),
       notification: {
-        sound: 'default',
-        channelId: 'lndry_notifications',
+        // New-order pushes ring on a dedicated loud channel (custom sound,
+        // created by the Partner app). Everything else keeps the normal one.
+        sound: stringData.event === 'VENDOR_NEW_ORDER' ? 'new_order' : 'default',
+        channelId: stringData.event === 'VENDOR_NEW_ORDER' ? 'lndry_new_orders' : 'lndry_notifications',
         imageUrl: image,
         // No `clickAction` on purpose: with one set, Android builds the tap
         // intent from that action and — unless the app declares an activity

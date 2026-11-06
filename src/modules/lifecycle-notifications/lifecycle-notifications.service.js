@@ -1,3 +1,4 @@
+import { getSocketIo } from '../../plugins/socketio.plugin.js'
 import { query as defaultQuery } from '../../config/database.js'
 import { logger } from '../../config/logger.js'
 import { getOrderBalanceDuePaise } from '../../utils/order-balance.js'
@@ -123,6 +124,24 @@ export class LifecycleNotificationService {
     const leg = def.leg || extra.leg || (/PICKUP|PICKED_UP/.test(eventKey) ? 'PICKUP' : 'DELIVERY')
     const recipients = await this._recipients(tpl.recipient, def, ctx, leg)
     const captain = await this._captainName(orderId, leg)
+
+    // Realtime "new bill" alarm for the vendor app. Orders paid online (and
+    // every other path that ends in VENDOR_NEW_ORDER) never went through the
+    // checkout code that emitted `order.created`, so the shop's phone got a
+    // silent push only. Emitting here covers every path.
+    if (eventKey === 'VENDOR_NEW_ORDER' && ctx.vendor_id) {
+      try {
+        getSocketIo()?.to(`shop:${ctx.vendor_id}`).emit('order.created', {
+          order_id: ctx.id,
+          order_number: ctx.order_number,
+          status: ctx.status,
+          total_amount: ctx.total_amount != null ? Number(ctx.total_amount) : null,
+          timestamp: new Date().toISOString(),
+        })
+      } catch (err) {
+        logger.warn({ err: err.message, orderId: ctx.id }, 'Vendor new-order socket emit failed (non-critical)')
+      }
+    }
 
     const results = []
     for (const userId of recipients) {

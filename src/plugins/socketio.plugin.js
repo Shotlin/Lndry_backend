@@ -177,6 +177,23 @@ async function socketioPlugin(fastify) {
       logger.debug({ userId, shopId, room: `shop:${shopId}` }, 'Joined shop room')
     }
 
+    // A token without shopId (e.g. a plain login or a refreshed token) used to
+    // mean the vendor never joined their shop room and so never heard about
+    // new orders in realtime. Resolve the shop(s) from the database instead.
+    if (!shopId && !platform_role && role !== 'CUSTOMER') {
+      query(
+        `SELECT DISTINCT vendor_id FROM vendor_employees WHERE user_id = $1 AND is_active = true`,
+        [userId]
+      )
+        .then(({ rows }) => {
+          for (const r of rows) {
+            if (r.vendor_id) socket.join(`shop:${r.vendor_id}`)
+          }
+          if (rows.length) logger.debug({ userId, shops: rows.length }, 'Joined shop room(s) from DB')
+        })
+        .catch((err) => logger.warn({ err: err.message, userId }, 'Shop room lookup failed'))
+    }
+
     // Customer users join customer:{userId} for personal delivery updates
     if (role === 'CUSTOMER') {
       socket.join(`customer:${userId}`)
