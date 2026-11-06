@@ -2087,7 +2087,10 @@ export class OrdersService {
           this.fastify.io.to(`shop:${draft.vendor_id}`).emit('order.created', {
             order_id: order.id,
             status: 'WAITING_VENDOR_CONFIRMATION',
-            order_number: orderNumber
+            order_number: orderNumber,
+            total_amount: Number(order.total_amount ?? totalRupees ?? 0),
+            payment_method: order.payment_method || null,
+            timestamp: new Date().toISOString()
           })
         }
       } catch (err) {

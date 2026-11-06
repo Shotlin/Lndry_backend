@@ -7,7 +7,7 @@ import { computeRecalculatedTotals } from '../../utils/order-recalculation.js'
 import { NotificationsRepository } from '../notifications/notifications.repository.js'
 import { NotificationsService } from '../notifications/notifications.service.js'
 import { FeeSettingsService } from '../fee-settings/fee-settings.service.js'
-import { emitJobOfferedToRiders } from '../../plugins/socketio.plugin.js'
+import { emitJobOfferedToRiders, getSocketIo } from '../../plugins/socketio.plugin.js'
 import { RiderAssignmentSettingsService } from '../rider-assignment-settings/rider-assignment-settings.service.js'
 import { emitLifecycleEvent } from '../lifecycle-notifications/lifecycle-jobs.js'
 import { createHash } from 'node:crypto'
@@ -1229,6 +1229,8 @@ export class VendorOrdersService {
 
       await client.query('COMMIT')
 
+      await this._notifyRiderAssigned(employee.user_id, orderId, purpose)
+
       return {
         orderId,
         employeeId: employee.employee_id,
@@ -1241,6 +1243,28 @@ export class VendorOrdersService {
       throw err
     } finally {
       client.release()
+    }
+  }
+
+  /**
+   * Realtime alert for a rider/staff the vendor just picked by hand.
+   * Direct assign -> `job:assigned` (nothing to accept, the job is theirs);
+   * targeted offer -> `job:offered` (same event the broadcast uses, so the
+   * accept sheet + alarm show). Best-effort: the DB write has already
+   * committed, a missed socket emit must never fail the request.
+   */
+  async _notifyRiderAssigned(riderUserId, orderId, purpose, { offer = false } = {}) {
+    try {
+      const { rows } = await query(`SELECT order_number FROM orders WHERE id = $1`, [orderId])
+      const payload = { orderId, orderNumber: rows[0]?.order_number || null, purpose, expiresAt: null }
+      if (offer) {
+        emitJobOfferedToRiders([riderUserId], payload)
+      } else {
+        const io = getSocketIo()
+        if (io) io.to(`user:${riderUserId}`).emit('job:assigned', { timestamp: new Date().toISOString(), ...payload })
+      }
+    } catch (err) {
+      logger.warn({ err: err.message, orderId }, 'Rider assign socket emit failed (non-critical)')
     }
   }
 
@@ -1341,6 +1365,8 @@ export class VendorOrdersService {
       })
 
       await client.query('COMMIT')
+
+      await this._notifyRiderAssigned(employee.user_id, orderId, purpose, { offer: true })
 
       return {
         orderId,
