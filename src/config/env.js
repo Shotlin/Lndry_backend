@@ -137,6 +137,9 @@ const envSchema = z.object({
 
   // Logging
   LOG_LEVEL: z.enum(['trace', 'debug', 'info', 'warn', 'error']).default('info'),
+  // Per-request log lines (see src/utils/request-log-policy.js). 'errors' is recommended in production.
+  LOG_REQUESTS: z.enum(['all', 'errors', 'off']).default('all'),
+  LOG_SLOW_REQUEST_MS: z.coerce.number().int().positive().default(1000),
   LOG_PRETTY: booleanFromEnv.default(false),
   ENABLE_SWAGGER: booleanFromEnv.optional(),
   // Error tracking — optional. Sentry stays fully uninitialized (no-op)

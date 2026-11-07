@@ -1,4 +1,4 @@
-import Fastify from 'fastify'
+import Fastify, { LogController } from 'fastify'
 import { env } from './config/env.js'
 import { query } from './config/database.js'
 import { redis } from './config/redis.js'
@@ -6,6 +6,7 @@ import { sanitize } from './middlewares/sanitize.js'
 import { offeringGuard } from './middlewares/offering-guard.js'
 import { installRouteCollector } from './utils/permission-audit.js'
 import { captureRawBody } from './utils/rawBody.js'
+import { shouldDisableRequestLogging, shouldLogCompleted } from './utils/request-log-policy.js'
 
 /**
  * Build and configure the Fastify application
@@ -21,6 +22,11 @@ function parseTrustProxy(value) {
 
 export const buildApp = async () => {
   const app = Fastify({
+    // Cuts the per-request log volume (≈54 % of a core at load on the prod t3.medium).
+    // Mode comes from LOG_REQUESTS; see src/utils/request-log-policy.js.
+    logController: new LogController({
+      disableRequestLogging: (req) => shouldDisableRequestLogging(req.url, env.LOG_REQUESTS),
+    }),
     logger: {
       level: env.LOG_LEVEL,
       redact: {
@@ -107,6 +113,21 @@ export const buildApp = async () => {
   // parsing. preHandler runs after parsing *and* after AJV schema
   // validation/coercion, so this sanitizes already-validated string fields.
   app.addHook('preHandler', sanitize)
+  // LOG_REQUESTS=errors: Fastify's built-in request lines are off, so re-log only failures and slow requests.
+  if (env.LOG_REQUESTS === 'errors') {
+    app.addHook('onResponse', async (request, reply) => {
+      const elapsedMs = reply.elapsedTime
+      if (shouldLogCompleted({
+        mode: env.LOG_REQUESTS,
+        url: request.url,
+        statusCode: reply.statusCode,
+        elapsedMs,
+        slowMs: env.LOG_SLOW_REQUEST_MS,
+      })) {
+        request.log.info({ method: request.method, url: request.url, statusCode: reply.statusCode, responseTime: Math.round(elapsedMs) }, 'request completed')
+      }
+    })
+  }
   // Vendor offering (MARKETPLACE | POS | BOTH). Log-only unless ENFORCE_OFFERING=true. See middlewares/offering-guard.js.
   app.addHook('preHandler', offeringGuard())
 
