@@ -398,7 +398,7 @@ async function handleAutoReject({ orderId }) {
     }
 
     await client.query(
-      `UPDATE orders SET status = 'AUTO_REJECTED', payment_status = 'REFUNDED', cancelled_reason = 'Auto-rejected: Vendor confirmation timeout', updated_at = NOW()
+      `UPDATE orders SET status = 'AUTO_REJECTED', cancelled_reason = 'Auto-rejected: Vendor confirmation timeout', updated_at = NOW()
        WHERE id = $1`,
       [orderId]
     )
@@ -414,42 +414,7 @@ async function handleAutoReject({ orderId }) {
       note: 'Auto-rejected: Vendor confirmation timeout'
     })
 
-    // Refund payment
-    const { rows: paymentRows } = await client.query(
-      `SELECT id, amount, razorpay_payment_id FROM payments WHERE order_id = $1 AND status = 'PAID' LIMIT 1`,
-      [orderId]
-    )
-    if (paymentRows.length > 0) {
-      const payment = paymentRows[0]
-      const refundAmount = payment.amount
-      const reason = 'Auto-rejected: Vendor confirmation timeout'
-
-      let refundId = `ref_mock_${Math.random().toString(36).substring(2, 11)}`
-      let refundStatus = 'PROCESSED'
-
-      const { getRazorpay } = await import('../config/razorpay.js')
-      const rzp = await getRazorpay()
-      if (rzp && payment.razorpay_payment_id) {
-        try {
-          const rzpRefund = await rzp.client.payments.refund(payment.razorpay_payment_id, {
-            amount: Math.round(refundAmount * 100),
-            notes: { reason },
-          })
-          refundId = rzpRefund.id
-          refundStatus = 'PROCESSED'
-        } catch (rzpErr) {
-          logger.error({ err: rzpErr.message, orderId, paymentId: payment.id }, 'Razorpay refund failed during auto-reject')
-          refundStatus = 'FAILED'
-        }
-      }
-
-      await client.query(
-        `UPDATE payments
-         SET refund_id = $1, refund_amount = $2, refund_status = $3, status = 'REFUNDED', updated_at = NOW()
-         WHERE id = $4`,
-        [refundId, refundAmount, refundStatus, payment.id]
-      )
-    }
+    // (The refund happens after COMMIT — see below — through the shared, idempotent refund helper.)
 
     // Restore stock if any retail items existed
     try {
@@ -461,7 +426,12 @@ async function handleAutoReject({ orderId }) {
     }
 
     await client.query('COMMIT')
-    logger.info({ orderId }, 'Order auto-rejected and refund completed')
+    logger.info({ orderId }, 'Order auto-rejected')
+
+    // Money back to the customer: wallet credit for wallet payments, gateway refund otherwise.
+    // Falls back to a retrying job if the first attempt fails.
+    const { refundOrderOrRetry } = await import('../modules/orders/order-refund.js')
+    await refundOrderOrRetry(orderId, { reason: 'Auto-rejected: Vendor confirmation timeout' })
 
     // Send customer notification
     await handleOrderStatusNotification({
@@ -563,6 +533,9 @@ export async function processOrderJob(job) {
     case 'auto-reject':
       return handleAutoReject(job.data)
 
+    case 'auto-refund':
+      return handleAutoRefund(job.data)
+
     case 'rider-broadcast-timeout':
       return handleRiderBroadcastTimeout(job.data)
 
@@ -575,6 +548,18 @@ export async function processOrderJob(job) {
     default:
       logger.warn({ type, jobId: job.id }, 'Unknown order job type')
   }
+}
+
+/**
+ * Give the customer their money back for an order that will not happen (laundry rejected it, ...).
+ * Queued by VendorOrdersService.rejectOrder. Throws when a refund fails so BullMQ retries it.
+ */
+async function handleAutoRefund({ orderId, reason }) {
+  const { refundOrderPayments } = await import('../modules/orders/order-refund.js')
+  const res = await refundOrderPayments(orderId, { reason: reason || 'Order not fulfilled' })
+  if (res.failed > 0) throw new Error(`Refund failed for ${res.failed} payment(s) of order ${orderId}`)
+  logger.info({ orderId, ...res }, 'Order refund processed')
+  return { success: true, ...res }
 }
 
 async function handleAutoAssignBacklog({ limit = 200 } = {}) {

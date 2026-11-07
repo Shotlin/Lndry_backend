@@ -20,7 +20,7 @@ export class NotificationsService {
   async markAsRead(userId, notificationId) {
     const notification = await this.repository.getNotificationById(notificationId)
     if (!notification) {
-      throw new Error('Notification not found')
+      throw { statusCode: 404, message: 'Notification not found', code: 'NOTIFICATION_NOT_FOUND' }
     }
 
     if (notification.user_id !== userId) {
@@ -37,7 +37,7 @@ export class NotificationsService {
   async deleteNotification(userId, notificationId) {
     const notification = await this.repository.getNotificationById(notificationId)
     if (!notification) {
-      throw new Error('Notification not found')
+      throw { statusCode: 404, message: 'Notification not found', code: 'NOTIFICATION_NOT_FOUND' }
     }
 
     if (notification.user_id !== userId) {

@@ -1,6 +1,9 @@
 import fp from 'fastify-plugin'
 import { env } from '../config/env.js'
 import { captureException } from '../config/sentry.js'
+import { mapKnownError } from '../utils/db-errors.js'
+
+export { mapKnownError }
 
 /**
  * Global error handler plugin
@@ -44,6 +47,18 @@ async function errorHandlerPlugin(fastify) {
           message: errMsg,
           request_id: requestId
         }
+      })
+    }
+
+    // Database / business errors that are really client mistakes (see mapKnownError)
+    const mapped = mapKnownError(error)
+    if (mapped) {
+      request.log.warn({ pgCode: error.code, detail: error.detail, url: request.url }, 'Database error mapped to a client error')
+      return reply.code(mapped.status).send({
+        success: false,
+        message: mapped.message,
+        code: mapped.code,
+        error: { code: mapped.code, message: mapped.message, request_id: requestId },
       })
     }
 

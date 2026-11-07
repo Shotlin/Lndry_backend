@@ -431,10 +431,11 @@ export class VendorOrdersService {
         note: reason || 'Vendor rejected the order'
       })
 
-      // Release slot holds
+      // Release THIS customer's slot hold only. (It used to delete every customer's hold on the
+      // slot-day, silently dropping other people's in-progress bookings.)
       await client.query(
-        `DELETE FROM slot_holds WHERE slot_id = $1 AND booking_date = $2::date`,
-        [order.vendor_slot_id, order.pickup_date]
+        `DELETE FROM slot_holds WHERE slot_id = $1 AND booking_date = $2::date AND user_id = $3`,
+        [order.vendor_slot_id, order.pickup_date, order.user_id]
       )
 
       await client.query('COMMIT')
@@ -455,6 +456,8 @@ export class VendorOrdersService {
           reason: reason || 'Vendor rejected order'
         }, {
           jobId: `auto-refund-${orderId}`,
+          attempts: 8,
+          backoff: { type: 'exponential', delay: 5000 },
           removeOnComplete: true
         })
       } catch (err) {

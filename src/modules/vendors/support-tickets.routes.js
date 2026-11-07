@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { sendCaughtError } from '../../utils/db-errors.js'
 import { SupportTicketsRepository } from './support-tickets.repository.js'
 import { SupportTicketsService } from './support-tickets.service.js'
 import { VendorsRepository } from './vendors.repository.js'
@@ -70,7 +71,7 @@ export default async function supportTicketsRoutes(fastify) {
       const ticket = await svc.getOne(request.user.id, request.params.id)
       return reply.send(success(ticket, 'Ticket fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch ticket'))
+      return sendCaughtError(reply, err, 'Failed to fetch ticket')
     }
   })
 
@@ -90,7 +91,7 @@ export default async function supportTicketsRoutes(fastify) {
       const ticket = await svc.rate(request.user.id, request.params.id, request.body.rating)
       return reply.send(success(ticket, 'Thank you for your feedback'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to submit rating'))
+      return sendCaughtError(reply, err, 'Failed to submit rating')
     }
   })
 
@@ -110,7 +111,7 @@ export default async function supportTicketsRoutes(fastify) {
       const ticket = await svc.followUp(request.user.id, request.params.id, request.body.message)
       return reply.send(success(ticket, 'Follow-up sent'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to send follow-up'))
+      return sendCaughtError(reply, err, 'Failed to send follow-up')
     }
   })
 }
@@ -156,7 +157,7 @@ export async function adminSupportTicketsRoutes(fastify) {
         total: result.total,
       }))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch tickets'))
+      return sendCaughtError(reply, err, 'Failed to fetch tickets')
     }
   })
 
@@ -167,7 +168,7 @@ export async function adminSupportTicketsRoutes(fastify) {
       const ticket = await svc.adminGetOne(request.params.id)
       return reply.send(success(ticket, 'Ticket fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch ticket'))
+      return sendCaughtError(reply, err, 'Failed to fetch ticket')
     }
   })
 
@@ -186,7 +187,7 @@ export async function adminSupportTicketsRoutes(fastify) {
       const ticket = await svc.adminReply(request.params.id, request.user.id, request.body.reply)
       return reply.send(success(ticket, 'Reply sent'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to send reply'))
+      return sendCaughtError(reply, err, 'Failed to send reply')
     }
   })
 
@@ -197,7 +198,7 @@ export async function adminSupportTicketsRoutes(fastify) {
       const ticket = await svc.adminClose(request.params.id)
       return reply.send(success(ticket, 'Ticket closed'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to close ticket'))
+      return sendCaughtError(reply, err, 'Failed to close ticket')
     }
   })
 }

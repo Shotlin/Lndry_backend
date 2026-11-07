@@ -176,7 +176,7 @@ export class OrdersRepository {
   async decrementStock(client, items) {
     for (const item of items) {
       const { rowCount } = await client.query(
-        `UPDATE garment_rates SET stock_quantity = stock_quantity - $1, total_sold = total_sold + $1,
+        `UPDATE garment_types SET stock_quantity = stock_quantity - $1, total_sold = total_sold + $1,
                 updated_at = NOW()
          WHERE id = $2 AND stock_quantity >= $1`,
         [item.quantity, item.productId]

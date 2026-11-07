@@ -42,7 +42,7 @@ export class ReviewsService {
     // Check if user owned the order and order is in DELIVERED state
     const order = await this.repository.getOrderById(orderId)
     if (!order) {
-      throw new Error('Order not found')
+      throw { statusCode: 404, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
     }
     if (order.user_id !== userId) {
       throw new Error('You can only review your own orders')
@@ -117,7 +117,7 @@ export class ReviewsService {
 
     const review = await this.repository.getReviewById(reviewId)
     if (!review) {
-      throw new Error('Review not found')
+      throw { statusCode: 404, message: 'Review not found', code: 'REVIEW_NOT_FOUND' }
     }
 
     if (review.user_id !== userId) {
@@ -142,7 +142,7 @@ export class ReviewsService {
   async deleteReview(userId, reviewId) {
     const review = await this.repository.getReviewById(reviewId)
     if (!review) {
-      throw new Error('Review not found')
+      throw { statusCode: 404, message: 'Review not found', code: 'REVIEW_NOT_FOUND' }
     }
 
     if (review.user_id !== userId) {

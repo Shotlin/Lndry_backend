@@ -192,6 +192,30 @@ export class AuthRepository {
   }
 
   /**
+   * Paginated list of the user's active shop assignments (GET /auth/my-vendors).
+   * Same "active" rule as findActiveShopStaffByUserId. Returns { items, total } where each item is
+   * { vendor_id, shop_name, branch_code, shop_role, permissions } — the shape the route schema documents.
+   * (The service called this method but it was never written, so the endpoint returned 500 for everyone.)
+   */
+  async loadActiveShopAssignmentsPaginated(userId, { page = 1, limit = 20 } = {}) {
+    const offset = (page - 1) * limit
+    const where = `ss.user_id = $1 AND ss.is_active = true AND ss.deleted_at IS NULL AND s.is_active = true AND s.deleted_at IS NULL`
+    const [list, count] = await Promise.all([
+      query(
+        `SELECT ss.vendor_id AS vendor_id, s.name AS shop_name, s.branch_code AS branch_code, ss.role AS shop_role,
+                COALESCE(ss.permissions, '[]'::jsonb) AS permissions
+           FROM vendor_employees ss JOIN vendors s ON s.id = ss.vendor_id
+          WHERE ${where}
+          ORDER BY s.created_at ASC, ss.id ASC
+          LIMIT $2 OFFSET $3`,
+        [userId, limit, offset]
+      ),
+      query(`SELECT COUNT(*)::int AS total FROM vendor_employees ss JOIN vendors s ON s.id = ss.vendor_id WHERE ${where}`, [userId]),
+    ])
+    return { items: list.rows, total: count.rows[0]?.total ?? 0 }
+  }
+
+  /**
    * Find a single active vendor_employees record for a (user_id, vendor_id) pair.
    * Used by select-shop to validate a user's access to the requested shop.
    * Requirement 2.8, 13.2
