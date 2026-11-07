@@ -45,6 +45,8 @@ const INLINE_AUTO_ASSIGN_IN_NON_PROD =
 /**
  * Orders service — business logic for order placement & management
  */
+const CANCELLED_TERMINAL = new Set(['DELIVERED', 'PAYMENT_FAILED', 'VENDOR_REJECTED', 'AUTO_REJECTED', 'ADMIN_CANCELLED', 'REFUNDED'])
+
 export class OrdersService {
   constructor(repository, fastify = null, options = {}) {
     this.repo = repository
@@ -612,7 +614,9 @@ export class OrdersService {
           code: already ? 'ALREADY_CANCELLED' : 'CANCEL_NOT_ALLOWED',
           message: already
             ? 'This order is already cancelled'
-            : `This order can no longer be cancelled (status: ${locked.status}). Please contact support.`,
+            : CANCELLED_TERMINAL.has(locked.status)
+              ? 'This order has already ended and cannot be cancelled.'
+              : 'Your clothes have already been picked up, so this order can no longer be cancelled. Please contact support if you need help.',
         }
       }
 

@@ -96,6 +96,24 @@ describe.skipIf(!DB_TESTS)('order cancellation, refunds, my-vendors and reports 
       expect(await wallet(user.id)).toBe(before)
     })
 
+    it('can cancel while the rider is assigned or on the way (clothes not collected yet)', async () => {
+      for (const status of ['PICKUP_ASSIGNED', 'GOING_FOR_PICKUP']) {
+        const { user, orderId } = await placedOrder()
+        await pool.query(`UPDATE orders SET status=$2 WHERE id=$1`, [orderId, status])
+        const before = await wallet(user.id)
+        expect((await cancel(user, orderId)).statusCode, status).toBe(200)
+        expect(await wallet(user.id)).toBe(before + 50)
+      }
+    })
+
+    it('cannot cancel once pickup is verified, with a clear message', async () => {
+      const { user, orderId } = await placedOrder()
+      await pool.query(`UPDATE orders SET status='PICKUP_OTP_VERIFIED' WHERE id=$1`, [orderId])
+      const res = await cancel(user, orderId)
+      expect(res.statusCode).toBe(400)
+      expect(res.json().message).toMatch(/already been picked up/i)
+    })
+
     it('can still cancel after the laundry accepted (before pickup)', async () => {
       const { user, orderId } = await placedOrder()
       await pool.query(`UPDATE orders SET status='VENDOR_ACCEPTED' WHERE id=$1`, [orderId])
