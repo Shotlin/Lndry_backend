@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { sendCaughtError } from '../../utils/db-errors.js'
 import { PartnerLeadsService } from './partner-leads.service.js'
 
 const states = ['RECEIVED', 'CLAIMED', 'ARCHIVED']
@@ -30,7 +31,7 @@ export default async function partnerLeadsAdminRoutes(fastify) {
       const lead = await service.claim(request.params.id, request.user.id, { ip: request.ip, userAgent: request.headers['user-agent'] })
       return reply.send(success(lead, 'Partner lead claimed'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Unable to claim partner lead'))
+      return sendCaughtError(reply, err, 'Unable to claim partner lead')
     }
   })
 }

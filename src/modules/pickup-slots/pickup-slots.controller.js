@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { sendCaughtError } from '../../utils/db-errors.js'
 
 export class SlotsController {
   constructor(service) {
@@ -14,7 +15,7 @@ export class SlotsController {
       const activeSlots = slots.filter(s => s.remainingCapacity > 0)
       return reply.send(success(activeSlots, 'Available slots fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch slots'))
+      return sendCaughtError(reply, err, 'Failed to fetch slots')
     }
   }
 
@@ -27,7 +28,7 @@ export class SlotsController {
       const hold = await this.service.holdSlot(request.user.id, vendorId, slotId, date, quoteId)
       return reply.code(201).send(success(hold, 'Slot held successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to hold slot'))
+      return sendCaughtError(reply, err, 'Failed to hold slot')
     }
   }
 

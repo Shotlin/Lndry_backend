@@ -2,6 +2,8 @@ import { success, error } from '../../utils/apiResponse.js'
 import { UsersService } from '../users/users.service.js'
 import { UsersRepository } from '../users/users.repository.js'
 import { query } from '../../config/database.js'
+import { AuthRepository } from '../auth/auth.repository.js'
+import { revokeAllRefreshTokens } from '../auth/refresh-token-store.js'
 import { HelpFaqsRepository } from '../admin/help-faqs/help-faqs.repository.js'
 import { publicFaqsSchema } from '../admin/help-faqs/help-faqs.schema.js'
 import { customerAccountDeletionRoutes } from '../admin/account-deletion/account-deletion.routes.js'
@@ -138,7 +140,10 @@ export default async function customerRoutes(fastify) {
       security: [{ bearerAuth: [] }]
     }
   }, async (request, reply) => {
-    await service.repo.deleteUser(request.user.id)
+    // UsersRepository has no deleteUser (this route used to crash with a 500). Use the same soft-delete +
+    // PII clearing as DELETE /auth/account, and end every session of the account.
+    await new AuthRepository().deleteUser(request.user.id)
+    await revokeAllRefreshTokens(request.user.id)
     reply.clearCookie('refreshToken', { path: '/api/v1/auth' })
     return reply.code(200).send(success(null, 'Customer account soft-deleted and anonymised successfully'))
   })

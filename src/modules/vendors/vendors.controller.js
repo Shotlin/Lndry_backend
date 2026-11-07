@@ -1,4 +1,5 @@
 import { success, error } from '../../utils/apiResponse.js'
+import { sendCaughtError } from '../../utils/db-errors.js'
 import fs from 'node:fs'
 import path from 'node:path'
 import crypto from 'node:crypto'
@@ -13,7 +14,7 @@ export class VendorsController {
       const vendor = await this.service.apply(request.user.id, request.body)
       return reply.code(201).send(success(vendor, 'Application submitted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Onboarding failed'))
+      return sendCaughtError(reply, err, 'Onboarding failed')
     }
   }
 
@@ -25,7 +26,7 @@ export class VendorsController {
       }
       return reply.send(success(profile, 'Vendor profile fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to load profile'))
+      return sendCaughtError(reply, err, 'Failed to load profile')
     }
   }
 
@@ -34,7 +35,7 @@ export class VendorsController {
       const profile = await this.service.updateProfile(request.user.id, request.body)
       return reply.send(success(profile, 'Vendor profile updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Update failed'))
+      return sendCaughtError(reply, err, 'Update failed')
     }
   }
 
@@ -44,7 +45,7 @@ export class VendorsController {
       const doc = await this.service.uploadDocument(request.user.id, documentType, fileUrl)
       return reply.code(201).send(success(doc, 'Document uploaded successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Upload failed'))
+      return sendCaughtError(reply, err, 'Upload failed')
     }
   }
 
@@ -53,7 +54,7 @@ export class VendorsController {
       const { vendors, total } = await this.service.adminList(request.query)
       return reply.send(success(vendors, 'Vendors list fetched', { total }))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to list vendors'))
+      return sendCaughtError(reply, err, 'Failed to list vendors')
     }
   }
 
@@ -74,7 +75,7 @@ export class VendorsController {
 
       return reply.send(success(details, 'Vendor details fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to get vendor details'))
+      return sendCaughtError(reply, err, 'Failed to get vendor details')
     }
   }
 
@@ -83,7 +84,7 @@ export class VendorsController {
       const vendor = await this.service.adminCreateVendor(request.user.id, request.body)
       return reply.code(201).send(success(vendor, 'Vendor created'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Could not create vendor'))
+      return sendCaughtError(reply, err, 'Could not create vendor')
     }
   }
 
@@ -107,7 +108,7 @@ export class VendorsController {
       return reply.code(201).send(success(doc, 'Document uploaded'))
     } catch (err) {
       request.log.error({ err }, 'Admin vendor document upload failed')
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Upload failed'))
+      return sendCaughtError(reply, err, 'Upload failed')
     }
   }
 
@@ -116,7 +117,7 @@ export class VendorsController {
       await this.service.adminDeleteVendorDocument(request.params.id, request.params.documentId)
       return reply.send(success(null, 'Document removed'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Could not remove document'))
+      return sendCaughtError(reply, err, 'Could not remove document')
     }
   }
 
@@ -125,7 +126,7 @@ export class VendorsController {
       const vendor = await this.service.adminUpdateDetails(request.params.id, request.body)
       return reply.send(success(vendor, 'Application details updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update application details'))
+      return sendCaughtError(reply, err, 'Failed to update application details')
     }
   }
 
@@ -134,7 +135,7 @@ export class VendorsController {
       const vendor = await this.service.adminReview(request.params.id, request.body)
       return reply.send(success(vendor, 'Vendor application status updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Review action failed'))
+      return sendCaughtError(reply, err, 'Review action failed')
     }
   }
 
@@ -147,7 +148,7 @@ export class VendorsController {
         .header('Content-Type', contentType)
         .send(buffer)
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to preview KYC document'))
+      return sendCaughtError(reply, err, 'Failed to preview KYC document')
     }
   }
 
@@ -158,7 +159,7 @@ export class VendorsController {
       const vendor = await this.service.createApplication(request.user.id, request.body)
       return reply.code(201).send(success(vendor, 'Draft application created successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create application'))
+      return sendCaughtError(reply, err, 'Failed to create application')
     }
   }
 
@@ -167,7 +168,7 @@ export class VendorsController {
       const res = await this.service.getApplicationMe(request.user.id)
       return reply.send(success(res, 'Application loaded successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to load application'))
+      return sendCaughtError(reply, err, 'Failed to load application')
     }
   }
 
@@ -177,7 +178,7 @@ export class VendorsController {
       const vendor = await this.service.updateApplicationOwner(request.user.id, id, request.body)
       return reply.send(success(vendor, 'Application owner info updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update owner info'))
+      return sendCaughtError(reply, err, 'Failed to update owner info')
     }
   }
 
@@ -187,7 +188,7 @@ export class VendorsController {
       const vendor = await this.service.updateApplicationBusiness(request.user.id, id, request.body)
       return reply.send(success(vendor, 'Application business info updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update business info'))
+      return sendCaughtError(reply, err, 'Failed to update business info')
     }
   }
 
@@ -197,7 +198,7 @@ export class VendorsController {
       const vendor = await this.service.updateApplicationLocation(request.user.id, id, request.body)
       return reply.send(success(vendor, 'Application location updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update location'))
+      return sendCaughtError(reply, err, 'Failed to update location')
     }
   }
 
@@ -207,7 +208,7 @@ export class VendorsController {
       const vendor = await this.service.updateApplicationRadius(request.user.id, id, request.body)
       return reply.send(success(vendor, 'Application radius updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update radius'))
+      return sendCaughtError(reply, err, 'Failed to update radius')
     }
   }
 
@@ -247,7 +248,7 @@ export class VendorsController {
       return reply.code(201).send(success({ document_id: doc.id }, 'Document uploaded successfully'))
     } catch (err) {
       request.log.error({ err }, 'Onboarding document upload failed')
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Upload failed'))
+      return sendCaughtError(reply, err, 'Upload failed')
     }
   }
 
@@ -257,7 +258,7 @@ export class VendorsController {
       await this.service.deleteApplicationDocument(request.user.id, id, documentId)
       return reply.send(success(null, 'Document removed successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete document'))
+      return sendCaughtError(reply, err, 'Failed to delete document')
     }
   }
 
@@ -267,7 +268,7 @@ export class VendorsController {
       const vendor = await this.service.submitApplication(request.user.id, id)
       return reply.send(success(vendor, 'Application submitted for approval'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Submission failed'))
+      return sendCaughtError(reply, err, 'Submission failed')
     }
   }
 
@@ -277,7 +278,7 @@ export class VendorsController {
       const vendor = await this.service.resubmitApplication(request.user.id, id)
       return reply.send(success(vendor, 'Application resubmitted for approval'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Resubmission failed'))
+      return sendCaughtError(reply, err, 'Resubmission failed')
     }
   }
 
@@ -286,7 +287,7 @@ export class VendorsController {
       const profile = await this.service.getPublicPreview(request.user.id)
       return reply.send(success(profile, 'Profile fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to load profile'))
+      return sendCaughtError(reply, err, 'Failed to load profile')
     }
   }
 
@@ -304,7 +305,7 @@ export class VendorsController {
       const profile = await this.service.updateProfileLocation(request.user.id, request.body)
       return reply.send(success(profile, 'Profile location updated, review triggered'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update location'))
+      return sendCaughtError(reply, err, 'Failed to update location')
     }
   }
 
@@ -313,7 +314,7 @@ export class VendorsController {
       const profile = await this.service.publishProfile(request.user.id)
       return reply.send(success(profile, 'Profile published successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to publish profile'))
+      return sendCaughtError(reply, err, 'Failed to publish profile')
     }
   }
 
@@ -322,7 +323,7 @@ export class VendorsController {
       const categories = await this.service.getVendorCategories()
       return reply.send(success(categories, 'Vendor categories fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch categories'))
+      return sendCaughtError(reply, err, 'Failed to fetch categories')
     }
   }
 
@@ -332,7 +333,7 @@ export class VendorsController {
       const res = await this.service.getVendorServices(request.user.id, { status, categoryId: category_id, page: page ? +page : 1, limit: limit ? +limit : 20 })
       return reply.send(success(res.services, 'Vendor services fetched successfully', { total: res.total, page: res.page, limit: res.limit }))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch services'))
+      return sendCaughtError(reply, err, 'Failed to fetch services')
     }
   }
 
@@ -341,7 +342,7 @@ export class VendorsController {
       const res = await this.service.getReconciliationCatalogue(request.user.id)
       return reply.send(success(res, 'Reconciliation catalogue fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch catalogue'))
+      return sendCaughtError(reply, err, 'Failed to fetch catalogue')
     }
   }
 
@@ -353,7 +354,7 @@ export class VendorsController {
       const res = await this.service.createVendorServiceDraft(request.user.id, payload)
       return reply.code(201).send(success(res, 'Service created successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create service'))
+      return sendCaughtError(reply, err, 'Failed to create service')
     }
   }
 
@@ -363,7 +364,7 @@ export class VendorsController {
       const res = await this.service.getVendorServiceDetails(request.user.id, serviceId)
       return reply.send(success(res, 'Service details fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch service details'))
+      return sendCaughtError(reply, err, 'Failed to fetch service details')
     }
   }
 
@@ -373,7 +374,7 @@ export class VendorsController {
       const res = await this.service.updateVendorService(request.user.id, serviceId, request.body || {})
       return reply.send(success(res, 'Service updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update service'))
+      return sendCaughtError(reply, err, 'Failed to update service')
     }
   }
 
@@ -383,7 +384,7 @@ export class VendorsController {
       await this.service.deleteVendorService(request.user.id, serviceId)
       return reply.send(success(null, 'Service deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete service'))
+      return sendCaughtError(reply, err, 'Failed to delete service')
     }
   }
 
@@ -393,7 +394,7 @@ export class VendorsController {
       const res = await this.service.addGarmentRate(request.user.id, serviceId, request.body)
       return reply.code(201).send(success(res, 'Garment rate added successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to add garment rate'))
+      return sendCaughtError(reply, err, 'Failed to add garment rate')
     }
   }
 
@@ -403,7 +404,7 @@ export class VendorsController {
       await this.service.updateGarmentRate(request.user.id, serviceId, id, request.body)
       return reply.send(success(null, 'Garment rate updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update garment rate'))
+      return sendCaughtError(reply, err, 'Failed to update garment rate')
     }
   }
 
@@ -413,7 +414,7 @@ export class VendorsController {
       await this.service.deleteGarmentRate(request.user.id, serviceId, id)
       return reply.send(success(null, 'Garment rate deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete garment rate'))
+      return sendCaughtError(reply, err, 'Failed to delete garment rate')
     }
   }
 
@@ -425,7 +426,7 @@ export class VendorsController {
       await this.service.bulkUpsertGarmentRates(request.user.id, serviceId, garment_rates)
       return reply.send(success(null, 'Garment rates bulk upsert completed'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to bulk upsert garment rates'))
+      return sendCaughtError(reply, err, 'Failed to bulk upsert garment rates')
     }
   }
 
@@ -435,7 +436,7 @@ export class VendorsController {
       await this.service.publishService(request.user.id, serviceId)
       return reply.send(success(null, 'Service published successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to publish service'))
+      return sendCaughtError(reply, err, 'Failed to publish service')
     }
   }
 
@@ -446,7 +447,7 @@ export class VendorsController {
       await this.service.unpublishService(request.user.id, serviceId, reason)
       return reply.send(success(null, 'Service unpublished successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to unpublish service'))
+      return sendCaughtError(reply, err, 'Failed to unpublish service')
     }
   }
 
@@ -462,7 +463,7 @@ export class VendorsController {
       })
       return reply.send(success(res, 'Vendor services fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch vendor services'))
+      return sendCaughtError(reply, err, 'Failed to fetch vendor services')
     }
   }
 
@@ -472,7 +473,7 @@ export class VendorsController {
       const res = await this.service.approveVendorServiceAdmin(id, request.user.id)
       return reply.send(success(res, 'Service approved'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to approve service'))
+      return sendCaughtError(reply, err, 'Failed to approve service')
     }
   }
 
@@ -483,7 +484,7 @@ export class VendorsController {
       const res = await this.service.rejectVendorServiceAdmin(id, request.user.id, reason)
       return reply.send(success(res, 'Service rejected'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to reject service'))
+      return sendCaughtError(reply, err, 'Failed to reject service')
     }
   }
 
@@ -494,7 +495,7 @@ export class VendorsController {
       const res = await this.service.adminRecalculateServiceRate(rateId, parseInt(rate_paise, 10) || 0, reason)
       return reply.send(success(res, 'Rate updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update rate'))
+      return sendCaughtError(reply, err, 'Failed to update rate')
     }
   }
 
@@ -503,7 +504,7 @@ export class VendorsController {
       const res = await this.service.getCapacity(request.user.id)
       return reply.send(success(res, 'Capacity settings fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch capacity settings'))
+      return sendCaughtError(reply, err, 'Failed to fetch capacity settings')
     }
   }
 
@@ -514,7 +515,7 @@ export class VendorsController {
       const capacityRequest = await this.service.requestCapacityChange(request.user.id, max_orders_per_day)
       return reply.send(success(capacityRequest, 'Capacity change requested — pending admin approval'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to request capacity change'))
+      return sendCaughtError(reply, err, 'Failed to request capacity change')
     }
   }
 
@@ -530,7 +531,7 @@ export class VendorsController {
       })
       return reply.send(success(res.requests, 'Capacity requests fetched', { total: res.total }))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch capacity requests'))
+      return sendCaughtError(reply, err, 'Failed to fetch capacity requests')
     }
   }
 
@@ -539,7 +540,7 @@ export class VendorsController {
       const res = await this.service.adminGetVendorCapacity(request.params.id)
       return reply.send(success(res, 'Vendor capacity fetched'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch vendor capacity'))
+      return sendCaughtError(reply, err, 'Failed to fetch vendor capacity')
     }
   }
 
@@ -550,7 +551,7 @@ export class VendorsController {
       const res = await this.service.adminReviewCapacityRequest(id, request.user.id, { status: 'APPROVED', adminNote })
       return reply.send(success(res, 'Capacity request approved'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to approve capacity request'))
+      return sendCaughtError(reply, err, 'Failed to approve capacity request')
     }
   }
 
@@ -561,7 +562,7 @@ export class VendorsController {
       const res = await this.service.adminReviewCapacityRequest(id, request.user.id, { status: 'REJECTED', adminNote })
       return reply.send(success(res, 'Capacity request rejected'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to reject capacity request'))
+      return sendCaughtError(reply, err, 'Failed to reject capacity request')
     }
   }
 
@@ -573,7 +574,7 @@ export class VendorsController {
       const res = await this.service.adminSetDailyCapacity(id, max_orders_per_day, request.user.id)
       return reply.send(success(res, 'Daily capacity updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update daily capacity'))
+      return sendCaughtError(reply, err, 'Failed to update daily capacity')
     }
   }
 
@@ -633,7 +634,7 @@ export class VendorsController {
       const res = await this.service.adminSetExpressPickupAvailable(id, available)
       return reply.send(success(res, 'Express pickup availability updated'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update express pickup availability'))
+      return sendCaughtError(reply, err, 'Failed to update express pickup availability')
     }
   }
 
@@ -643,7 +644,7 @@ export class VendorsController {
       const slot = await this.service.adminCreatePickupSlot(id, request.body)
       return reply.code(201).send(success(slot, 'Pickup slot created successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create pickup slot'))
+      return sendCaughtError(reply, err, 'Failed to create pickup slot')
     }
   }
 
@@ -653,7 +654,7 @@ export class VendorsController {
       const slot = await this.service.adminUpdatePickupSlot(id, slotId, request.body)
       return reply.send(success(slot, 'Pickup slot updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update pickup slot'))
+      return sendCaughtError(reply, err, 'Failed to update pickup slot')
     }
   }
 
@@ -663,7 +664,7 @@ export class VendorsController {
       await this.service.adminDeletePickupSlot(id, slotId)
       return reply.send(success(null, 'Pickup slot deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete pickup slot'))
+      return sendCaughtError(reply, err, 'Failed to delete pickup slot')
     }
   }
 
@@ -678,7 +679,7 @@ export class VendorsController {
       const res = await this.service.adminGetVendorServices(id, { status, categoryId: category_id, page: page ? +page : 1, limit: limit ? +limit : 20 })
       return reply.send(success(res.services, 'Vendor services fetched', { total: res.total, page: res.page, limit: res.limit }))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch vendor services'))
+      return sendCaughtError(reply, err, 'Failed to fetch vendor services')
     }
   }
 
@@ -690,7 +691,7 @@ export class VendorsController {
       const res = await this.service.adminCreateVendorService(id, payload, request.user.id)
       return reply.code(201).send(success(res, 'Service created successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create service'))
+      return sendCaughtError(reply, err, 'Failed to create service')
     }
   }
 
@@ -700,7 +701,7 @@ export class VendorsController {
       const res = await this.service.adminGetVendorServiceDetails(id, serviceId)
       return reply.send(success(res, 'Service details fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch service details'))
+      return sendCaughtError(reply, err, 'Failed to fetch service details')
     }
   }
 
@@ -710,7 +711,7 @@ export class VendorsController {
       const res = await this.service.adminUpdateVendorService(id, serviceId, request.body || {}, request.user.id)
       return reply.send(success(res, 'Service updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update service'))
+      return sendCaughtError(reply, err, 'Failed to update service')
     }
   }
 
@@ -720,7 +721,7 @@ export class VendorsController {
       await this.service.adminDeleteVendorService(id, serviceId)
       return reply.send(success(null, 'Service deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete service'))
+      return sendCaughtError(reply, err, 'Failed to delete service')
     }
   }
 
@@ -730,7 +731,7 @@ export class VendorsController {
       const res = await this.service.adminAddGarmentRate(id, serviceId, request.body)
       return reply.code(201).send(success(res, 'Garment rate added successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to add garment rate'))
+      return sendCaughtError(reply, err, 'Failed to add garment rate')
     }
   }
 
@@ -740,7 +741,7 @@ export class VendorsController {
       await this.service.adminUpdateGarmentRate(id, serviceId, garmentTypeId, request.body)
       return reply.send(success(null, 'Garment rate updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update garment rate'))
+      return sendCaughtError(reply, err, 'Failed to update garment rate')
     }
   }
 
@@ -750,7 +751,7 @@ export class VendorsController {
       await this.service.adminDeleteGarmentRate(id, serviceId, garmentTypeId)
       return reply.send(success(null, 'Garment rate deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete garment rate'))
+      return sendCaughtError(reply, err, 'Failed to delete garment rate')
     }
   }
 
@@ -762,7 +763,7 @@ export class VendorsController {
       await this.service.adminBulkUpsertGarmentRates(id, serviceId, garment_rates)
       return reply.send(success(null, 'Garment rates bulk upsert completed'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to bulk upsert garment rates'))
+      return sendCaughtError(reply, err, 'Failed to bulk upsert garment rates')
     }
   }
 
@@ -771,7 +772,7 @@ export class VendorsController {
       const slots = await this.service.getPickupSlots(request.user.id)
       return reply.send(success(slots, 'Pickup slots fetched successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to fetch pickup slots'))
+      return sendCaughtError(reply, err, 'Failed to fetch pickup slots')
     }
   }
 
@@ -780,7 +781,7 @@ export class VendorsController {
       const slot = await this.service.createPickupSlot(request.user.id, request.body)
       return reply.code(201).send(success(slot, 'Pickup slot created successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create pickup slot'))
+      return sendCaughtError(reply, err, 'Failed to create pickup slot')
     }
   }
 
@@ -790,7 +791,7 @@ export class VendorsController {
       const slot = await this.service.updatePickupSlot(request.user.id, slotId, request.body)
       return reply.send(success(slot, 'Pickup slot updated successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to update pickup slot'))
+      return sendCaughtError(reply, err, 'Failed to update pickup slot')
     }
   }
 
@@ -800,7 +801,7 @@ export class VendorsController {
       await this.service.deletePickupSlot(request.user.id, slotId)
       return reply.send(success(null, 'Pickup slot deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete pickup slot'))
+      return sendCaughtError(reply, err, 'Failed to delete pickup slot')
     }
   }
 
@@ -809,7 +810,7 @@ export class VendorsController {
       const exception = await this.service.createCapacityException(request.user.id, request.body)
       return reply.code(201).send(success(exception, 'Capacity exception created successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to create capacity exception'))
+      return sendCaughtError(reply, err, 'Failed to create capacity exception')
     }
   }
 
@@ -819,7 +820,7 @@ export class VendorsController {
       await this.service.deleteCapacityException(request.user.id, id)
       return reply.send(success(null, 'Capacity exception deleted successfully'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Failed to delete capacity exception'))
+      return sendCaughtError(reply, err, 'Failed to delete capacity exception')
     }
   }
 }

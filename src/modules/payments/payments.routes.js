@@ -2,6 +2,7 @@ import { PaymentsController } from './payments.controller.js'
 import { PaymentsService } from './payments.service.js'
 import { PaymentsRepository } from './payments.repository.js'
 import { captureRawBody } from '../../utils/rawBody.js'
+import { userRateLimit } from '../../middlewares/userRateLimit.js'
 import {
   createPaymentOrderSchema,
   verifyPaymentSchema,
@@ -24,15 +25,17 @@ export default async function paymentsRoutes(fastify) {
   // POST /create-order — Create Razorpay payment order
   fastify.post('/create-order', {
     schema: createPaymentOrderSchema,
-    preHandler: [fastify.authenticate],
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    // Limit follows the ACCOUNT, not the IP: many customers share one mobile-carrier / office IP, and a per-IP
+    // limit would stop honest customers from paying (found in the 2026-11-07 load test).
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'pay-create-order', max: 30, windowSeconds: 60 })],
   }, controller.createPaymentOrder.bind(controller))
 
   // POST /verify — Verify payment signature
   fastify.post('/verify', {
     schema: verifyPaymentSchema,
-    preHandler: [fastify.authenticate],
-    config: { rateLimit: { max: 30, timeWindow: '1 minute' } },
+    // Limit follows the ACCOUNT, not the IP: many customers share one mobile-carrier / office IP, and a per-IP
+    // limit would stop honest customers from paying (found in the 2026-11-07 load test).
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'pay-verify', max: 30, windowSeconds: 60 })],
   }, controller.verifyPayment.bind(controller))
 
   // GET /status — Where does this checkout / payment stand? (polled by the app)
@@ -50,8 +53,9 @@ export default async function paymentsRoutes(fastify) {
         },
       },
     },
-    preHandler: [fastify.authenticate],
-    config: { rateLimit: { max: 120, timeWindow: '1 minute' } },
+    // Limit follows the ACCOUNT, not the IP: many customers share one mobile-carrier / office IP, and a per-IP
+    // limit would stop honest customers from paying (found in the 2026-11-07 load test).
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'pay-status', max: 120, windowSeconds: 60 })],
   }, controller.status.bind(controller))
 
   // GET /history — Payment history
@@ -63,8 +67,9 @@ export default async function paymentsRoutes(fastify) {
   // POST /pay-with-wallet — Pay a draft's advance or an order's balance from wallet
   fastify.post('/pay-with-wallet', {
     schema: payWithWalletSchema,
-    preHandler: [fastify.authenticate],
-    config: { rateLimit: { max: 20, timeWindow: '1 minute' } },
+    // Limit follows the ACCOUNT, not the IP: many customers share one mobile-carrier / office IP, and a per-IP
+    // limit would stop honest customers from paying (found in the 2026-11-07 load test).
+    preHandler: [fastify.authenticate, userRateLimit({ name: 'pay-wallet', max: 20, windowSeconds: 60 })],
   }, controller.payWithWallet.bind(controller))
 
   // ─── Webhook (NO AUTH — verified by Razorpay signature) ────────────

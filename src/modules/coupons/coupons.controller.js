@@ -63,7 +63,7 @@ export class CouponsController {
     const result = await this.service.create(request.body, actor)
 
     if (!result.success) {
-      const httpCode = httpStatusFor(result.code) || 400
+      const httpCode = result.code === 'DUPLICATE' ? 409 : (httpStatusFor(result.code) || 400)
       return reply.code(httpCode).send(error(result.message, result.code || 'DUPLICATE'))
     }
     return reply.code(201).send(success(result.coupon, 'Coupon created'))

@@ -1,4 +1,5 @@
 import { success, error } from '../../../utils/apiResponse.js'
+import { sendCaughtError } from '../../../utils/db-errors.js'
 
 export class AdminOrdersController {
   constructor(service) {
@@ -100,7 +101,7 @@ export class AdminOrdersController {
       )
       return reply.send(success(data, 'Refund processed'))
     } catch (err) {
-      return reply.code(err.statusCode || 500).send(error(err.message || 'Refund failed'))
+      return sendCaughtError(reply, err, 'Refund failed')
     }
   }
 

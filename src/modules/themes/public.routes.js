@@ -2,6 +2,25 @@ import { PublicThemeController } from './public.controller.js'
 
 const ctrl = new PublicThemeController()
 
+/**
+ * The tab home builder still queries tables of a previous product (`categories`, `garment_rates`) that were
+ * renamed or dropped. No LNDRY client calls this endpoint, but it is public, so instead of crashing with a 500
+ * for every request it answers "not available". (A missing table/column is the only case handled here.)
+ */
+function legacyCatalogueGuard(handler) {
+  return async function guarded(request, reply) {
+    try {
+      return await handler(request, reply)
+    } catch (err) {
+      if (err?.code === '42P01' || err?.code === '42703') {
+        request.log.warn({ err: err.message, route: request.routeOptions?.url }, 'Theme home requested but its legacy catalogue tables are missing')
+        return reply.code(404).send({ success: false, message: 'This content is not available', code: 'NOT_AVAILABLE' })
+      }
+      throw err
+    }
+  }
+}
+
 export default async function publicThemeRoutes(fastify) {
   // NO auth hook — this is a public endpoint
   fastify.get('/active', {
@@ -83,7 +102,7 @@ export default async function publicThemeRoutes(fastify) {
         },
       },
     },
-  }, ctrl.getTabHomeContent.bind(ctrl))
+  }, legacyCatalogueGuard(ctrl.getTabHomeContent.bind(ctrl)))
 
   fastify.get('/tabs/:tabKey/sections', {
     schema: {

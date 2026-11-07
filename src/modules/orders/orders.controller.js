@@ -60,7 +60,9 @@ export class OrdersController {
       request.body?.reason
     )
     if (!result.success) {
-      return reply.code(400).send(error(result.message, 'CANCEL_FAILED'))
+      // 404 when the order is not theirs / does not exist; 400 for "cannot cancel in this state" (code kept for old clients)
+      if (result.code === 'ORDER_NOT_FOUND') return reply.code(404).send(error(result.message, 'ORDER_NOT_FOUND'))
+      return reply.code(400).send(error(result.message, result.code === 'CANCEL_NOT_ALLOWED' || result.code === 'ALREADY_CANCELLED' ? result.code : 'CANCEL_FAILED'))
     }
     return reply.send(success(result.order, 'Order cancelled'))
   }

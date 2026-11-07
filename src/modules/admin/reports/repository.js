@@ -274,7 +274,7 @@ export class AdminReportsRepository {
     const offset = (page - 1) * limit
     const { conditions, values, nextIndex } = this._buildFilters(filters)
     const prefixed = conditions.map((c) => c.replace('created_at', 'sp.created_at'))
-    const stockConditions = [...prefixed, 'sp.stock <= 10']
+    const stockConditions = [...prefixed, 'sp.stock_quantity IS NOT NULL', 'sp.stock_quantity <= COALESCE(sp.low_stock_threshold, 10)']
     if (filters.shopIds && filters.shopIds.length > 0) {
       // vendor_id filter already in conditions via _buildFilters, just prefix it
       const idx = stockConditions.findIndex((c) => c.includes('vendor_id'))
@@ -292,12 +292,12 @@ export class AdminReportsRepository {
     const dataResult = await query(
       `SELECT sp.id, sp.vendor_id, s.name as shop_name,
               sp.garment_rate_id, p.name as product_name,
-              sp.stock, sp.price
+              sp.stock_quantity AS stock, sp.price
        FROM vendor_services sp
        JOIN vendors s ON s.id = sp.vendor_id
-       JOIN garment_rates p ON p.id = sp.garment_rate_id
+       JOIN garment_types p ON p.id = sp.garment_rate_id
        ${where}
-       ORDER BY sp.stock ASC
+       ORDER BY sp.stock_quantity ASC
        LIMIT $${nextIndex} OFFSET $${nextIndex + 1}`,
       [...values, limit, offset]
     )
@@ -331,9 +331,13 @@ export class AdminReportsRepository {
     const dataResult = await query(
       `SELECT o.rider_id, u.name AS full_name, u.phone,
               COUNT(o.id) as deliveries,
-              AVG(EXTRACT(EPOCH FROM (o.delivered_at - o.dispatched_at))) as avg_delivery_seconds
+              AVG(EXTRACT(EPOCH FROM (o.delivered_at - ofd.out_at))) FILTER (WHERE o.delivered_at IS NOT NULL AND ofd.out_at IS NOT NULL) as avg_delivery_seconds
        FROM orders o
        JOIN users u ON u.id = o.rider_id
+       LEFT JOIN LATERAL (
+         SELECT MIN(e.timestamp) AS out_at FROM order_events e
+          WHERE e.order_id = o.id AND e.new_status::text = 'OUT_FOR_DELIVERY'
+       ) ofd ON true
        ${where}
        GROUP BY o.rider_id, u.name, u.phone
        ORDER BY deliveries DESC
@@ -356,25 +360,26 @@ export class AdminReportsRepository {
     const prefixed = conditions.map((c) =>
       c.replace('created_at', 'o.created_at').replace('vendor_id', 'o.vendor_id')
     )
-    const couponFilter = 'o.coupon_id IS NOT NULL'
+    const couponFilter = 'cu.coupon_id IS NOT NULL'
     const allConditions = prefixed.length > 0
       ? [...prefixed, couponFilter]
       : [couponFilter]
     const where = `WHERE ${allConditions.join(' AND ')}`
 
     const countResult = await query(
-      `SELECT COUNT(DISTINCT o.coupon_id) as total FROM orders o ${where}`,
+      `SELECT COUNT(DISTINCT cu.coupon_id) as total FROM coupon_usages cu JOIN orders o ON o.id = cu.order_id ${where}`,
       values
     )
 
     const dataResult = await query(
-      `SELECT o.coupon_id, c.code as coupon_code,
-              COUNT(o.id) as usage_count,
-              SUM(o.discount_amount) as total_discount
-       FROM orders o
-       JOIN coupons c ON c.id = o.coupon_id
+      `SELECT cu.coupon_id, c.code as coupon_code,
+              COUNT(cu.id) as usage_count,
+              SUM(cu.discount_amount) as total_discount
+       FROM coupon_usages cu
+       JOIN orders o ON o.id = cu.order_id
+       JOIN coupons c ON c.id = cu.coupon_id
        ${where}
-       GROUP BY o.coupon_id, c.code
+       GROUP BY cu.coupon_id, c.code
        ORDER BY usage_count DESC
        LIMIT $${nextIndex} OFFSET $${nextIndex + 1}`,
       [...values, limit, offset]

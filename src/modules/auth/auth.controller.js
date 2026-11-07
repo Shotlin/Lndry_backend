@@ -289,6 +289,11 @@ export class AuthController {
     const limit = Math.min(parseInt(request.query?.limit, 10) || 20, 100)
 
     const result = await this.service.getMyShops(request.user.id, { page, limit })
-    return reply.code(200).send(success(result, 'Shop assignments fetched'))
+    // Response contract (see myShopsSchema): { vendors, pagination }. It used to return { items, page, limit, total },
+    // which the response schema silently stripped down to an empty object.
+    return reply.code(200).send(success({
+      vendors: result.items,
+      pagination: { page: result.page, limit: result.limit, total: result.total, totalPages: Math.max(1, Math.ceil(result.total / result.limit)) },
+    }, 'Shop assignments fetched'))
   }
 }

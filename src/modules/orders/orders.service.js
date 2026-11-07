@@ -565,22 +565,97 @@ export class OrdersService {
   }
 
   /**
-   * Cancel an order (only if PENDING or CONFIRMED)
+   * Customer cancels an order.
+   *
+   *  - Orders from the current checkout (WAITING_VENDOR_CONFIRMATION, VENDOR_ACCEPTED, ...): allowed while the
+   *    state machine allows CUSTOMER_CANCELLED (i.e. until pickup starts). The advance is refunded automatically
+   *    (wallet credit or gateway refund), the slot place is freed (cancelled orders are not counted) and the
+   *    pending auto-reject timer is removed.
+   *  - Legacy cart orders (PENDING / CONFIRMED): unchanged — stock is restored and the order marked CANCELLED.
+   *
+   * Before this, only the legacy statuses were accepted, so no order created by the current flow could be cancelled.
    */
   async cancel(userId, orderId, reason) {
     const order = await this.repo.findByIdAndUser(orderId, userId)
     if (!order) {
-      return { success: false, message: 'Order not found' }
+      return { success: false, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
     }
 
-    const cancellable = [ORDER_STATUS.PENDING, ORDER_STATUS.CONFIRMED]
-    if (!cancellable.includes(order.status)) {
-      return {
-        success: false,
-        message: `Cannot cancel order in "${order.status}" status`,
+    if ([ORDER_STATUS.PENDING, ORDER_STATUS.CONFIRMED].includes(order.status)) {
+      return this._cancelLegacyOrder(userId, orderId, order, reason)
+    }
+    return this._cancelLifecycleOrder(userId, orderId, reason)
+  }
+
+  async _cancelLifecycleOrder(userId, orderId, reason) {
+    const client = await getClient()
+    let previousStatus
+    try {
+      await client.query('BEGIN')
+      const { rows } = await client.query(
+        `SELECT id, status FROM orders WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+        [orderId, userId]
+      )
+      const locked = rows[0]
+      if (!locked) {
+        await client.query('ROLLBACK')
+        return { success: false, message: 'Order not found', code: 'ORDER_NOT_FOUND' }
       }
+      previousStatus = locked.status
+
+      const transition = validateTransition(locked.status, ORDER_STATUSES.CUSTOMER_CANCELLED, 'CUSTOMER')
+      if (!transition.valid || locked.status === ORDER_STATUSES.CUSTOMER_CANCELLED) {
+        await client.query('ROLLBACK')
+        const already = locked.status === ORDER_STATUSES.CUSTOMER_CANCELLED
+        return {
+          success: false,
+          code: already ? 'ALREADY_CANCELLED' : 'CANCEL_NOT_ALLOWED',
+          message: already
+            ? 'This order is already cancelled'
+            : `This order can no longer be cancelled (status: ${locked.status}). Please contact support.`,
+        }
+      }
+
+      await client.query(
+        `UPDATE orders SET status = $1, cancelled_reason = $2, updated_at = NOW() WHERE id = $3`,
+        [ORDER_STATUSES.CUSTOMER_CANCELLED, reason || 'Cancelled by customer', orderId]
+      )
+      await recordOrderEvent(client, {
+        orderId,
+        oldStatus: previousStatus,
+        newStatus: ORDER_STATUSES.CUSTOMER_CANCELLED,
+        actorId: userId,
+        actorRole: 'CUSTOMER',
+        note: reason || 'Cancelled by customer',
+      })
+      await client.query('COMMIT')
+    } catch (err) {
+      await client.query('ROLLBACK').catch(() => {})
+      throw err
+    } finally {
+      client.release()
     }
 
+    // Everything below runs after the commit and must never undo the cancellation.
+    try {
+      const job = await orderQueue.getJob(`auto-reject-${orderId}`)
+      if (job) await job.remove()
+    } catch (err) {
+      logger.warn({ err: err.message, orderId }, 'Could not remove auto-reject job after customer cancellation')
+    }
+    const { refundOrderOrRetry } = await import('./order-refund.js')
+    await refundOrderOrRetry(orderId, {
+      reason: 'Order cancelled by customer',
+      customerTitle: 'Order cancelled',
+      customerBody: 'Your order was cancelled and your advance payment has been refunded.',
+    })
+
+    logger.info({ orderId, userId, from: previousStatus }, 'Order cancelled by customer')
+    const updated = await this.repo.findByIdAndUser(orderId, userId)
+    return { success: true, order: updated ? await this._enrichCustomerOrder(updated) : { id: orderId, status: ORDER_STATUSES.CUSTOMER_CANCELLED } }
+  }
+
+  async _cancelLegacyOrder(userId, orderId, order, reason) {
     // Restore stock in a transaction
     const client = await getClient()
     try {

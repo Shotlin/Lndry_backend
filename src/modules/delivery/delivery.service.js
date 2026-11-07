@@ -34,7 +34,7 @@ export class DeliveryService {
 
   async getRiderProfile(riderId) {
     const profile = await this.repository.getRiderProfile(riderId)
-    if (!profile) throw new Error('Rider profile not found')
+    if (!profile) throw { statusCode: 404, message: 'Rider profile not found', code: 'RIDER_PROFILE_NOT_FOUND' }
     return profile
   }
 
