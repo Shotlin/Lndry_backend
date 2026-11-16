@@ -490,6 +490,26 @@ export default async function vendorRoutes(fastify) {
     }
   }, controller.adminCreateVendorService.bind(controller))
 
+  // Static paths — registered before /:serviceId so they never get treated as a service id.
+  fastify.get('/admin/:id/services-rates/template', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Download the services & rates Excel template for a vendor [Admin]',
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } }
+    }
+  }, controller.adminExportRatesTemplate.bind(controller))
+
+  fastify.post('/admin/:id/services-rates/import', {
+    preHandler: adminPreHandlers,
+    schema: {
+      tags: ['Admin Vendors'],
+      summary: 'Import a filled services & rates Excel file for a vendor [Admin]',
+      consumes: ['multipart/form-data'],
+      params: { type: 'object', required: ['id'], properties: { id: { type: 'string', format: 'uuid' } } }
+    }
+  }, controller.adminImportRatesSheet.bind(controller))
+
   fastify.get('/admin/:id/services/:serviceId', {
     preHandler: adminPreHandlers,
     schema: {

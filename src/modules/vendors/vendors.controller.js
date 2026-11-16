@@ -767,6 +767,33 @@ export class VendorsController {
     }
   }
 
+  async adminExportRatesTemplate(request, reply) {
+    try {
+      const { buffer, contentType, filename } = await this.service.adminExportRatesTemplate(request.params.id)
+      reply.header('Content-Type', contentType)
+      reply.header('Content-Disposition', `attachment; filename="${filename}"`)
+      return reply.send(Buffer.from(buffer))
+    } catch (err) {
+      return sendCaughtError(reply, err, 'Failed to build the rates template')
+    }
+  }
+
+  async adminImportRatesSheet(request, reply) {
+    const data = await request.file()
+    if (!data) return reply.code(400).send(error('No file provided'))
+    if (!/\.xlsx$/i.test(data.filename || '')) return reply.code(400).send(error('Please upload an .xlsx file'))
+    try {
+      const buffer = await data.toBuffer()
+      const res = await this.service.adminImportRatesSheet(request.params.id, buffer, request.user.id)
+      return reply.send(success(res, 'Rates imported successfully'))
+    } catch (err) {
+      if (err?.errors) {
+        return reply.code(err.statusCode || 422).send({ success: false, message: err.message, code: 'IMPORT_VALIDATION_FAILED', errors: err.errors })
+      }
+      return sendCaughtError(reply, err, 'Failed to import rates')
+    }
+  }
+
   async getPickupSlots(request, reply) {
     try {
       const slots = await this.service.getPickupSlots(request.user.id)
