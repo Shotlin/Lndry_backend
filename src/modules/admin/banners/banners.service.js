@@ -1,6 +1,11 @@
 import { AdminBannersRepository } from './banners.repository.js'
 import { logAdminActivity } from '../../../utils/activityLogger.js'
 import { normalizeCloudinaryDeliveryUrl } from '../../../config/cloudinary.js'
+import { cacheDel } from '../../../utils/cache.js'
+
+/** Public GET /banners is cached under this key; every write below clears it. */
+export const ACTIVE_BANNERS_CACHE_KEY = 'banners:active:v1'
+export const ACTIVE_BANNERS_TTL_S = 60
 
 const repo = new AdminBannersRepository()
 
@@ -26,6 +31,7 @@ export class AdminBannersService {
       endDate: data.endDate,
     }
     const banner = await repo.create(mapped)
+    await cacheDel(ACTIVE_BANNERS_CACHE_KEY)
     logAdminActivity(adminId, 'CREATE_BANNER', 'banner', banner.id, null, null, ip)
     return this._normalizeBanner(banner)
   }
@@ -43,18 +49,21 @@ export class AdminBannersService {
       ...(data.endDate !== undefined && { endDate: data.endDate }),
     }
     const banner = await repo.update(id, mapped)
+    await cacheDel(ACTIVE_BANNERS_CACHE_KEY)
     logAdminActivity(adminId, 'UPDATE_BANNER', 'banner', id, null, null, ip)
     return this._normalizeBanner(banner)
   }
 
   async remove(id, adminId, ip) {
     const ok = await repo.remove(id)
+    await cacheDel(ACTIVE_BANNERS_CACHE_KEY)
     if (ok) logAdminActivity(adminId, 'DELETE_BANNER', 'banner', id, null, null, ip)
     return ok
   }
 
   async reorder(orderedIds, adminId, ip) {
     await repo.reorder(orderedIds)
+    await cacheDel(ACTIVE_BANNERS_CACHE_KEY)
     logAdminActivity(adminId, 'REORDER_BANNERS', 'banner', null, null, { count: orderedIds.length }, ip)
     return true
   }

@@ -1,11 +1,11 @@
 # ─── Stage 1: Install dependencies ─────────────────────
-FROM node:20-alpine AS deps
+FROM node:22-alpine AS deps
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev
 
 # ─── Stage 2: Production image ────────────────────────
-FROM node:20-alpine AS runner
+FROM node:22-alpine AS runner
 WORKDIR /app
 ENV NODE_ENV=production
 
@@ -13,14 +13,14 @@ ENV NODE_ENV=production
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
 # Copy dependencies and source
-COPY --from=deps /app/node_modules ./node_modules
-COPY . .
+COPY --chown=appuser:appgroup --from=deps /app/node_modules ./node_modules
+COPY --chown=appuser:appgroup . .
 
 # Remove dev files
-RUN rm -rf .env .env.example tests/ .github/ .vscode/ *.md
+RUN rm -rf .env .env.example tests/ .github/ .vscode/ *.md \
+    && mkdir -p logs \
+    && chown appuser:appgroup /app logs
 
-# Set ownership
-RUN chown -R appuser:appgroup /app
 USER appuser
 
 # Expose port (matches Fastify listen port)

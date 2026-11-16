@@ -10,6 +10,7 @@ import { OFFERINGS, normalizeOffering, allowedModesFor } from '../vendor-app-mod
 import { cacheDel } from '../../utils/cache.js'
 import { offeringCacheKey } from '../vendor-app-mode/vendor-app-mode.service.js'
 import { setGoogleBusinessForVendor } from './google-business.js'
+import { buildRatesTemplate, importRatesSheet } from './vendor-rates-sheet.js'
 
 // Single source of truth for which onboarding documents block submission —
 // previously duplicated as three separate hardcoded arrays across
@@ -1253,6 +1254,24 @@ export class VendorsService {
   async adminBulkUpsertGarmentRates(id, serviceId, items) {
     const vendorId = await this._requireAdminVendorId(id)
     return this._bulkUpsertGarmentRatesForVendor(vendorId, serviceId, items)
+  }
+
+  async adminExportRatesTemplate(id) {
+    const vendorId = await this._requireAdminVendorId(id)
+    return buildRatesTemplate(vendorId)
+  }
+
+  async adminImportRatesSheet(id, buffer, adminUserId) {
+    const vendorId = await this._requireAdminVendorId(id)
+    const result = await importRatesSheet(vendorId, buffer, adminUserId)
+    emitAudit('vendor_rates_imported', {
+      actor_user_id: adminUserId ?? null,
+      actor_role: 'ADMIN',
+      target_type: 'vendor',
+      target_id: vendorId,
+      after: result
+    })
+    return result
   }
 
   async publishService(userId, serviceId) {
